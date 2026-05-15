@@ -155,16 +155,31 @@ export class MessageList extends HTMLElement {
   }
 
   /**
-   * Append a single message — no re-render. Auto-scrolls to bottom.
+   * Append a single message — no re-render. Sticky-scroll: only follows to
+   * bottom if the user was already at/near the bottom when the message arrived.
+   * If they've scrolled up to read older content, their scroll position is
+   * preserved so the new message lands below the fold without disrupting them.
    * @param {Object} msg
    * @param {string} agentName
    */
   appendMessage(msg, agentName) {
     const emptyMsg = this.querySelector('.thread-empty');
     if (emptyMsg) emptyMsg.remove();
+
+    // Sticky-scroll detection: within STICK_THRESHOLD px of the bottom counts as
+    // "at bottom" and the user wants to follow new messages. Beyond that, they're
+    // reading older content and we must NOT disrupt their scroll position.
+    const STICK_THRESHOLD = 100;
+    const distanceFromBottom = this.scrollHeight - this.scrollTop - this.clientHeight;
+    const wasAtBottom = distanceFromBottom < STICK_THRESHOLD;
+
     const el = buildMessageEl(msg, agentName, this._renderMarkdown);
     this.appendChild(el);
-    this.scrollTop = this.scrollHeight;
+
+    if (wasAtBottom) {
+      this.scrollTop = this.scrollHeight;
+    }
+    // else: message appended below the fold; scroll position preserved.
   }
 
   /** Clear all messages. */
