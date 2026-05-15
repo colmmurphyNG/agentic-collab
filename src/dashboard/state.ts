@@ -24,6 +24,10 @@ export const state = {
   emptyGroups: [],
   drafts: {},
   topicPerAgent: {},
+  // Counterparty filter for the Messages tab per agent.
+  // Values: 'all' (default), 'operator', 'team', or a specific agent name.
+  // Lets the operator separate "tl ↔ me" from "tl ↔ specialists" in tl's thread.
+  counterpartyPerAgent: {},
   editingPersona: false,
   indicators: {},
   pages: [],
