@@ -150,6 +150,41 @@
   }
   .topic-breadcrumbs::-webkit-scrollbar { display: none; }
   .topic-breadcrumbs:empty { display: none; }
+
+  /* Counterparty filter (separates tl↔operator from tl↔team conversations) */
+  .counterparty-filter {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    padding: 4px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-wrap: nowrap;
+  }
+  .counterparty-filter:empty { display: none; }
+  .counterparty-filter .cp-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-right: 4px;
+    white-space: nowrap;
+  }
+  .counterparty-chip {
+    font-size: 11px;
+    padding: 2px 10px;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    border: 1px solid var(--border);
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+  .counterparty-chip:hover { color: var(--text); border-color: var(--text-dim); }
+  .counterparty-chip.active {
+    background: rgba(88,166,255,0.18);
+    color: var(--accent);
+    border-color: var(--accent);
+  }
   .topic-chip {
     font-size: 11px;
     padding: 2px 8px;
