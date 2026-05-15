@@ -890,8 +890,41 @@ route('POST', '/api/pages', async (req, res, _match, ctx) => {
   json(res, 201, page);
 });
 
-route('GET', '/api/pages', async (_req, res, _match, ctx) => {
-  json(res, 200, ctx.db.listPages());
+route('GET', '/api/pages', async (req, res, _match, ctx) => {
+  // Optional ?archived=true to list archived pages instead of active ones.
+  // Default (no param or archived=false) returns active pages — preserves the
+  // existing contract for callers that don't know about the archived flag.
+  const url = new URL(req.url!, `http://${req.headers.host}`);
+  const archived = url.searchParams.get('archived') === 'true';
+  json(res, 200, ctx.db.listPages({ archived }));
+});
+
+/**
+ * Archive or unarchive a published page.
+ *
+ * The page's files stay on disk under pagesDir/<slug>/ — only the DB flag
+ * changes. Archived pages are hidden from the default GET /api/pages listing
+ * but remain reachable via GET /pages/<slug> (callers with the direct URL
+ * can still view).
+ *
+ * Body: { archived?: boolean }   — defaults to true (archive) if omitted.
+ *
+ * Returns: { ok: true, slug, archived } on success, 404 if the slug is unknown.
+ */
+route('POST', '/api/pages/:slug/archive', async (req, res, match, ctx) => {
+  const slug = match.pathname.groups['slug']!;
+  const body = await readJson(req);
+  const archived = body.archived === undefined ? true : !!body.archived;
+
+  const existing = ctx.db.getPage(slug);
+  if (!existing) return json(res, 404, { error: 'Page not found' });
+
+  const updated = ctx.db.setPageArchived(slug, archived);
+  if (!updated) return json(res, 404, { error: 'Page not found' });
+
+  // Broadcast the active pages list so dashboards refresh.
+  ctx.wss.broadcast(JSON.stringify({ type: 'pages_update', pages: ctx.db.listPages() }));
+  json(res, 200, { ok: true, slug, archived });
 });
 
 route('DELETE', '/api/pages/:slug', async (_req, res, match, ctx) => {

@@ -1,7 +1,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Database } from './database.ts';
@@ -1143,5 +1143,175 @@ describe('routeTelegramMessage — inbound routing', () => {
     const leadPending = db.listPendingMessages('team-lead');
     assert.equal(devPending.length, 1, 'explicitly-tagged agent should receive the message');
     assert.equal(leadPending.length, 0, 'defaultAgent should NOT receive the message when override is present');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pages archive feature
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('API Routes — Pages archive', () => {
+  let server: Server;
+  let db: Database;
+  let wss: WebSocketServer;
+  let port: number;
+  let tmpDir: string;
+
+  before(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'agentic-pages-archive-routes-'));
+    db = new Database(join(tmpDir, 'test.db'));
+    wss = new WebSocketServer();
+
+    const mockProxyDispatch = async (_proxyId: string, _command: ProxyCommand): Promise<ProxyResponse> => ({ ok: true });
+    const locks = new LockManager(db.rawDb);
+
+    const ctx: RouteContext = {
+      db,
+      wss,
+      locks,
+      proxyDispatch: mockProxyDispatch,
+      getDashboardHtml: () => '<html></html>',
+      orchestratorHost: 'http://localhost:3000',
+      orchestratorSecret: null,
+      messageDispatcher: makeTestDispatcher(db, locks, mockProxyDispatch),
+      usagePoller: { getUsageData: () => ({}), pollNow: async () => {} } as any,
+      voiceEnabled: false,
+      accountStore: new AccountStore({ accountsDir: join(tmpDir, 'accounts'), agentHomesDir: join(tmpDir, 'agent-homes'), skipAutoRegister: true }),
+      telegramDispatcher: makeStubTelegramDispatcher(),
+      pagesDir: join(tmpDir, 'pages'),
+      storesDir: join(tmpDir, 'stores'),
+    };
+
+    const router = createRouter(ctx);
+    server = createServer(async (req, res) => { await router(req, res); });
+    await new Promise<void>((resolve) => {
+      server.listen(0, () => {
+        const addr = server.address();
+        port = typeof addr === 'object' && addr ? addr.port : 0;
+        resolve();
+      });
+    });
+  });
+
+  after(() => {
+    wss.close();
+    server.close();
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  async function api(method: string, path: string, body?: unknown): Promise<{ status: number; data: unknown }> {
+    const resp = await fetch(`http://localhost:${port}${path}`, {
+      method,
+      headers: body ? { 'content-type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await resp.json();
+    return { status: resp.status, data };
+  }
+
+  /** Helper: seed a page directly via the DB (bypasses POST /api/pages tar/file-stream complexity). */
+  function seed(slug: string, agent = 'tl'): void {
+    db.createPage({ slug, agent, fileCount: 1, totalBytes: 100 });
+  }
+
+  it('GET /api/pages defaults to active pages only (archived hidden)', async () => {
+    seed('default-active');
+    seed('default-archived');
+    db.setPageArchived('default-archived', true);
+
+    const { status, data } = await api('GET', '/api/pages');
+    assert.equal(status, 200);
+    const slugs = (data as Array<{ slug: string }>).map((p) => p.slug);
+    assert.ok(slugs.includes('default-active'));
+    assert.ok(!slugs.includes('default-archived'), 'archived page must not appear in default listing');
+  });
+
+  it('GET /api/pages?archived=true returns only archived pages', async () => {
+    seed('q-active');
+    seed('q-archived');
+    db.setPageArchived('q-archived', true);
+
+    const { status, data } = await api('GET', '/api/pages?archived=true');
+    assert.equal(status, 200);
+    const pages = data as Array<{ slug: string; archived: boolean }>;
+    const slugs = pages.map((p) => p.slug);
+    assert.ok(slugs.includes('q-archived'));
+    assert.ok(!slugs.includes('q-active'));
+    assert.ok(pages.every((p) => p.archived === true), 'all returned pages must have archived=true');
+  });
+
+  it('POST /api/pages/:slug/archive with {archived:true} flips the flag', async () => {
+    seed('to-flip');
+    const { status, data } = await api('POST', '/api/pages/to-flip/archive', { archived: true });
+    assert.equal(status, 200);
+    assert.equal((data as Record<string, unknown>).ok, true);
+    assert.equal((data as Record<string, unknown>).slug, 'to-flip');
+    assert.equal((data as Record<string, unknown>).archived, true);
+    assert.equal(db.getPage('to-flip')!.archived, true);
+  });
+
+  it('POST /api/pages/:slug/archive with no body defaults to archive=true', async () => {
+    seed('default-true');
+    const { status, data } = await api('POST', '/api/pages/default-true/archive', {});
+    assert.equal(status, 200);
+    assert.equal((data as Record<string, unknown>).archived, true);
+    assert.equal(db.getPage('default-true')!.archived, true);
+  });
+
+  it('POST /api/pages/:slug/archive with {archived:false} unarchives', async () => {
+    seed('to-unarchive');
+    db.setPageArchived('to-unarchive', true);
+    assert.equal(db.getPage('to-unarchive')!.archived, true);
+
+    const { status, data } = await api('POST', '/api/pages/to-unarchive/archive', { archived: false });
+    assert.equal(status, 200);
+    assert.equal((data as Record<string, unknown>).archived, false);
+    assert.equal(db.getPage('to-unarchive')!.archived, false);
+  });
+
+  it('POST /api/pages/:slug/archive returns 404 for an unknown slug', async () => {
+    const { status, data } = await api('POST', '/api/pages/no-such-slug/archive', { archived: true });
+    assert.equal(status, 404);
+    assert.match((data as { error: string }).error, /not found/i);
+  });
+
+  it('archive then list: archived page disappears from default GET /api/pages', async () => {
+    seed('hide-after-archive');
+    const { data: before } = await api('GET', '/api/pages');
+    const slugsBefore = (before as Array<{ slug: string }>).map((p) => p.slug);
+    assert.ok(slugsBefore.includes('hide-after-archive'));
+
+    await api('POST', '/api/pages/hide-after-archive/archive', { archived: true });
+
+    const { data: after } = await api('GET', '/api/pages');
+    const slugsAfter = (after as Array<{ slug: string }>).map((p) => p.slug);
+    assert.ok(!slugsAfter.includes('hide-after-archive'), 'archived page should be hidden from active listing');
+  });
+
+  it('unarchive: archived page re-appears in default GET /api/pages', async () => {
+    seed('show-after-unarchive');
+    await api('POST', '/api/pages/show-after-unarchive/archive', { archived: true });
+    const { data: hidden } = await api('GET', '/api/pages');
+    assert.ok(!(hidden as Array<{ slug: string }>).map((p) => p.slug).includes('show-after-unarchive'));
+
+    await api('POST', '/api/pages/show-after-unarchive/archive', { archived: false });
+    const { data: shown } = await api('GET', '/api/pages');
+    assert.ok((shown as Array<{ slug: string }>).map((p) => p.slug).includes('show-after-unarchive'));
+  });
+
+  it('archive does NOT touch the page files on disk (reversible)', async () => {
+    const pagesDir = join(tmpDir, 'pages');
+    const slug = 'files-preserved';
+    seed(slug);
+    const slugDir = join(pagesDir, slug);
+    mkdirSync(slugDir, { recursive: true });
+    writeFileSync(join(slugDir, 'index.md'), '# preserved\n');
+
+    await api('POST', `/api/pages/${slug}/archive`, { archived: true });
+
+    assert.ok(existsSync(join(slugDir, 'index.md')), 'page files must not be removed on archive');
+    await api('POST', `/api/pages/${slug}/archive`, { archived: false });
+    assert.ok(existsSync(join(slugDir, 'index.md')), 'page files must not be removed on unarchive either');
   });
 });
