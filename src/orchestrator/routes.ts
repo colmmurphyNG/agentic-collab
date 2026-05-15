@@ -768,11 +768,65 @@ const MIME_TYPES: Record<string, string> = {
   '.gif': 'image/gif', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
   '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf',
   '.pdf': 'application/pdf', '.txt': 'text/plain', '.xml': 'application/xml',
+  '.md': 'text/markdown',
 };
 
 function pageMime(filePath: string): string {
   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
   return MIME_TYPES[ext] ?? 'application/octet-stream';
+}
+
+/** Wrap rendered markdown in a minimal, readable HTML page (no docs nav). */
+function wrapMarkdownPage(title: string, bodyHtml: string): string {
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${esc(title)}</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { max-width: 820px; margin: 2rem auto; padding: 0 1.25rem;
+           font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+           color: #1f2328; background: #fff; }
+    @media (prefers-color-scheme: dark) {
+      body { color: #e6edf3; background: #0d1117; }
+      a { color: #58a6ff; }
+      code, pre { background: #161b22 !important; }
+      table th, table td { border-color: #30363d !important; }
+      hr { border-color: #30363d !important; }
+    }
+    h1, h2, h3, h4, h5, h6 { margin: 1.5em 0 0.5em; line-height: 1.25; }
+    h1 { font-size: 2em; border-bottom: 1px solid #d0d7de; padding-bottom: 0.3em; }
+    h2 { font-size: 1.5em; border-bottom: 1px solid #d0d7de; padding-bottom: 0.3em; }
+    p, ul, ol, table, pre { margin: 0.8em 0; }
+    a { color: #0969da; }
+    code { background: #f6f8fa; padding: 0.2em 0.4em; border-radius: 3px; font-size: 85%;
+           font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+    pre { background: #f6f8fa; padding: 1em; border-radius: 6px; overflow-x: auto; }
+    pre code { background: transparent; padding: 0; font-size: 100%; }
+    table { border-collapse: collapse; }
+    table th, table td { border: 1px solid #d0d7de; padding: 6px 12px; }
+    table th { background: #f6f8fa; font-weight: 600; }
+    blockquote { border-left: 4px solid #d0d7de; margin: 1em 0; padding: 0 1em; color: #656d76; }
+    hr { border: none; border-top: 1px solid #d0d7de; margin: 2em 0; }
+    img { max-width: 100%; }
+  </style>
+</head>
+<body>
+${bodyHtml}
+</body>
+</html>`;
+}
+
+/** Render a .md file as a full HTML page using the existing renderMarkdown utility. */
+function serveMarkdownAsHtml(res: ServerResponse, filePath: string, title: string): void {
+  const md = readFileSync(filePath, 'utf-8');
+  const bodyHtml = renderMarkdown(md);
+  const html = wrapMarkdownPage(title, bodyHtml);
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(html);
 }
 
 /** Recursively count files and total bytes in a directory. */
@@ -853,27 +907,39 @@ route('DELETE', '/api/pages/:slug', async (_req, res, match, ctx) => {
 // Public page serving (no auth)
 route('GET', '/pages/:slug', async (_req, res, match, ctx) => {
   const slug = match.pathname.groups['slug']!;
-  const indexPath = join(ctx.pagesDir, slug, 'index.html');
-  if (!existsSync(indexPath)) {
-    // Try listing files if no index.html
-    const pageDir = join(ctx.pagesDir, slug);
-    if (!existsSync(pageDir)) return json(res, 404, { error: 'Page not found' });
-    const files = readdirSync(pageDir);
-    if (files.length === 1) {
-      // Single file — serve it directly
-      const filePath = join(pageDir, files[0]!);
-      res.writeHead(200, { 'Content-Type': pageMime(filePath) });
-      res.end(readFileSync(filePath));
-      return;
-    }
-    // List files as simple HTML
-    const links = files.map(f => `<li><a href="/pages/${slug}/${f}">${f}</a></li>`).join('');
+  const pageDir = join(ctx.pagesDir, slug);
+  const indexHtmlPath = join(pageDir, 'index.html');
+  const indexMdPath = join(pageDir, 'index.md');
+
+  // Prefer index.html (backward-compatible with existing pages).
+  if (existsSync(indexHtmlPath)) {
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(`<!DOCTYPE html><html><head><title>${slug}</title></head><body><h1>${slug}</h1><ul>${links}</ul></body></html>`);
+    res.end(readFileSync(indexHtmlPath));
     return;
   }
+  // Fall back to index.md, rendered as HTML.
+  if (existsSync(indexMdPath)) {
+    serveMarkdownAsHtml(res, indexMdPath, slug);
+    return;
+  }
+  // No index — list files (or single-file fallback).
+  if (!existsSync(pageDir)) return json(res, 404, { error: 'Page not found' });
+  const files = readdirSync(pageDir);
+  if (files.length === 1) {
+    const filePath = join(pageDir, files[0]!);
+    if (filePath.toLowerCase().endsWith('.md')) {
+      serveMarkdownAsHtml(res, filePath, `${slug}/${files[0]}`);
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': pageMime(filePath) });
+    res.end(readFileSync(filePath));
+    return;
+  }
+  // Hide macOS resource-fork sidecar files (._*) and hidden dotfiles from the listing.
+  const visibleFiles = files.filter(f => !f.startsWith('.') && !f.startsWith('._'));
+  const links = visibleFiles.map(f => `<li><a href="/pages/${slug}/${f}">${f}</a></li>`).join('');
   res.writeHead(200, { 'Content-Type': 'text/html' });
-  res.end(readFileSync(indexPath));
+  res.end(`<!DOCTYPE html><html><head><title>${slug}</title></head><body><h1>${slug}</h1><ul>${links}</ul></body></html>`);
 });
 
 route('GET', '/pages/:slug/:path+', async (_req, res, match, ctx) => {
@@ -882,6 +948,12 @@ route('GET', '/pages/:slug/:path+', async (_req, res, match, ctx) => {
   if (filePath.includes('..')) return json(res, 400, { error: 'Invalid path' });
   const fullPath = join(ctx.pagesDir, slug, filePath);
   if (!existsSync(fullPath)) return json(res, 404, { error: 'File not found' });
+
+  // Render .md files as HTML so they display in the browser (instead of downloading).
+  if (filePath.toLowerCase().endsWith('.md')) {
+    serveMarkdownAsHtml(res, fullPath, `${slug}/${filePath}`);
+    return;
+  }
   res.writeHead(200, { 'Content-Type': pageMime(fullPath) });
   res.end(readFileSync(fullPath));
 });
