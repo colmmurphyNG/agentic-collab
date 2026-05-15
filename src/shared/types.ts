@@ -104,6 +104,7 @@ export type PageRecord = {
   agent: string | null;
   fileCount: number;
   totalBytes: number;
+  archived: boolean;
   createdAt: string;
   updatedAt: string;
 };

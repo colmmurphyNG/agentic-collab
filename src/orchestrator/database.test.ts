@@ -914,4 +914,139 @@ describe('Database', () => {
       assert.notEqual(after, '2020-01-01T00:00:00Z');
     });
   });
+
+  describe('pages — archived flag', () => {
+    let pDb: Database;
+    let pTmpDir: string;
+
+    before(() => {
+      pTmpDir = mkdtempSync(join(tmpdir(), 'agentic-pages-archive-test-'));
+      pDb = new Database(join(pTmpDir, 'pages.db'));
+    });
+
+    after(() => {
+      pDb.close();
+      rmSync(pTmpDir, { recursive: true, force: true });
+    });
+
+    it('migrates: pages table has an `archived` column on a fresh DB', () => {
+      const cols = pDb.rawDb.prepare('PRAGMA table_info(pages)').all() as Array<{ name: string }>;
+      assert.ok(cols.some((c) => c.name === 'archived'), 'pages table must have an archived column');
+    });
+
+    it('createPage defaults to archived=false', () => {
+      pDb.createPage({ slug: 'fresh', agent: 'tl', fileCount: 1, totalBytes: 100 });
+      const page = pDb.getPage('fresh');
+      assert.ok(page);
+      assert.equal(page!.archived, false);
+    });
+
+    it('setPageArchived(slug, true) flips archived to true and returns true', () => {
+      pDb.createPage({ slug: 'to-archive', agent: 'tl', fileCount: 1, totalBytes: 50 });
+      const result = pDb.setPageArchived('to-archive', true);
+      assert.equal(result, true);
+      const page = pDb.getPage('to-archive');
+      assert.equal(page!.archived, true);
+    });
+
+    it('setPageArchived(slug, false) unarchives and returns true', () => {
+      pDb.createPage({ slug: 'to-unarchive', agent: 'tl', fileCount: 1, totalBytes: 25 });
+      pDb.setPageArchived('to-unarchive', true);
+      assert.equal(pDb.getPage('to-unarchive')!.archived, true);
+      const result = pDb.setPageArchived('to-unarchive', false);
+      assert.equal(result, true);
+      assert.equal(pDb.getPage('to-unarchive')!.archived, false);
+    });
+
+    it('setPageArchived on unknown slug returns false (no row updated)', () => {
+      const result = pDb.setPageArchived('does-not-exist', true);
+      assert.equal(result, false);
+    });
+
+    it('listPages() with no arg returns only active (non-archived) pages by default', () => {
+      // Fresh DB scope to avoid pollution from earlier tests in this describe block.
+      const localDir = mkdtempSync(join(tmpdir(), 'agentic-pages-listdefault-'));
+      const localDb = new Database(join(localDir, 'list.db'));
+      try {
+        localDb.createPage({ slug: 'active-1', agent: 'tl', fileCount: 1, totalBytes: 10 });
+        localDb.createPage({ slug: 'archived-1', agent: 'tl', fileCount: 1, totalBytes: 10 });
+        localDb.setPageArchived('archived-1', true);
+
+        const pages = localDb.listPages();
+        const slugs = pages.map((p) => p.slug);
+        assert.ok(slugs.includes('active-1'), 'active page should be listed');
+        assert.ok(!slugs.includes('archived-1'), 'archived page should NOT be listed in default view');
+      } finally {
+        localDb.close();
+        rmSync(localDir, { recursive: true, force: true });
+      }
+    });
+
+    it('listPages({ archived: true }) returns ONLY archived pages', () => {
+      const localDir = mkdtempSync(join(tmpdir(), 'agentic-pages-listarch-'));
+      const localDb = new Database(join(localDir, 'list.db'));
+      try {
+        localDb.createPage({ slug: 'a-active', agent: 'tl', fileCount: 1, totalBytes: 10 });
+        localDb.createPage({ slug: 'a-archived', agent: 'tl', fileCount: 1, totalBytes: 10 });
+        localDb.setPageArchived('a-archived', true);
+
+        const archivedPages = localDb.listPages({ archived: true });
+        const slugs = archivedPages.map((p) => p.slug);
+        assert.deepEqual(slugs, ['a-archived']);
+        assert.equal(archivedPages[0]!.archived, true);
+      } finally {
+        localDb.close();
+        rmSync(localDir, { recursive: true, force: true });
+      }
+    });
+
+    it('listPages({ archived: false }) explicitly returns only active pages (equivalent to default)', () => {
+      const localDir = mkdtempSync(join(tmpdir(), 'agentic-pages-listactive-'));
+      const localDb = new Database(join(localDir, 'list.db'));
+      try {
+        localDb.createPage({ slug: 'b-active', agent: 'tl', fileCount: 1, totalBytes: 10 });
+        localDb.createPage({ slug: 'b-archived', agent: 'tl', fileCount: 1, totalBytes: 10 });
+        localDb.setPageArchived('b-archived', true);
+
+        const activePages = localDb.listPages({ archived: false });
+        const slugs = activePages.map((p) => p.slug);
+        assert.deepEqual(slugs, ['b-active']);
+      } finally {
+        localDb.close();
+        rmSync(localDir, { recursive: true, force: true });
+      }
+    });
+
+    it('archive flag survives createPage upsert (preserves existing flag)', () => {
+      const localDir = mkdtempSync(join(tmpdir(), 'agentic-pages-upsert-'));
+      const localDb = new Database(join(localDir, 'list.db'));
+      try {
+        localDb.createPage({ slug: 'upsertable', agent: 'tl', fileCount: 1, totalBytes: 10 });
+        localDb.setPageArchived('upsertable', true);
+        assert.equal(localDb.getPage('upsertable')!.archived, true);
+        // Re-publishing the same slug updates content but should NOT touch archived flag.
+        localDb.createPage({ slug: 'upsertable', agent: 'tl', fileCount: 3, totalBytes: 200 });
+        const after = localDb.getPage('upsertable')!;
+        assert.equal(after.fileCount, 3, 'fileCount should update on upsert');
+        assert.equal(after.archived, true, 'archived flag should be preserved across upsert');
+      } finally {
+        localDb.close();
+        rmSync(localDir, { recursive: true, force: true });
+      }
+    });
+
+    it('deletePage removes both active and archived pages', () => {
+      const localDir = mkdtempSync(join(tmpdir(), 'agentic-pages-delete-'));
+      const localDb = new Database(join(localDir, 'list.db'));
+      try {
+        localDb.createPage({ slug: 'deletable', agent: 'tl', fileCount: 1, totalBytes: 10 });
+        localDb.setPageArchived('deletable', true);
+        assert.equal(localDb.deletePage('deletable'), true);
+        assert.equal(localDb.getPage('deletable'), null);
+      } finally {
+        localDb.close();
+        rmSync(localDir, { recursive: true, force: true });
+      }
+    });
+  });
 });
