@@ -40,6 +40,72 @@ export function setActiveTopic(topic) {
   if (state.selected) state.topicPerAgent[state.selected] = topic;
 }
 
+// ── Counterparty Filter State ──
+// Lets the operator separate conversations in the Messages tab. For example,
+// on the `tl` agent's view, "Operator" shows only tl↔you messages and "Team"
+// shows only tl↔specialist messages. Operates as a client-side filter over
+// state.threads[agent] — the underlying data is unchanged.
+
+const COUNTERPARTY_OPTIONS = [
+  { value: 'all',      label: 'All' },
+  { value: 'operator', label: 'Operator' },
+  { value: 'team',     label: 'Team' },
+];
+
+export function getActiveCounterparty() {
+  if (!state.selected) return 'all';
+  return state.counterpartyPerAgent[state.selected] || 'all';
+}
+
+export function setActiveCounterparty(value) {
+  if (state.selected) state.counterpartyPerAgent[state.selected] = value;
+}
+
+/** Determine the "other party" of a message relative to the selected agent. */
+function counterpartyOf(msg) {
+  // Dashboard messages from the operator come in with sourceAgent='dashboard'
+  // (or null when the agent is sending back to the dashboard thread).
+  if (msg.direction === 'to_agent') return msg.sourceAgent || 'dashboard';
+  return msg.targetAgent || 'dashboard';
+}
+
+/** Filter predicate: does this message belong in the current counterparty view? */
+export function messageMatchesCounterparty(msg, filterValue, selectedAgent) {
+  if (!filterValue || filterValue === 'all') return true;
+  const cp = counterpartyOf(msg);
+  if (filterValue === 'operator') {
+    return cp === 'dashboard' || cp === 'operator';
+  }
+  if (filterValue === 'team') {
+    // Anyone that isn't the operator (and isn't this agent itself).
+    return cp !== 'dashboard' && cp !== 'operator' && cp !== selectedAgent;
+  }
+  // Specific agent name match (e.g. filterValue === 'pwa').
+  return cp === filterValue;
+}
+
+/** Render the counterparty filter chips above the topic breadcrumbs. */
+function renderCounterpartyFilter() {
+  const container = document.getElementById('counterpartyFilter');
+  if (!state.selected) { container.innerHTML = ''; return; }
+  const active = getActiveCounterparty();
+  const labelHtml = `<span class="cp-label">View:</span>`;
+  const chipsHtml = COUNTERPARTY_OPTIONS.map(opt =>
+    `<button class="counterparty-chip${opt.value === active ? ' active' : ''}" data-cp="${opt.value}">${esc(opt.label)}</button>`
+  ).join('');
+  container.innerHTML = labelHtml + chipsHtml;
+}
+
+document.getElementById('counterpartyFilter').addEventListener('click', (e) => {
+  const target = e.target;
+  if (!target || target.tagName !== 'BUTTON') return;
+  const value = target.dataset.cp;
+  if (!value) return;
+  setActiveCounterparty(value);
+  renderThread();
+  pushUrlState();
+});
+
 // ── Topic Breadcrumbs ──
 
 function renderTopicBreadcrumbs() {
@@ -204,6 +270,7 @@ export function renderThread() {
     watchPanel.style.display = 'none';
     input.style.display = 'none';
     document.getElementById('topicBreadcrumbs').style.display = 'none';
+    document.getElementById('counterpartyFilter').style.display = 'none';
     return;
   }
 
@@ -323,6 +390,9 @@ export function renderThread() {
   const breadcrumbs = document.getElementById('topicBreadcrumbs');
   breadcrumbs.style.display = view === 'messages' ? 'flex' : 'none';
   renderTopicBreadcrumbs();
+  const cpFilter = document.getElementById('counterpartyFilter');
+  cpFilter.style.display = view === 'messages' ? 'flex' : 'none';
+  renderCounterpartyFilter();
 
   if (view === 'persona') {
     renderPersona();
@@ -344,7 +414,11 @@ export function renderThread() {
     return;
   }
 
-  const thread = state.threads[state.selected] || [];
+  const fullThread = state.threads[state.selected] || [];
+  const cpFilterValue = getActiveCounterparty();
+  const thread = cpFilterValue === 'all'
+    ? fullThread
+    : fullThread.filter(m => messageMatchesCounterparty(m, cpFilterValue, state.selected));
   messages.setMarkdownRenderer(renderMarkdown);
   messages.loadThread(thread, state.selected);
 }
