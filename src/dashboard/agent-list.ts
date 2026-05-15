@@ -21,6 +21,7 @@ import { agentAction, openCreateAgentModal } from '/dashboard/assets/agent-lifec
 import { icon } from '/dashboard/assets/icons.ts';
 import { pushUrlState } from '/dashboard/assets/url-state.ts';
 import { voiceState, stopVoice } from '/dashboard/assets/voice-palette.ts';
+import { getActiveCounterparty, messageMatchesCounterparty } from '/dashboard/assets/thread.ts';
 
 // ── Dependencies injected via setup() ──
 let _renderThread = () => {};
@@ -85,9 +86,16 @@ export function addMessage(msg) {
   }
   thread.push(msg);
   if (state.selected === msg.agent && state.threadView === 'messages') {
-    // Append single message via component — no full re-render
-    const messages = document.getElementById('threadMessages');
-    messages.appendMessage(msg, msg.agent);
+    // Append single message via component — no full re-render.
+    // Respect the active counterparty filter: if the new message doesn't
+    // match the current view (e.g. operator-only view, but this is a
+    // team-coordination message), skip the append. The data is still in
+    // state.threads[agent] and will surface if the filter is changed.
+    const cpFilter = getActiveCounterparty();
+    if (messageMatchesCounterparty(msg, cpFilter, msg.agent)) {
+      const messages = document.getElementById('threadMessages');
+      messages.appendMessage(msg, msg.agent);
+    }
   } else if (state.selected !== msg.agent) {
     // Track unread for non-selected agents
     state.unread[msg.agent] = (state.unread[msg.agent] || 0) + 1;
