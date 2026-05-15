@@ -50,6 +50,57 @@
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
+  .profile-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .page-toggle {
+    font-size: 11px;
+    padding: 2px 10px;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    border: 1px solid var(--border);
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .page-toggle:hover { color: var(--text); border-color: var(--text-dim); }
+  /* Each Published Pages card is now a row: link + archive button */
+  .profile-section .profile-card[data-page-slug] {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .profile-card-link {
+    flex: 1;
+    text-decoration: none;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .profile-card-link .profile-card-title { color: var(--accent); }
+  .page-archive-btn {
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    border: 1px solid var(--border);
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+    flex-shrink: 0;
+  }
+  .page-archive-btn:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
+    background: var(--bg);
+  }
+  .page-archive-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .profile-card {
     background: var(--surface);
     border: 1px solid var(--border);

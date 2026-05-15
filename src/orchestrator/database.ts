@@ -223,6 +223,12 @@ export class Database {
       this.db.exec('ALTER TABLE engine_configs ADD COLUMN hook_reload TEXT');
     }
 
+    // Add archived column to pages if not present.
+    const pageCols = this.db.prepare('PRAGMA table_info(pages)').all() as Array<Record<string, unknown>>;
+    if (!pageCols.some((c) => c['name'] === 'archived')) {
+      this.db.exec('ALTER TABLE pages ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
+    }
+
     // Create reminders table
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS reminders (
@@ -985,9 +991,24 @@ export class Database {
     return mapPageRow(row);
   }
 
-  listPages(): PageRecord[] {
-    const rows = this.db.prepare('SELECT * FROM pages ORDER BY updated_at DESC').all() as Array<Record<string, unknown>>;
+  listPages(opts: { archived?: boolean } = {}): PageRecord[] {
+    // Default behavior: return only non-archived (active) pages. Pass
+    // { archived: true } to get only archived; { archived: undefined } via an
+    // explicit cast is treated as "active only" to preserve the existing API
+    // contract for callers that don't pass anything.
+    const archivedFilter = opts.archived === true ? 1 : 0;
+    const rows = this.db.prepare(
+      'SELECT * FROM pages WHERE archived = ? ORDER BY updated_at DESC'
+    ).all(archivedFilter) as Array<Record<string, unknown>>;
     return rows.map(mapPageRow);
+  }
+
+  /** Toggle the archived flag on a page. Returns true if a row was updated. */
+  setPageArchived(slug: string, archived: boolean): boolean {
+    const result = this.db.prepare(
+      "UPDATE pages SET archived = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE slug = ?"
+    ).run(archived ? 1 : 0, slug);
+    return result.changes > 0;
   }
 
   deletePage(slug: string): boolean {
@@ -1212,6 +1233,7 @@ function mapPageRow(row: Record<string, unknown>): PageRecord {
     agent: (row['agent'] as string | null) ?? null,
     fileCount: (row['file_count'] as number) ?? 0,
     totalBytes: (row['total_bytes'] as number) ?? 0,
+    archived: ((row['archived'] as number) ?? 0) === 1,
     createdAt: row['created_at'] as string,
     updatedAt: row['updated_at'] as string,
   };
