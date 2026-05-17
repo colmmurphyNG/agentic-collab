@@ -6,7 +6,7 @@
  */
 
 import { readFileSync, readdirSync, realpathSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { join, resolve, relative, isAbsolute } from 'node:path';
+import { join, resolve, relative, isAbsolute, dirname, basename } from 'node:path';
 import type { StructuredHook, HookValue, SendAction, LaunchEnv, PipelineStep, IndicatorDefinition } from '../shared/types.ts';
 
 export const PERSONAS_DIR = process.env['PERSONAS_DIR'] ?? join(process.env['HOME'] ?? '/data', 'persistent-agents');
@@ -792,13 +792,57 @@ export function resolvePersonaPath(agentName: string, explicitPath?: string | nu
 }
 
 /**
+ * Filename for the optional shared base persona. When present in the
+ * personas directory, its body is prepended to every other persona's body
+ * at load time, so universal rules (scratch-file conventions, PR-doc
+ * lifecycle, Confluence MCP, etc.) flow to every agent without each persona
+ * file having to restate them.
+ *
+ * A persona opts out by setting `inherit_default: false` in its YAML
+ * frontmatter. The file itself is not loaded recursively when read directly.
+ */
+export const DEFAULT_PERSONA_FILENAME = '_default.md';
+
+/**
  * Load persona content from file. Returns the body (frontmatter stripped).
+ *
+ * If a sibling `_default.md` exists in the same directory and the loaded
+ * persona has not opted out via `inherit_default: false`, the default body
+ * is prepended (separated by a horizontal rule) so universal rules flow to
+ * every agent transparently. Missing `_default.md` is tolerated; behaviour
+ * matches the pre-inheritance contract in that case.
  */
 export function loadPersona(path: string): string | null {
   try {
     const raw = readFileSync(path, 'utf-8');
-    const { body } = parseFrontmatter(raw);
-    return body || null;
+    const { frontmatter, body } = parseFrontmatter(raw);
+    if (!body) return null;
+
+    // Don't recurse if we're loading _default.md itself.
+    if (basename(path) === DEFAULT_PERSONA_FILENAME) {
+      return body;
+    }
+
+    // Opt-out: `inherit_default: false` in frontmatter. The flat-scalar
+    // parser stores values as strings, so accept the string form too.
+    const inheritFlag = frontmatter['inherit_default'];
+    if (inheritFlag === false || inheritFlag === 'false') {
+      return body;
+    }
+
+    // Try to prepend the sibling _default.md body.
+    try {
+      const defaultPath = join(dirname(path), DEFAULT_PERSONA_FILENAME);
+      const defaultRaw = readFileSync(defaultPath, 'utf-8');
+      const { body: defaultBody } = parseFrontmatter(defaultRaw);
+      if (defaultBody) {
+        return `${defaultBody}\n\n---\n\n${body}`;
+      }
+    } catch {
+      // No _default.md beside this persona — fine, no inheritance applied.
+    }
+
+    return body;
   } catch {
     return null;
   }
