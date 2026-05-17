@@ -7,7 +7,7 @@
 # Examples:
 #   ./scripts/scale-down.sh dev-a
 #   ./scripts/scale-down.sh dev-a --keep-branch     # remove worktree + persona, keep the git branch
-#   ./scripts/scale-down.sh dev-a --force            # discard uncommitted changes in the worktree
+#   ./scripts/scale-down.sh dev-a --force            # discard uncommitted changes AND ignore destroy-API failure
 #
 # What it does:
 #   1. POSTs /api/agents/<name>/destroy on the orchestrator. This:
@@ -19,6 +19,11 @@
 #
 # Safety:
 #   - Refuses to run if the worktree has uncommitted changes (use --force to override).
+#   - Refuses to proceed if the destroy API returns a non-2xx status (HTTP 000 / 5xx) — leaving the
+#     orchestrator's DB out of sync with on-disk teardown is the silent-failure pattern we want to
+#     avoid. Pass --force to bypass and clean up the worktree anyway (you accept a stale DB row).
+#   - HTTP 404 is treated as success (the agent was already destroyed; teardown is idempotent).
+#   - When no orchestrator secret is configured, the destroy API call is skipped entirely (test mode).
 #   - Always preserves remote branches and pushed commits.
 
 set -euo pipefail
@@ -109,7 +114,7 @@ if [ -f "$SECRET_FILE" ]; then
   SECRET="$(cat "$SECRET_FILE")"
 fi
 
-PORT="${ORCHESTRATOR_PORT:-3000}"
+PORT="${ORCHESTRATOR_PORT:-3001}"
 ORCHESTRATOR_URL="${ORCHESTRATOR_URL:-http://localhost:${PORT}}"
 
 if [ -n "$SECRET" ]; then
@@ -118,10 +123,35 @@ if [ -n "$SECRET" ]; then
     -X POST -H "Authorization: Bearer $SECRET" \
     "${ORCHESTRATOR_URL}/api/agents/${AGENT_NAME}/destroy" || echo "000")
 
-  if [ "$HTTP_CODE" != "200" ]; then
-    echo "WARNING: destroy returned HTTP $HTTP_CODE — orchestrator may not be running."
-    echo "         Continuing with worktree cleanup."
-  fi
+  # 2xx == orchestrator destroyed the agent. 404 == nothing to destroy (already
+  # gone; teardown is idempotent). Anything else — connection refused (000),
+  # 5xx, unexpected — is a real failure that would leave the DB out of sync
+  # with on-disk teardown. Refuse to proceed unless --force is passed.
+  case "$HTTP_CODE" in
+    2*|404)
+      : # success or already-gone
+      ;;
+    *)
+      if [ "$FORCE" = true ]; then
+        echo "WARNING: destroy returned HTTP $HTTP_CODE — orchestrator may not be running." >&2
+        echo "         Continuing anyway because --force was passed; DB row may remain stale." >&2
+      else
+        echo "ERROR: destroy returned HTTP $HTTP_CODE — orchestrator unreachable or rejected the call." >&2
+        echo "       URL: ${ORCHESTRATOR_URL}/api/agents/${AGENT_NAME}/destroy" >&2
+        if [ -s /tmp/scale-down.out ]; then
+          echo "       Response body:" >&2
+          sed 's/^/         /' /tmp/scale-down.out >&2
+        fi
+        echo "" >&2
+        echo "       Refusing to proceed with worktree teardown — leaving a phantom DB row is the" >&2
+        echo "       silent-failure pattern this guard exists to prevent. Either:" >&2
+        echo "         (a) start the orchestrator (./start.sh) and rerun, OR" >&2
+        echo "         (b) pass --force to clean up the worktree anyway (you accept a stale DB" >&2
+        echo "             entry until the filesystem watcher reconciles on next orchestrator boot)." >&2
+        exit 1
+      fi
+      ;;
+  esac
 else
   echo "[scale-down] No orchestrator secret found at $SECRET_FILE — skipping destroy API call."
 fi
