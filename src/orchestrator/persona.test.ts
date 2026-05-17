@@ -520,6 +520,73 @@ describe('Persona', () => {
     });
   });
 
+  describe('loadPersona inheritance from _default.md', () => {
+    it('prepends _default.md body when present alongside persona', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'inherit-prepend-'));
+      writeFileSync(join(dir, '_default.md'), '## Universal rules\nNo /tmp drafts.');
+      writeFileSync(join(dir, 'agent.md'), '# Agent\nDoes things.');
+      const content = loadPersona(join(dir, 'agent.md'));
+      assert.ok(content);
+      assert.ok(content.includes('Universal rules'));
+      assert.ok(content.includes('# Agent'));
+      assert.ok(content.indexOf('Universal rules') < content.indexOf('# Agent'));
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('returns persona body unchanged when _default.md is absent', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'inherit-absent-'));
+      writeFileSync(join(dir, 'agent.md'), '# Agent\nDoes things.');
+      const content = loadPersona(join(dir, 'agent.md'));
+      assert.equal(content, '# Agent\nDoes things.');
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('returns _default.md body without self-recursion when loaded directly', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'inherit-self-'));
+      writeFileSync(join(dir, '_default.md'), '## Universal rules\nNo /tmp drafts.');
+      const content = loadPersona(join(dir, '_default.md'));
+      assert.equal(content, '## Universal rules\nNo /tmp drafts.');
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('does not prepend when persona opts out via inherit_default: false', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'inherit-optout-'));
+      writeFileSync(join(dir, '_default.md'), '## Universal rules\nNo /tmp drafts.');
+      writeFileSync(
+        join(dir, 'agent.md'),
+        '---\ninherit_default: false\n---\n# Agent\nDoes things.',
+      );
+      const content = loadPersona(join(dir, 'agent.md'));
+      assert.ok(content);
+      assert.ok(!content.includes('Universal rules'));
+      assert.ok(content.includes('# Agent'));
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('strips _default.md frontmatter before prepending', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'inherit-fm-'));
+      writeFileSync(
+        join(dir, '_default.md'),
+        '---\nname: default\n---\n## Universal rules',
+      );
+      writeFileSync(join(dir, 'agent.md'), '# Agent');
+      const content = loadPersona(join(dir, 'agent.md'));
+      assert.ok(content);
+      assert.ok(content.includes('Universal rules'));
+      assert.ok(!content.includes('name: default'));
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('does not prepend when _default.md has empty body', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'inherit-empty-default-'));
+      writeFileSync(join(dir, '_default.md'), '---\nname: default\n---\n');
+      writeFileSync(join(dir, 'agent.md'), '# Agent');
+      const content = loadPersona(join(dir, 'agent.md'));
+      assert.equal(content, '# Agent');
+      rmSync(dir, { recursive: true, force: true });
+    });
+  });
+
   describe('createPersonaAndAgent', () => {
     let createDb: Database;
     let createDir: string;
