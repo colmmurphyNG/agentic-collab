@@ -12,8 +12,12 @@ set -euo pipefail
 #   --no-build   Never rebuild the image, even if source has changed since the
 #                last build. Use for fast proxy/host-only restarts.
 #   --dry-run    Print the actions that would be taken (rebuild decision,
-#                volume name, etc.) and exit before touching anything.
+#                volume name, port, etc.) and exit before touching anything.
 #                Useful for confirming behaviour without side effects.
+#   --port <N>   Override the orchestrator host port for this run. Higher
+#                priority than the ORCHESTRATOR_HOST_PORT env var and the
+#                docker-compose mapping. Useful for running a second
+#                conductor instance side-by-side without editing compose.
 #
 # Default rebuild behaviour: if a `.build-image-sha` file exists and matches
 # the current `git rev-parse HEAD`, reuse the cached image. Otherwise rebuild
@@ -27,17 +31,40 @@ cd "$SCRIPT_DIR"
 
 FORCE_BUILD=auto      # auto | yes | no
 DRY_RUN=false
-for arg in "$@"; do
+PORT_FLAG=""          # set via --port <N>; takes priority over env var if non-empty
+i=1
+while [ $i -le $# ]; do
+  arg="${!i}"
   case "$arg" in
     --build|--rebuild)  FORCE_BUILD=yes ;;
     --no-build)          FORCE_BUILD=no ;;
     --dry-run)           DRY_RUN=true ;;
+    --port)
+      i=$((i + 1))
+      if [ $i -gt $# ]; then
+        echo "--port requires a numeric argument (e.g. --port 3099)" >&2
+        exit 1
+      fi
+      PORT_FLAG="${!i}"
+      if ! [[ "$PORT_FLAG" =~ ^[0-9]+$ ]]; then
+        echo "--port argument must be numeric (got: $PORT_FLAG)" >&2
+        exit 1
+      fi
+      ;;
+    --port=*)
+      PORT_FLAG="${arg#--port=}"
+      if ! [[ "$PORT_FLAG" =~ ^[0-9]+$ ]]; then
+        echo "--port argument must be numeric (got: $PORT_FLAG)" >&2
+        exit 1
+      fi
+      ;;
     -h|--help)
-      sed -n '4,21p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+      sed -n '4,25p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
       exit 0
       ;;
     *) echo "Unknown flag: $arg" >&2; exit 1 ;;
   esac
+  i=$((i + 1))
 done
 
 # Colors (if terminal supports it)
@@ -401,17 +428,21 @@ fi
 # ── Resolve Orchestrator Host Port ──
 #
 # Host port priority:
-#   1. ORCHESTRATOR_HOST_PORT env var (operator override for multi-instance dev).
-#   2. `docker compose port orchestrator 3000` (canonical: reflects whatever
+#   1. --port <N> CLI flag (highest — explicit per-invocation override).
+#   2. ORCHESTRATOR_HOST_PORT env var (operator override for multi-instance dev).
+#   3. `docker compose port orchestrator 3000` (canonical: reflects whatever
 #      docker-compose.yml currently maps; auto-syncs if compose changes).
-#   3. Hardcoded fallback `3001` (current compose default — kept as a last
+#   4. Hardcoded fallback `3001` (current compose default — kept as a last
 #      resort if docker tooling is unavailable, with a warning).
 #
 # The container always listens on port 3000 internally; this only affects what
 # the host script and curl health-check use.
 HOST_PORT=""
 PORT_SOURCE=""
-if [ -n "${ORCHESTRATOR_HOST_PORT:-}" ]; then
+if [ -n "$PORT_FLAG" ]; then
+  HOST_PORT="$PORT_FLAG"
+  PORT_SOURCE="--port flag"
+elif [ -n "${ORCHESTRATOR_HOST_PORT:-}" ]; then
   HOST_PORT="$ORCHESTRATOR_HOST_PORT"
   PORT_SOURCE="ORCHESTRATOR_HOST_PORT env var"
 elif command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
