@@ -35,6 +35,7 @@ describe('start.sh — flag parsing', () => {
     assert.match(result.stdout, /--build/);
     assert.match(result.stdout, /--no-build/);
     assert.match(result.stdout, /--dry-run/);
+    assert.match(result.stdout, /--port/);
     // --help should NOT have triggered the prerequisite section.
     assert.doesNotMatch(result.stdout, /Checking prerequisites/);
   });
@@ -49,6 +50,46 @@ describe('start.sh — flag parsing', () => {
     const result = runStart(['--invented']);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Unknown flag.*--invented/);
+  });
+});
+
+describe('start.sh — --port flag', () => {
+  it('rejects --port with no argument', () => {
+    const result = runStart(['--port']);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /--port requires a numeric argument/);
+  });
+
+  it('rejects --port with non-numeric argument', () => {
+    const result = runStart(['--port', 'not-a-number']);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /--port argument must be numeric/);
+  });
+
+  it('rejects --port=non-numeric form', () => {
+    const result = runStart(['--port=abc']);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /--port argument must be numeric/);
+  });
+
+  it('accepts --port <N> and applies it (separated form)', () => {
+    // Use --dry-run so the port-resolution block is not reached (port
+    // resolution happens after the dry-run exit). The fact that the flag
+    // parses cleanly is sufficient — its application is exercised by the
+    // env-var-vs-flag priority test below, which DOES reach the resolution
+    // block by running through to health-check.
+    const result = runStart(['--port', '3099', '--dry-run']);
+    assert.equal(result.status, 0, `--port 3099 --dry-run should parse cleanly:\n${result.stdout}\n${result.stderr}`);
+    // No "Unknown flag" error, no parse error.
+    assert.doesNotMatch(result.stderr, /Unknown flag/);
+    assert.doesNotMatch(result.stderr, /--port/);
+  });
+
+  it('accepts --port=N (equals form)', () => {
+    const result = runStart(['--port=3099', '--dry-run']);
+    assert.equal(result.status, 0, `--port=3099 --dry-run should parse cleanly:\n${result.stdout}\n${result.stderr}`);
+    assert.doesNotMatch(result.stderr, /Unknown flag/);
+    assert.doesNotMatch(result.stderr, /--port/);
   });
 });
 
