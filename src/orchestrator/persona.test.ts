@@ -395,6 +395,90 @@ describe('Persona', () => {
     });
   });
 
+  describe('syncPersonasToDb — hookReload (Sammons#5 fix C)', () => {
+    it('populates hookReload from a top-level `reload:` frontmatter key', () => {
+      const tmpRoot = mkdtempSync(join(tmpdir(), 'persona-sync-reload-'));
+      const db = new Database(join(tmpRoot, 'reload.db'));
+      const personasDir = join(tmpRoot, 'personas');
+      mkdirSync(personasDir);
+
+      writeFileSync(join(personasDir, 'with-reload.md'), [
+        '---',
+        'engine: claude',
+        'cwd: /tmp/with-reload',
+        'reload:',
+        '  - keystroke: Escape',
+        '  - shell: /exit',
+        '  - wait: 3000',
+        '  - shell: claude --resume $SESSION_ID',
+        '---',
+        '# Agent with reload',
+      ].join('\n'));
+      writeFileSync(join(personasDir, 'no-reload.md'), [
+        '---',
+        'engine: claude',
+        'cwd: /tmp/no-reload',
+        '---',
+        '# Agent without reload',
+      ].join('\n'));
+
+      const synced = syncPersonasToDb(db, personasDir);
+      assert.equal(synced, 2);
+
+      const withReload = db.getAgent('with-reload');
+      assert.ok(withReload);
+      assert.ok(
+        withReload.hookReload && withReload.hookReload.length > 0,
+        'persona with `reload:` frontmatter must have hookReload populated in the DB',
+      );
+
+      const noReload = db.getAgent('no-reload');
+      assert.ok(noReload);
+      assert.equal(
+        noReload.hookReload,
+        null,
+        'persona without `reload:` frontmatter must have hookReload=null',
+      );
+
+      db.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it('round-trips the structured pipeline through serialize/deserialize', () => {
+      const tmpRoot = mkdtempSync(join(tmpdir(), 'persona-sync-reload-rt-'));
+      const db = new Database(join(tmpRoot, 'roundtrip.db'));
+      const personasDir = join(tmpRoot, 'personas');
+      mkdirSync(personasDir);
+
+      writeFileSync(join(personasDir, 'rt.md'), [
+        '---',
+        'engine: claude',
+        'cwd: /tmp/rt',
+        'reload:',
+        '  - keystroke: Escape',
+        '  - shell: claude --resume $SESSION_ID',
+        '---',
+      ].join('\n'));
+
+      syncPersonasToDb(db, personasDir);
+      const agent = db.getAgent('rt');
+      assert.ok(agent);
+      const hook = deserializeHookValue(agent.hookReload);
+      // Structured hook should come back as a pipeline array. Pipeline-step
+      // shape after the parser's conversion is { type, ... }, e.g.
+      // { type: 'keystroke', key: 'Escape' } or { type: 'shell', command: '...' }.
+      assert.ok(Array.isArray(hook), 'reload hook should deserialize as a pipeline array');
+      const steps = hook as Array<{ type: string; key?: string; command?: string }>;
+      assert.equal(steps[0]!.type, 'keystroke');
+      assert.equal(steps[0]!.key, 'Escape');
+      assert.equal(steps[1]!.type, 'shell');
+      assert.ok(steps[1]!.command && steps[1]!.command.includes('claude --resume'));
+
+      db.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    });
+  });
+
   describe('syncSinglePersona', () => {
     let db: Database;
     let personasDir: string;
