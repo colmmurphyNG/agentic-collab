@@ -110,6 +110,104 @@ describe('Lifecycle', () => {
     });
   });
 
+  describe('spawnAgent — idempotent session creation (Sammons#5)', () => {
+    it('kills existing tmux session before create when one already exists', async () => {
+      db.createAgent({ name: 'idem-existing', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      proxyCommands = [];
+
+      // Default ctx mock returns has_session: true (line ~40), so a preserved
+      // pane is simulated for this spawn.
+      await spawnAgent(ctx, {
+        name: 'idem-existing',
+        engine: 'claude',
+        cwd: '/tmp',
+        proxyId: 'p1',
+      });
+
+      const killIdx = proxyCommands.findIndex(c => c.action === 'kill_session');
+      const createIdx = proxyCommands.findIndex(c => c.action === 'create_session');
+      assert.ok(killIdx >= 0, 'kill_session must be issued when session exists');
+      assert.ok(createIdx >= 0, 'create_session must still be issued');
+      assert.ok(killIdx < createIdx, 'kill_session must occur before create_session');
+    });
+
+    it('skips kill_session when no existing session is present', async () => {
+      db.createAgent({ name: 'idem-clean', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      proxyCommands = [];
+
+      const cleanCtx: LifecycleContext = {
+        ...ctx,
+        proxyDispatch: async (_proxyId: string, command: ProxyCommand): Promise<ProxyResponse> => {
+          proxyCommands.push(command);
+          if (command.action === 'has_session') {
+            return { ok: true, data: false };
+          }
+          if (command.action === 'capture') {
+            return { ok: true, data: '> \n' };
+          }
+          return { ok: true };
+        },
+      };
+
+      await spawnAgent(cleanCtx, {
+        name: 'idem-clean',
+        engine: 'claude',
+        cwd: '/tmp',
+        proxyId: 'p1',
+      });
+
+      assert.ok(
+        !proxyCommands.some(c => c.action === 'kill_session'),
+        'kill_session must NOT be issued when no session exists',
+      );
+      assert.ok(
+        proxyCommands.some(c => c.action === 'create_session'),
+        'create_session must still be issued',
+      );
+    });
+
+    it('proceeds with create_session even when kill_session fails', async () => {
+      db.createAgent({ name: 'idem-kill-fail', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      proxyCommands = [];
+
+      const killFailCtx: LifecycleContext = {
+        ...ctx,
+        proxyDispatch: async (_proxyId: string, command: ProxyCommand): Promise<ProxyResponse> => {
+          proxyCommands.push(command);
+          if (command.action === 'has_session') {
+            return { ok: true, data: true };
+          }
+          if (command.action === 'kill_session') {
+            return { ok: false, error: 'proxy lost' };
+          }
+          if (command.action === 'capture') {
+            return { ok: true, data: '> \n' };
+          }
+          return { ok: true };
+        },
+      };
+
+      await spawnAgent(killFailCtx, {
+        name: 'idem-kill-fail',
+        engine: 'claude',
+        cwd: '/tmp',
+        proxyId: 'p1',
+      });
+
+      assert.ok(
+        proxyCommands.some(c => c.action === 'kill_session'),
+        'kill_session must be attempted',
+      );
+      assert.ok(
+        proxyCommands.some(c => c.action === 'create_session'),
+        'create_session must still proceed even after kill failure',
+      );
+    });
+  });
+
   describe('spawnAgent — paste command verification', () => {
     it('claude spawn includes --model, --effort, and -p flags', async () => {
       db.createAgent({ name: 'cmd-claude', engine: 'claude', cwd: '/tmp', proxyId: 'p1', permissions: 'skip' });

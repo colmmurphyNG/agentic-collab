@@ -270,7 +270,22 @@ async function injectRename(
   }
 }
 
-/** Create a tmux session and write a config profile for engines that use one (e.g. Codex). */
+/**
+ * Create a tmux session and write a config profile for engines that use one (e.g. Codex).
+ *
+ * Idempotent: if a tmux session with the requested name already exists (for
+ * example because a previous exit hook intentionally preserved the pane for
+ * inspection — see the "session still alive after exit — preserving for
+ * inspection" branch of the suspend pipeline), kill it before creating a
+ * fresh one. The previous behaviour silently let tmux's `new-session` collide
+ * with the preserved pane and the next spawn's paste landed in a dirty zsh
+ * prompt; long persona bodies with backticks and single quotes then dropped
+ * the shell into quote-continuation mode mid-paste and zombied the agent
+ * (Sammons/agentic-collab#5).
+ *
+ * `has_session` and `kill_session` failures are tolerated — if the proxy can't
+ * answer, we still attempt `create_session` and surface its real error.
+ */
 async function createSessionAndWriteProfile(
   ctx: LifecycleContext,
   proxyId: string,
@@ -280,6 +295,23 @@ async function createSessionAndWriteProfile(
   name: string,
   systemPrompt: string | null,
 ): Promise<ProxyResponse> {
+  const hasResult = await ctx
+    .proxyDispatch(proxyId, { action: 'has_session', sessionName: tmuxSession })
+    .catch(() => ({ ok: false, data: false }) as ProxyResponse);
+  if (hasResult.ok && hasResult.data === true) {
+    console.log(
+      `[lifecycle] ${name}: tmux session "${tmuxSession}" exists at spawn — killing before fresh create (Sammons#5)`,
+    );
+    await ctx
+      .proxyDispatch(proxyId, { action: 'kill_session', sessionName: tmuxSession })
+      .catch((err: unknown) => {
+        console.warn(
+          `[lifecycle] best-effort kill_session before create failed for ${name}: ${(err as Error).message}`,
+        );
+        return { ok: false } as ProxyResponse;
+      });
+  }
+
   const createResult = await ctx.proxyDispatch(proxyId, {
     action: 'create_session',
     sessionName: tmuxSession,
