@@ -479,6 +479,146 @@ describe('Persona', () => {
     });
   });
 
+  describe('syncPersonasWithDiff — prune stale rows when persona file vanishes', () => {
+    it('prunes a void agent whose persona file has been removed', () => {
+      const tmpRoot = mkdtempSync(join(tmpdir(), 'persona-prune-void-'));
+      const personasDir = join(tmpRoot, 'personas');
+      mkdirSync(personasDir);
+      const db = new Database(join(tmpRoot, 'prune.db'));
+
+      // Seed: two personas on disk, sync to DB.
+      writeFileSync(join(personasDir, 'keepme.md'), '---\nengine: claude\ncwd: /tmp/keepme\n---\n');
+      writeFileSync(join(personasDir, 'gone.md'), '---\nengine: claude\ncwd: /tmp/gone\n---\n');
+      syncPersonasToDb(db, personasDir);
+      assert.ok(db.getAgent('gone'), 'gone agent should exist after initial sync');
+      assert.equal(db.getAgent('gone')!.state, 'void');
+
+      // Remove gone.md from disk and re-sync.
+      rmSync(join(personasDir, 'gone.md'));
+      const diff = syncPersonasWithDiff(db, personasDir);
+
+      assert.deepEqual(diff.removed, ['gone'], 'gone should be in removed');
+      assert.ok(!db.getAgent('gone'), 'gone DB row should be deleted');
+      assert.ok(db.getAgent('keepme'), 'keepme DB row should remain');
+
+      db.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it('prunes a suspended agent whose persona file has been removed', () => {
+      const tmpRoot = mkdtempSync(join(tmpdir(), 'persona-prune-suspended-'));
+      const personasDir = join(tmpRoot, 'personas');
+      mkdirSync(personasDir);
+      const db = new Database(join(tmpRoot, 'prune.db'));
+
+      writeFileSync(join(personasDir, 'keepme.md'), '---\nengine: claude\ncwd: /tmp/keepme\n---\n');
+      writeFileSync(join(personasDir, 'goner.md'), '---\nengine: claude\ncwd: /tmp/goner\n---\n');
+      syncPersonasToDb(db, personasDir);
+
+      const before = db.getAgent('goner')!;
+      db.updateAgentState('goner', 'suspended', before.version);
+
+      rmSync(join(personasDir, 'goner.md'));
+      const diff = syncPersonasWithDiff(db, personasDir);
+
+      assert.deepEqual(diff.removed, ['goner']);
+      assert.ok(!db.getAgent('goner'));
+
+      db.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it('prunes a failed agent whose persona file has been removed', () => {
+      const tmpRoot = mkdtempSync(join(tmpdir(), 'persona-prune-failed-'));
+      const personasDir = join(tmpRoot, 'personas');
+      mkdirSync(personasDir);
+      const db = new Database(join(tmpRoot, 'prune.db'));
+
+      writeFileSync(join(personasDir, 'keepme.md'), '---\nengine: claude\ncwd: /tmp/keepme\n---\n');
+      writeFileSync(join(personasDir, 'broken.md'), '---\nengine: claude\ncwd: /tmp/broken\n---\n');
+      syncPersonasToDb(db, personasDir);
+
+      const before = db.getAgent('broken')!;
+      db.updateAgentState('broken', 'failed', before.version);
+
+      rmSync(join(personasDir, 'broken.md'));
+      const diff = syncPersonasWithDiff(db, personasDir);
+
+      assert.deepEqual(diff.removed, ['broken']);
+      assert.ok(!db.getAgent('broken'));
+
+      db.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it('does NOT prune an active agent whose persona file has been removed', () => {
+      const tmpRoot = mkdtempSync(join(tmpdir(), 'persona-prune-active-'));
+      const personasDir = join(tmpRoot, 'personas');
+      mkdirSync(personasDir);
+      const db = new Database(join(tmpRoot, 'prune.db'));
+
+      writeFileSync(join(personasDir, 'keepme.md'), '---\nengine: claude\ncwd: /tmp/keepme\n---\n');
+      writeFileSync(join(personasDir, 'busy.md'), '---\nengine: claude\ncwd: /tmp/busy\n---\n');
+      syncPersonasToDb(db, personasDir);
+
+      const before = db.getAgent('busy')!;
+      db.updateAgentState('busy', 'active', before.version);
+
+      rmSync(join(personasDir, 'busy.md'));
+      const diff = syncPersonasWithDiff(db, personasDir);
+
+      assert.deepEqual(diff.removed, [], 'active agents must not auto-prune');
+      assert.ok(db.getAgent('busy'), 'active DB row must survive a missing persona file');
+      assert.equal(db.getAgent('busy')!.state, 'active');
+
+      db.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it('refuses to prune anything when the personas directory is empty (safety floor)', () => {
+      const tmpRoot = mkdtempSync(join(tmpdir(), 'persona-prune-empty-'));
+      const personasDir = join(tmpRoot, 'personas');
+      mkdirSync(personasDir);
+      const db = new Database(join(tmpRoot, 'prune.db'));
+
+      // Seed an agent first while the file exists.
+      writeFileSync(join(personasDir, 'orphan.md'), '---\nengine: claude\ncwd: /tmp/orphan\n---\n');
+      syncPersonasToDb(db, personasDir);
+      assert.ok(db.getAgent('orphan'));
+
+      // Remove the persona file so the directory is empty. Re-sync should
+      // refuse to prune because an empty directory is suspect (typo in
+      // PERSONAS_DIR, accidental rmdir, etc.).
+      rmSync(join(personasDir, 'orphan.md'));
+      const diff = syncPersonasWithDiff(db, personasDir);
+
+      assert.deepEqual(diff.removed, [], 'safety floor: no pruning when on-disk scan is empty');
+      assert.ok(db.getAgent('orphan'), 'orphan must survive when the directory is empty');
+
+      db.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it('returns empty removed when all on-disk personas have DB rows (no churn)', () => {
+      const tmpRoot = mkdtempSync(join(tmpdir(), 'persona-prune-noop-'));
+      const personasDir = join(tmpRoot, 'personas');
+      mkdirSync(personasDir);
+      const db = new Database(join(tmpRoot, 'prune.db'));
+
+      writeFileSync(join(personasDir, 'a.md'), '---\nengine: claude\ncwd: /tmp/a\n---\n');
+      writeFileSync(join(personasDir, 'b.md'), '---\nengine: claude\ncwd: /tmp/b\n---\n');
+      syncPersonasToDb(db, personasDir);
+
+      const diff = syncPersonasWithDiff(db, personasDir);
+      assert.deepEqual(diff.removed, []);
+      assert.ok(db.getAgent('a'));
+      assert.ok(db.getAgent('b'));
+
+      db.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    });
+  });
+
   describe('syncSinglePersona', () => {
     let db: Database;
     let personasDir: string;
@@ -551,6 +691,7 @@ describe('Persona', () => {
         updated: [],
         unchanged: [],
         skipped: [],
+        removed: [],
       });
       let delta = db.getAgent('delta');
       assert.ok(delta);
@@ -564,6 +705,7 @@ describe('Persona', () => {
         updated: [],
         unchanged: ['delta'],
         skipped: [],
+        removed: [],
       });
 
       writeFileSync(join(personasDir, 'delta.md'), [
@@ -583,6 +725,7 @@ describe('Persona', () => {
         updated: ['delta'],
         unchanged: [],
         skipped: [],
+        removed: [],
       });
       delta = db.getAgent('delta');
       assert.ok(delta);

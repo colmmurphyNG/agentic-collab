@@ -1088,6 +1088,14 @@ export type SyncDiffResult = {
   updated: string[];
   unchanged: string[];
   skipped: string[];
+  /**
+   * Agents whose DB row was pruned because their persona file no longer
+   * exists on disk AND they were in an inactive state (void / suspended /
+   * failed / destroyed). Active-state rows whose persona file vanished are
+   * NOT auto-pruned — they are logged as warnings instead, since killing a
+   * live agent silently would discard in-flight work.
+   */
+  removed: string[];
 };
 
 /**
@@ -1096,7 +1104,9 @@ export type SyncDiffResult = {
  * - UPDATED: file exists, DB record differs → updated
  * - UNCHANGED: file exists, DB record matches → unchanged
  * - SKIPPED: file missing engine/cwd → skipped
- * - DELETED personas (DB record, no file) are intentionally ignored.
+ * - REMOVED: DB record exists, file vanished, agent state is inactive → row
+ *   pruned and added to `removed`. Active-state DB rows with no backing
+ *   file are logged but not touched.
  */
 
 /** Validate cwd, logging warnings for invalid values. */
@@ -1111,11 +1121,21 @@ function validateFrontmatter(name: string, fm: PersonaFrontmatter): string[] {
   return warnings;
 }
 
+/**
+ * Agent states whose DB row may be safely pruned when the backing persona
+ * file is removed. Active-class states (active / idle / spawning /
+ * suspending / resuming) are intentionally excluded — auto-pruning a live
+ * agent would silently discard in-flight work.
+ */
+const INACTIVE_PRUNABLE_STATES = new Set(['void', 'suspended', 'failed', 'destroyed']);
+
 export function syncPersonasWithDiff(db: Database, personasDir?: string): SyncDiffResult {
   const personas = scanPersonas(personasDir);
-  const result: SyncDiffResult = { created: [], updated: [], unchanged: [], skipped: [] };
+  const result: SyncDiffResult = { created: [], updated: [], unchanged: [], skipped: [], removed: [] };
 
+  const onDiskNames = new Set<string>();
   for (const persona of personas) {
+    onDiskNames.add(persona.name);
     const { name, frontmatter } = persona;
     const cwd = frontmatter.cwd;
 
@@ -1141,6 +1161,31 @@ export function syncPersonasWithDiff(db: Database, personasDir?: string): SyncDi
         result.updated.push(name);
       } else {
         result.unchanged.push(name);
+      }
+    }
+  }
+
+  // Prune DB rows whose persona file has vanished — but only if the agent is
+  // in an inactive state. Live agents survive a missing file (the orchestrator
+  // already has their composed prompt in memory); auto-pruning them would
+  // discard work without operator confirmation.
+  //
+  // Safety floor: if scanPersonas returned ZERO personas, the directory may
+  // be temporarily empty or misconfigured (wrong PERSONAS_DIR). Refuse to
+  // prune in that case — better a stale row than wiping every agent on a
+  // typo in the env var.
+  if (personas.length > 0) {
+    for (const agent of db.listAgents()) {
+      if (onDiskNames.has(agent.name)) continue;
+      if (INACTIVE_PRUNABLE_STATES.has(agent.state)) {
+        db.deleteAgent(agent.name);
+        result.removed.push(agent.name);
+        console.log(`[persona] ${agent.name}: persona file missing + state=${agent.state} → pruned DB row`);
+      } else {
+        console.warn(
+          `[persona] ${agent.name}: persona file missing but state=${agent.state} (live) — leaving DB row; ` +
+            `destroy manually via /api/agents/${agent.name}/destroy if you want it gone`,
+        );
       }
     }
   }
