@@ -53,6 +53,14 @@ export type PersonaFrontmatter = {
   exit?: HookValue;
   /** Hook value for interrupting the agent. */
   interrupt?: HookValue;
+  /**
+   * Hook value for reloading the agent (exit current session, resume with
+   * fresh persona prompt). When present, the dashboard renders a "Reload"
+   * button on the agent card; absent, no button. Personas can also surface
+   * a reload pipeline via `custom_buttons.reload` for richer multi-step
+   * behaviour, but the first-class `reload:` key is preferred.
+   */
+  reload?: HookValue;
   /** Hook value for submitting messages to the agent. */
   submit?: HookValue;
   /** Legacy alias for start (backward compat). */
