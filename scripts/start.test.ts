@@ -99,26 +99,52 @@ describe('start.sh — portable shell tooling', () => {
   });
 });
 
-describe('start.sh — host-port references match docker-compose mapping', () => {
-  it('does not reference localhost:3000 — host port per docker-compose.yml is 3001', async () => {
-    // docker-compose.yml maps host :3001 → container :3000. The host-side
-    // health-check (curl) and dashboard URL must therefore use :3001, not
-    // :3000 (which silently never connects on this setup). Structural
-    // assertion on the script's source.
+describe('start.sh — host-port parameterization', () => {
+  it('URLs use $HOST_PORT, never a hardcoded numeric port', async () => {
+    // The host port is derived at runtime from $ORCHESTRATOR_HOST_PORT (env
+    // override), then `docker compose port orchestrator 3000`, then a
+    // fallback default. Hardcoding any numeric port in a localhost: URL
+    // would defeat the parameterization. This test guards against
+    // regressing to `http://localhost:3000` (the original bug — wrong port)
+    // or `http://localhost:3001` (the simple-fix port — re-hardcoded
+    // instead of templated).
     const { readFileSync } = await import('node:fs');
     const source = readFileSync(SCRIPT_PATH, 'utf-8');
     const lines = source.split('\n');
-    const offenders: Array<{ lineNum: number; text: string }> = [];
+    const urlOffenders: Array<{ lineNum: number; text: string }> = [];
+    // Match `localhost:NNNN/` — a URL path with a numeric port. The
+    // templated form `localhost:${HOST_PORT}/` does not match this regex.
+    const urlWithLiteralPort = /localhost:[0-9]+\//;
     lines.forEach((line, idx) => {
-      if (line.includes('localhost:3000')) {
-        offenders.push({ lineNum: idx + 1, text: line.trim() });
+      if (urlWithLiteralPort.test(line)) {
+        urlOffenders.push({ lineNum: idx + 1, text: line.trim() });
       }
     });
     assert.equal(
-      offenders.length,
+      urlOffenders.length,
       0,
-      `start.sh must not reference localhost:3000; host port per docker-compose is 3001.\n` +
-        offenders.map((o) => `  line ${o.lineNum}: ${o.text}`).join('\n'),
+      `start.sh URLs must use \${HOST_PORT}, not a hardcoded port:\n` +
+        urlOffenders.map((o) => `  line ${o.lineNum}: ${o.text}`).join('\n'),
     );
+  });
+
+  it('still does not contain a localhost:3000 reference anywhere', async () => {
+    // Container internally listens on 3000, but host-side script must never
+    // address :3000 directly (compose publishes it on a different host port).
+    // This is the original-bug regression guard.
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(SCRIPT_PATH, 'utf-8');
+    assert.doesNotMatch(source, /localhost:3000/);
+  });
+
+  it('uses HOST_PORT in the curl health check and dashboard URL', async () => {
+    // Spot-check that the derivation is actually wired into the two
+    // user-facing URLs. Catches the silent-revert failure mode where
+    // someone reverts to a hardcoded URL but the literal-port regex above
+    // still passes (e.g. they introduce another mechanism).
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(SCRIPT_PATH, 'utf-8');
+    assert.match(source, /curl[^\n]*localhost:\$\{HOST_PORT\}\/api\/orchestrator\/status/);
+    assert.match(source, /Dashboard:[^\n]*localhost:\$\{HOST_PORT\}\/dashboard/);
   });
 });

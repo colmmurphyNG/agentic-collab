@@ -398,6 +398,39 @@ if [ "$DRY_RUN" = true ]; then
   exit 0
 fi
 
+# ── Resolve Orchestrator Host Port ──
+#
+# Host port priority:
+#   1. ORCHESTRATOR_HOST_PORT env var (operator override for multi-instance dev).
+#   2. `docker compose port orchestrator 3000` (canonical: reflects whatever
+#      docker-compose.yml currently maps; auto-syncs if compose changes).
+#   3. Hardcoded fallback `3001` (current compose default — kept as a last
+#      resort if docker tooling is unavailable, with a warning).
+#
+# The container always listens on port 3000 internally; this only affects what
+# the host script and curl health-check use.
+HOST_PORT=""
+PORT_SOURCE=""
+if [ -n "${ORCHESTRATOR_HOST_PORT:-}" ]; then
+  HOST_PORT="$ORCHESTRATOR_HOST_PORT"
+  PORT_SOURCE="ORCHESTRATOR_HOST_PORT env var"
+elif command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; then
+  # `docker compose port` returns "0.0.0.0:3001" for the host-side mapping of
+  # the container's port 3000. Extract just the port.
+  MAPPED=$(docker compose port orchestrator 3000 2>/dev/null || echo "")
+  if [ -n "$MAPPED" ]; then
+    HOST_PORT="${MAPPED##*:}"
+    PORT_SOURCE="docker compose port mapping"
+  fi
+fi
+if [ -z "$HOST_PORT" ]; then
+  HOST_PORT=3001
+  PORT_SOURCE="fallback default"
+  warn "Could not resolve host port from docker compose; falling back to 3001."
+  warn "Override with ORCHESTRATOR_HOST_PORT=<port> if your docker-compose maps differently."
+fi
+info "Orchestrator host port: $HOST_PORT (source: $PORT_SOURCE)"
+
 # ── Wait for Orchestrator Health ──
 
 step "Waiting for orchestrator"
@@ -405,11 +438,8 @@ step "Waiting for orchestrator"
 MAX_WAIT=30
 WAITED=0
 while [ $WAITED -lt $MAX_WAIT ]; do
-  # The orchestrator container listens on port 3000, but docker-compose.yml
-  # publishes it to host port 3001 (the container-side port is reserved for
-  # other contributors who run without the host-port remap). Curl runs on the
-  # host, so it must hit :3001.
-  if curl -sf http://localhost:3001/api/orchestrator/status &>/dev/null; then
+  # Container listens on 3000 internally; we curl the host-published port.
+  if curl -sf "http://localhost:${HOST_PORT}/api/orchestrator/status" &>/dev/null; then
     info "Orchestrator healthy"
     break
   fi
@@ -421,7 +451,7 @@ while [ $WAITED -lt $MAX_WAIT ]; do
 done
 
 if [ $WAITED -ge $MAX_WAIT ]; then
-  fail "Orchestrator did not become healthy within ${MAX_WAIT}s"
+  fail "Orchestrator did not become healthy within ${MAX_WAIT}s (tried http://localhost:${HOST_PORT}/api/orchestrator/status)"
 fi
 
 # ── Start Proxy ──
@@ -435,6 +465,6 @@ else
   fail "Proxy failed to start in tmux session agentic-proxy"
 fi
 
-info "Dashboard: http://localhost:3001/dashboard"
+info "Dashboard: http://localhost:${HOST_PORT}/dashboard"
 echo ""
 info "Bootstrap complete"
