@@ -1,6 +1,6 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Database } from './database.ts';
@@ -505,6 +505,207 @@ describe('Lifecycle', () => {
         assert.equal(db.getAgent('destroy-nofile'), undefined, 'agent should be deleted from DB');
       } finally {
         process.env['PERSONAS_DIR'] = origDir;
+        rmSync(personasDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('destroyAgent — handoff snapshot (item Q)', () => {
+    it('writes a handoff page at /pages/handoff-<name>-<ts>/ before kill_session', async () => {
+      const pagesDir = mkdtempSync(join(tmpdir(), 'pages-handoff-'));
+      const personasDir = mkdtempSync(join(tmpdir(), 'personas-handoff-'));
+      const origPagesDir = process.env['PAGES_DIR'];
+      const origPersonasDir = process.env['PERSONAS_DIR'];
+      process.env['PAGES_DIR'] = pagesDir;
+      process.env['PERSONAS_DIR'] = personasDir;
+
+      try {
+        // Seed an agent with an active session + a recent message.
+        db.createAgent({ name: 'handoff-agent', engine: 'claude', cwd: '/tmp/handoff', proxyId: 'p1' });
+        const a = db.getAgent('handoff-agent')!;
+        db.updateAgentState('handoff-agent', 'active', a.version, {
+          tmuxSession: 'agent-handoff-agent',
+          proxyId: 'p1',
+        });
+        db.addDashboardMessage('handoff-agent', 'to_agent', 'work in progress on PHX-1234', { topic: 'PHX-1234' });
+
+        proxyCommands = [];
+        await destroyAgent(ctx, 'handoff-agent');
+
+        // Capture MUST have been dispatched before kill_session.
+        const captureIdx = proxyCommands.findIndex((c) => c.action === 'capture');
+        const killIdx = proxyCommands.findIndex((c) => c.action === 'kill_session');
+        assert.ok(captureIdx >= 0, 'capture should have been issued for handoff');
+        assert.ok(killIdx >= 0, 'kill_session should still happen');
+        assert.ok(captureIdx < killIdx, 'capture must precede kill_session so the pane is still alive');
+
+        // A page row exists for the handoff slug.
+        const pages = db.listPages();
+        const handoffPage = pages.find((p) => p.slug.startsWith('handoff-handoff-agent-'));
+        assert.ok(handoffPage, `expected a handoff page; got: ${pages.map((p) => p.slug).join(', ')}`);
+        assert.equal(handoffPage.fileCount, 1);
+        assert.ok(handoffPage.totalBytes > 100, 'handoff page should have substantive body');
+
+        // The index.md on disk contains the expected sections.
+        const indexPath = join(pagesDir, handoffPage.slug, 'index.md');
+        assert.ok(existsSync(indexPath), 'handoff index.md must exist on disk');
+        const body = readFileSync(indexPath, 'utf-8');
+        assert.match(body, /# Handoff: handoff-agent →/);
+        assert.match(body, /State at destroy/);
+        assert.match(body, /Recent dashboard messages/);
+        assert.match(body, /work in progress on PHX-1234/);
+
+        // DB row for the agent is gone.
+        assert.equal(db.getAgent('handoff-agent'), undefined);
+      } finally {
+        process.env['PAGES_DIR'] = origPagesDir;
+        process.env['PERSONAS_DIR'] = origPersonasDir;
+        rmSync(pagesDir, { recursive: true, force: true });
+        rmSync(personasDir, { recursive: true, force: true });
+      }
+    });
+
+    it('resolves master persona via name-pattern stripping (e.g. pwa-a → pwa)', async () => {
+      const pagesDir = mkdtempSync(join(tmpdir(), 'pages-master-'));
+      const personasDir = mkdtempSync(join(tmpdir(), 'personas-master-'));
+      const origPagesDir = process.env['PAGES_DIR'];
+      const origPersonasDir = process.env['PERSONAS_DIR'];
+      process.env['PAGES_DIR'] = pagesDir;
+      process.env['PERSONAS_DIR'] = personasDir;
+
+      try {
+        // Seed: pwa.md exists in personas dir (the master); pwa-a is the scaled copy.
+        writeFileSync(join(personasDir, 'pwa.md'), '---\nengine: claude\ncwd: /tmp/pwa\n---\n');
+        db.createAgent({ name: 'pwa-a', engine: 'claude', cwd: '/tmp/pwa-a', proxyId: 'p1' });
+        const a = db.getAgent('pwa-a')!;
+        db.updateAgentState('pwa-a', 'active', a.version, {
+          tmuxSession: 'agent-pwa-a',
+          proxyId: 'p1',
+        });
+
+        await destroyAgent(ctx, 'pwa-a');
+
+        const pages = db.listPages();
+        const handoffPage = pages.find((p) => p.slug.startsWith('handoff-pwa-a-'));
+        assert.ok(handoffPage);
+        // The agent column on the page record is the resolved master.
+        assert.equal(handoffPage.agent, 'pwa', 'master should be derived as pwa (pwa.md exists)');
+
+        const body = readFileSync(join(pagesDir, handoffPage.slug, 'index.md'), 'utf-8');
+        assert.match(body, /# Handoff: pwa-a → pwa/);
+      } finally {
+        process.env['PAGES_DIR'] = origPagesDir;
+        process.env['PERSONAS_DIR'] = origPersonasDir;
+        rmSync(pagesDir, { recursive: true, force: true });
+        rmSync(personasDir, { recursive: true, force: true });
+      }
+    });
+
+    it('treats singleton agents as their own master (no master persona detected)', async () => {
+      const pagesDir = mkdtempSync(join(tmpdir(), 'pages-singleton-'));
+      const personasDir = mkdtempSync(join(tmpdir(), 'personas-singleton-'));
+      const origPagesDir = process.env['PAGES_DIR'];
+      const origPersonasDir = process.env['PERSONAS_DIR'];
+      process.env['PAGES_DIR'] = pagesDir;
+      process.env['PERSONAS_DIR'] = personasDir;
+
+      try {
+        // No master persona file. Agent name has no hyphen → self-master.
+        db.createAgent({ name: 'solo', engine: 'claude', cwd: '/tmp/solo', proxyId: 'p1' });
+        const a = db.getAgent('solo')!;
+        db.updateAgentState('solo', 'active', a.version, {
+          tmuxSession: 'agent-solo',
+          proxyId: 'p1',
+        });
+
+        await destroyAgent(ctx, 'solo');
+
+        const pages = db.listPages();
+        const handoffPage = pages.find((p) => p.slug.startsWith('handoff-solo-'));
+        assert.ok(handoffPage);
+        assert.equal(handoffPage.agent, 'solo', 'singleton agent should be its own master');
+
+        const body = readFileSync(join(pagesDir, handoffPage.slug, 'index.md'), 'utf-8');
+        assert.match(body, /singleton agent, no scale-up parent/);
+      } finally {
+        process.env['PAGES_DIR'] = origPagesDir;
+        process.env['PERSONAS_DIR'] = origPersonasDir;
+        rmSync(pagesDir, { recursive: true, force: true });
+        rmSync(personasDir, { recursive: true, force: true });
+      }
+    });
+
+    it('skips silently when PAGES_DIR is not set', async () => {
+      const personasDir = mkdtempSync(join(tmpdir(), 'personas-no-pages-'));
+      const origPagesDir = process.env['PAGES_DIR'];
+      const origPersonasDir = process.env['PERSONAS_DIR'];
+      delete process.env['PAGES_DIR'];
+      process.env['PERSONAS_DIR'] = personasDir;
+
+      try {
+        db.createAgent({ name: 'no-pages', engine: 'claude', cwd: '/tmp/no-pages', proxyId: 'p1' });
+        const a = db.getAgent('no-pages')!;
+        db.updateAgentState('no-pages', 'active', a.version, {
+          tmuxSession: 'agent-no-pages',
+          proxyId: 'p1',
+        });
+
+        await destroyAgent(ctx, 'no-pages');
+
+        // No page created.
+        const pages = db.listPages();
+        assert.ok(!pages.some((p) => p.slug.startsWith('handoff-no-pages-')), 'no handoff page should be created without PAGES_DIR');
+        // Destroy still completed.
+        assert.equal(db.getAgent('no-pages'), undefined);
+      } finally {
+        if (origPagesDir === undefined) delete process.env['PAGES_DIR'];
+        else process.env['PAGES_DIR'] = origPagesDir;
+        process.env['PERSONAS_DIR'] = origPersonasDir;
+        rmSync(personasDir, { recursive: true, force: true });
+      }
+    });
+
+    it('tolerates proxy capture failure and still completes destroy', async () => {
+      const pagesDir = mkdtempSync(join(tmpdir(), 'pages-capture-fail-'));
+      const personasDir = mkdtempSync(join(tmpdir(), 'personas-capture-fail-'));
+      const origPagesDir = process.env['PAGES_DIR'];
+      const origPersonasDir = process.env['PERSONAS_DIR'];
+      process.env['PAGES_DIR'] = pagesDir;
+      process.env['PERSONAS_DIR'] = personasDir;
+
+      try {
+        db.createAgent({ name: 'capture-fail', engine: 'claude', cwd: '/tmp/cf', proxyId: 'p1' });
+        const a = db.getAgent('capture-fail')!;
+        db.updateAgentState('capture-fail', 'active', a.version, {
+          tmuxSession: 'agent-capture-fail',
+          proxyId: 'p1',
+        });
+
+        // Custom ctx: capture throws, everything else succeeds.
+        const failCaptureCtx: LifecycleContext = {
+          ...ctx,
+          proxyDispatch: async (_proxyId, command) => {
+            proxyCommands.push(command);
+            if (command.action === 'capture') throw new Error('proxy unreachable');
+            if (command.action === 'has_session') return { ok: true, data: true };
+            return { ok: true };
+          },
+        };
+
+        // Destroy should still complete; the page should still be written (with
+        // the "no tmux capture available" fallback).
+        await destroyAgent(failCaptureCtx, 'capture-fail');
+
+        assert.equal(db.getAgent('capture-fail'), undefined, 'destroy must complete despite capture failure');
+        const pages = db.listPages();
+        const handoffPage = pages.find((p) => p.slug.startsWith('handoff-capture-fail-'));
+        assert.ok(handoffPage, 'handoff page should still be created');
+        const body = readFileSync(join(pagesDir, handoffPage.slug, 'index.md'), 'utf-8');
+        assert.match(body, /no tmux capture available/);
+      } finally {
+        process.env['PAGES_DIR'] = origPagesDir;
+        process.env['PERSONAS_DIR'] = origPersonasDir;
+        rmSync(pagesDir, { recursive: true, force: true });
         rmSync(personasDir, { recursive: true, force: true });
       }
     });
