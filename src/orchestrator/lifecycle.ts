@@ -17,9 +17,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, unlinkSync } from 'node:fs';
+import { existsSync, unlinkSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Database } from './database.ts';
+import type { DashboardMessage } from '../shared/types.ts';
 import type { LockManager } from '../shared/lock.ts';
 import type { ProxyCommand, ProxyResponse, AgentRecord, PipelineStep } from '../shared/types.ts';
 import { sessionName, requireProxy, canSuspend, canResume } from '../shared/agent-entity.ts';
@@ -853,8 +854,168 @@ export async function suspendAgent(
 }
 
 /**
+ * Resolve the "master" persona name for a possibly-scaled-up agent. Scaled
+ * copies follow the `<master>-<suffix>` convention (e.g. `pwa-a`, `qa-1701`),
+ * so we strip the suffix and check whether the resulting name corresponds to
+ * an existing persona file. If yes, that's the master. If not (singleton
+ * agents like `tl`, `brain`, hyphenated-but-unique names like `Tridion-expert`),
+ * the agent is its own master.
+ */
+function resolveMasterPersona(name: string): string {
+  const dashIdx = name.lastIndexOf('-');
+  if (dashIdx <= 0) return name;
+  const candidate = name.slice(0, dashIdx);
+  const candidatePath = join(getPersonasDir(), `${candidate}.md`);
+  if (existsSync(candidatePath)) return candidate;
+  return name;
+}
+
+/**
+ * Build the markdown body for a destroy handoff page. Captures the agent's
+ * identity, the last tmux pane snapshot, and the last 10 dashboard messages
+ * so the operator (and any master persona reading the page) can see what the
+ * agent was doing at the moment of teardown.
+ */
+function composeHandoffBody(
+  agent: AgentRecord,
+  master: string,
+  tmuxCapture: string,
+  recentMessages: DashboardMessage[],
+  destroyedAt: Date,
+): string {
+  const lines: string[] = [];
+  lines.push(`# Handoff: ${agent.name} → ${master}`);
+  lines.push('');
+  lines.push(`**Destroyed at:** ${destroyedAt.toISOString()}`);
+  lines.push(`**Agent name:** \`${agent.name}\``);
+  if (master === agent.name) {
+    lines.push(`**Master:** \`${master}\` (self — singleton agent, no scale-up parent detected)`);
+  } else {
+    lines.push(`**Master:** \`${master}\` (derived by stripping the trailing suffix from the agent name)`);
+  }
+  lines.push(`**State at destroy:** ${agent.state}`);
+  lines.push(`**Engine:** ${agent.engine}`);
+  if (agent.cwd) lines.push(`**cwd:** \`${agent.cwd}\``);
+  lines.push('');
+  lines.push('## Last tmux pane capture');
+  lines.push('');
+  if (tmuxCapture.trim().length > 0) {
+    lines.push('```');
+    lines.push(tmuxCapture.trimEnd());
+    lines.push('```');
+  } else {
+    lines.push('_(no tmux capture available — agent had no live session at destroy time)_');
+  }
+  lines.push('');
+  lines.push('## Recent dashboard messages');
+  lines.push('');
+  if (recentMessages.length === 0) {
+    lines.push('_(no recent dashboard messages on this agent\'s queue)_');
+  } else {
+    for (const msg of recentMessages) {
+      const arrow = msg.direction === 'to_agent' ? '→ (incoming)' : '← (outgoing)';
+      const topicLabel = msg.topic ? ` _topic: ${msg.topic}_` : '';
+      lines.push(`### ${msg.createdAt} ${arrow}${topicLabel}`);
+      lines.push('');
+      const quoted = msg.message.split('\n').map((l) => `> ${l}`).join('\n');
+      lines.push(quoted);
+      lines.push('');
+    }
+  }
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+  lines.push(
+    '_This page was generated automatically by the orchestrator at agent-destroy time. ' +
+      'It captures the last visible state of the agent so the master persona (and operator) can ' +
+      'pick up where the destroyed instance left off. Future-brain plans to also surface this in ' +
+      'the master persona\'s project memory dir; see brain backlog item Q for the v2 scope._',
+  );
+  return lines.join('\n');
+}
+
+/**
+ * Best-effort handoff snapshot at destroy time. Writes a Page at
+ * `<PAGES_DIR>/handoff-<name>-<timestamp>/index.md` capturing the agent's
+ * identity, last tmux pane, and recent messages. Failures here are logged
+ * but never block the actual destroy — operator confirmation of teardown is
+ * the contract; the handoff is a courtesy.
+ *
+ * If `PAGES_DIR` is unset, the handoff is skipped silently (test mode).
+ */
+async function captureDestroyHandoff(
+  ctx: LifecycleContext,
+  agent: AgentRecord,
+): Promise<void> {
+  const pagesDir = process.env['PAGES_DIR'];
+  if (!pagesDir) return;
+
+  try {
+    const now = new Date();
+    const ts =
+      now.getUTCFullYear().toString() +
+      String(now.getUTCMonth() + 1).padStart(2, '0') +
+      String(now.getUTCDate()).padStart(2, '0') +
+      '-' +
+      String(now.getUTCHours()).padStart(2, '0') +
+      String(now.getUTCMinutes()).padStart(2, '0') +
+      String(now.getUTCSeconds()).padStart(2, '0');
+    // Slug must satisfy SLUG_RE in routes.ts: ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$
+    const slug = `handoff-${agent.name.toLowerCase()}-${ts}`;
+    const master = resolveMasterPersona(agent.name);
+
+    let tmuxCapture = '';
+    if (agent.proxyId && agent.tmuxSession) {
+      try {
+        const result = await ctx.proxyDispatch(agent.proxyId, {
+          action: 'capture',
+          sessionName: agent.tmuxSession,
+          lines: 30,
+        });
+        if (result.ok && typeof result.data === 'string') {
+          tmuxCapture = result.data;
+        }
+      } catch (err) {
+        console.warn(`[handoff] ${agent.name}: tmux capture failed: ${(err as Error).message}`);
+      }
+    }
+
+    let recentMessages: DashboardMessage[] = [];
+    try {
+      const threads = ctx.db.getDashboardThreads(agent.name);
+      const all = threads[agent.name] ?? [];
+      recentMessages = all.slice(-10);
+    } catch (err) {
+      console.warn(`[handoff] ${agent.name}: dashboard-message fetch failed: ${(err as Error).message}`);
+    }
+
+    const body = composeHandoffBody(agent, master, tmuxCapture, recentMessages, now);
+
+    const slugDir = join(pagesDir, slug);
+    mkdirSync(slugDir, { recursive: true });
+    writeFileSync(join(slugDir, 'index.md'), body, 'utf-8');
+    const totalBytes = Buffer.byteLength(body, 'utf-8');
+    ctx.db.createPage({
+      slug,
+      title: `Handoff: ${agent.name} → ${master}`,
+      agent: master,
+      fileCount: 1,
+      totalBytes,
+    });
+    console.log(`[handoff] Captured for ${agent.name} → /pages/${slug} (master: ${master})`);
+  } catch (err) {
+    console.warn(`[handoff] ${agent.name}: capture failed (continuing with destroy): ${(err as Error).message}`);
+  }
+}
+
+/**
  * Destroy an agent: kill tmux session, remove from registry.
  * Single-phase lock — fast operation.
+ *
+ * Before the destructive steps, captures a handoff snapshot to
+ * `/pages/handoff-<name>-<ts>/` so the operator and the agent's master
+ * persona can see what the destroyed instance was doing at teardown.
+ * Snapshot capture is best-effort and never blocks the destroy.
  */
 export async function destroyAgent(
   ctx: LifecycleContext,
@@ -863,6 +1024,10 @@ export async function destroyAgent(
   await ctx.locks.withLock(name, async () => {
     const agent = ctx.db.getAgent(name);
     if (!agent) throw new Error(`Agent "${name}" not found`);
+
+    // Snapshot BEFORE we kill anything — once the tmux session is gone, the
+    // capture would return empty.
+    await captureDestroyHandoff(ctx, agent);
 
     if (agent.proxyId && agent.tmuxSession) {
       await ctx.proxyDispatch(agent.proxyId, {
