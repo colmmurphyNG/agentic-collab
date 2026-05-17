@@ -207,6 +207,76 @@ describe('Database', () => {
         rmSync(legacyDir, { recursive: true, force: true });
       }
     });
+
+    it('adds hook_reload to agents tables missing the column (Sammons#5 fix C)', () => {
+      const legacyDir = mkdtempSync(join(tmpdir(), 'agentic-collab-hook-reload-'));
+      const dbPath = join(legacyDir, 'no-reload.db');
+      const legacyDb = new DatabaseSync(dbPath);
+
+      // Build a schema with every CONFIG_FIELDS column EXCEPT hook_reload, to
+      // simulate a database created before the column was added to the
+      // registry. We do not enumerate every column here -- we just omit
+      // hook_reload and let the auto-migration backfill everything else too.
+      legacyDb.exec(`
+        CREATE TABLE agents (
+          name               TEXT PRIMARY KEY,
+          engine             TEXT NOT NULL,
+          model              TEXT,
+          thinking           TEXT,
+          cwd                TEXT NOT NULL,
+          persona            TEXT,
+          permissions        TEXT,
+          proxy_id           TEXT,
+          agent_group        TEXT,
+          account            TEXT,
+          launch_env         TEXT,
+          hook_start         TEXT,
+          hook_resume        TEXT,
+          hook_compact       TEXT,
+          hook_exit          TEXT,
+          hook_interrupt     TEXT,
+          hook_submit        TEXT,
+          custom_buttons     TEXT,
+          indicators         TEXT,
+          icon               TEXT,
+          state              TEXT NOT NULL DEFAULT 'void',
+          state_before_shutdown TEXT,
+          current_session_id TEXT,
+          tmux_session       TEXT,
+          last_activity      TEXT,
+          last_context_pct   INTEGER,
+          reload_queued      INTEGER NOT NULL DEFAULT 0,
+          reload_task        TEXT,
+          failed_at          TEXT,
+          failure_reason     TEXT,
+          version            INTEGER NOT NULL DEFAULT 0,
+          spawn_count        INTEGER NOT NULL DEFAULT 0,
+          created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        );
+      `);
+      legacyDb.prepare(`
+        INSERT INTO agents (name, engine, cwd, state, version, spawn_count, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run('pre-reload-agent', 'claude', '/legacy', 'void', 0, 0, '2026-05-17T00:00:00Z');
+      legacyDb.close();
+
+      const migratedDb = new Database(dbPath);
+      try {
+        const columns = migratedDb.rawDb.prepare('PRAGMA table_info(agents)').all() as Array<Record<string, unknown>>;
+        assert.ok(
+          columns.some((c) => c['name'] === 'hook_reload'),
+          'auto-migration must add hook_reload column to pre-existing tables',
+        );
+
+        // The pre-existing agent's hookReload field reads as null (unset).
+        const preReload = migratedDb.getAgent('pre-reload-agent');
+        assert.ok(preReload);
+        assert.equal(preReload.hookReload, null);
+      } finally {
+        migratedDb.close();
+        rmSync(legacyDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('events', () => {
