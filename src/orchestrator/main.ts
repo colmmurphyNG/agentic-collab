@@ -451,8 +451,14 @@ server.listen(PORT, '0.0.0.0', async () => {
 
         const diff = syncPersonasWithDiff(db);
         const changed = [...diff.created, ...diff.updated];
-        if (changed.length > 0) {
-          console.log(`[persona-watch] Hot-reloaded: ${changed.join(', ')}`);
+        const pruned = diff.removed;
+        if (changed.length > 0 || pruned.length > 0) {
+          if (changed.length > 0) {
+            console.log(`[persona-watch] Hot-reloaded: ${changed.join(', ')}`);
+          }
+          if (pruned.length > 0) {
+            console.log(`[persona-watch] Pruned stale DB rows (persona file vanished, state inactive): ${pruned.join(', ')}`);
+          }
           const agents = db.listAgents();
           // Use agents_update instead of init to avoid wiping threads/indicators
           wss.broadcast(JSON.stringify({
