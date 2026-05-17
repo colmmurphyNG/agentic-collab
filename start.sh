@@ -4,9 +4,41 @@ set -euo pipefail
 # ── Agentic Collab Start Script ──
 # Starts the orchestrator (Docker) and proxy (host) with zero configuration.
 # Detects OS, package managers, and available tools to give targeted guidance.
+#
+# Flags:
+#   --build      Force `docker compose build` even if the container is already
+#                running. Use after merging source changes that need to reach
+#                the container.
+#   --no-build   Never rebuild the image, even if source has changed since the
+#                last build. Use for fast proxy/host-only restarts.
+#   --dry-run    Print the actions that would be taken (rebuild decision,
+#                volume name, etc.) and exit before touching anything.
+#                Useful for confirming behaviour without side effects.
+#
+# Default rebuild behaviour: if a `.build-image-sha` file exists and matches
+# the current `git rev-parse HEAD`, reuse the cached image. Otherwise rebuild
+# automatically. This eliminates the silent-stale-image trap where source
+# changes never reach the container after a restart.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# ── Flag Parsing ──
+
+FORCE_BUILD=auto      # auto | yes | no
+DRY_RUN=false
+for arg in "$@"; do
+  case "$arg" in
+    --build|--rebuild)  FORCE_BUILD=yes ;;
+    --no-build)          FORCE_BUILD=no ;;
+    --dry-run)           DRY_RUN=true ;;
+    -h|--help)
+      sed -n '4,21p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+      exit 0
+      ;;
+    *) echo "Unknown flag: $arg" >&2; exit 1 ;;
+  esac
+done
 
 # Colors (if terminal supports it)
 if [ -t 1 ]; then
@@ -79,7 +111,8 @@ fi
 
 # Docker (optional but preferred)
 if command -v docker &>/dev/null; then
-  info "Docker $(docker --version | grep -oP '\d+\.\d+\.\d+' | head -1)"
+  # Use ERE (-E) instead of PCRE (-P): BSD grep on macOS rejects -P.
+  info "Docker $(docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 else
   hint=$(install_hint "Docker" "" "brew install --cask docker" "apt install docker.io" "https://docs.docker.com/get-docker/")
   warn "Docker not found (optional). Install: $hint"
@@ -207,18 +240,97 @@ if command -v docker &>/dev/null; then
     export PERSONAS_HOST_DIR
     PERSONAS_HOST_DIR="${PERSONAS_HOST_DIR:-$(realpath ./persistent-agents 2>/dev/null || echo '')}"
 
-    # Build the image first so we can reuse it for the permissions check
+    # ── Smart Rebuild Decision ──
+    # If source has changed since the last build (detected by comparing the
+    # current git HEAD SHA against the SHA stamped into .build-image-sha at
+    # the previous build), rebuild automatically. Otherwise reuse the cached
+    # image. Operator can force either direction with --build / --no-build.
     ORCH_IMAGE=$(docker compose config --images 2>/dev/null | head -1)
-    if ! docker compose ps --status running 2>/dev/null | grep -q orchestrator; then
-      docker compose build
-      info "Orchestrator image built"
+    CONTAINER_RUNNING=false
+    docker compose ps --status running 2>/dev/null | grep -q orchestrator && CONTAINER_RUNNING=true
+
+    CURRENT_SHA=""
+    if command -v git &>/dev/null && git -C "$SCRIPT_DIR" rev-parse --git-dir &>/dev/null; then
+      CURRENT_SHA=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo "")
+    fi
+    LAST_BUILD_SHA=""
+    if [ -f "$SCRIPT_DIR/.build-image-sha" ]; then
+      LAST_BUILD_SHA=$(cat "$SCRIPT_DIR/.build-image-sha" 2>/dev/null || echo "")
+    fi
+
+    SHOULD_BUILD=false
+    BUILD_REASON=""
+    case "$FORCE_BUILD" in
+      yes)
+        SHOULD_BUILD=true
+        BUILD_REASON="--build flag"
+        ;;
+      no)
+        SHOULD_BUILD=false
+        BUILD_REASON="--no-build flag (overriding source-change detection)"
+        ;;
+      auto)
+        if [ "$CONTAINER_RUNNING" = false ]; then
+          SHOULD_BUILD=true
+          BUILD_REASON="container not running"
+        elif [ -z "$CURRENT_SHA" ]; then
+          SHOULD_BUILD=true
+          BUILD_REASON="cannot determine current git HEAD — rebuilding to be safe"
+        elif [ -z "$LAST_BUILD_SHA" ]; then
+          SHOULD_BUILD=true
+          BUILD_REASON="no .build-image-sha record from previous build"
+        elif [ "$CURRENT_SHA" != "$LAST_BUILD_SHA" ]; then
+          SHOULD_BUILD=true
+          BUILD_REASON="source changed since last build (HEAD ${CURRENT_SHA:0:7}, last built ${LAST_BUILD_SHA:0:7})"
+        else
+          SHOULD_BUILD=false
+          BUILD_REASON="image up to date with HEAD ${CURRENT_SHA:0:7}"
+        fi
+        ;;
+    esac
+
+    if [ "$DRY_RUN" = true ]; then
+      info "DRY RUN — no actions will be taken"
+      info "  Container running:  $CONTAINER_RUNNING"
+      info "  Current HEAD:       ${CURRENT_SHA:-unknown}"
+      info "  Last built SHA:     ${LAST_BUILD_SHA:-unknown}"
+      info "  Force build flag:   $FORCE_BUILD"
+      info "  Decision:           $([ "$SHOULD_BUILD" = true ] && echo BUILD || echo SKIP) ($BUILD_REASON)"
+    fi
+
+    if [ "$SHOULD_BUILD" = true ]; then
+      info "Rebuilding orchestrator image: $BUILD_REASON"
+      if [ "$DRY_RUN" = false ]; then
+        docker compose build
+        info "Orchestrator image built"
+        if [ -n "$CURRENT_SHA" ]; then
+          echo "$CURRENT_SHA" > "$SCRIPT_DIR/.build-image-sha"
+        fi
+      fi
+    else
+      info "Reusing cached image: $BUILD_REASON"
     fi
 
     # ── Check SQLite DB Permissions ──
     # The orchestrator runs as the host user (UID:GID) inside Docker.
     # If the DB was previously created by root (e.g. before the user: directive),
     # the container can't write to it → SQLITE_READONLY errors.
-    VOLUME_NAME="agentic-collab_orchestrator-data"
+    #
+    # Derive the volume name from the current compose project rather than
+    # hard-coding it: docker compose name-spaces volumes with the project
+    # name, which defaults to the directory basename. On this checkout
+    # (`~/dev/conductor`), the volume is `conductor_orchestrator-data`;
+    # on a fresh clone of `agentic-collab` it would be
+    # `agentic-collab_orchestrator-data`. The previous hard-coded value was
+    # silently wrong on the conductor checkout, leaving the ownership-fix
+    # block as dead code.
+    COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$SCRIPT_DIR")}"
+    SHORT_VOLUME_NAME=$(docker compose config --volumes 2>/dev/null | head -1)
+    if [ -n "$SHORT_VOLUME_NAME" ]; then
+      VOLUME_NAME="${COMPOSE_PROJECT}_${SHORT_VOLUME_NAME}"
+    else
+      VOLUME_NAME="${COMPOSE_PROJECT}_orchestrator-data"
+    fi
     DB_MOUNT="/data/.agentic-collab"
 
     if docker volume inspect "$VOLUME_NAME" &>/dev/null; then
@@ -252,8 +364,15 @@ if command -v docker &>/dev/null; then
       fi
     fi
 
-    # Start the container (image already built, skip rebuild)
-    if docker compose ps --status running 2>/dev/null | grep -q orchestrator; then
+    # Start (or restart) the container. If we rebuilt the image, restart the
+    # container so it picks up the new image. If we did not rebuild and the
+    # container is already running, leave it as-is.
+    if [ "$DRY_RUN" = true ]; then
+      info "DRY RUN — would $([ "$SHOULD_BUILD" = true ] && [ "$CONTAINER_RUNNING" = true ] && echo "restart" || echo "$([ "$CONTAINER_RUNNING" = true ] && echo "leave running" || echo "start")") container"
+    elif [ "$SHOULD_BUILD" = true ] && [ "$CONTAINER_RUNNING" = true ]; then
+      info "Restarting orchestrator to pick up new image"
+      docker compose up -d --force-recreate
+    elif [ "$CONTAINER_RUNNING" = true ]; then
       info "Orchestrator already running"
     else
       docker compose up -d
@@ -264,10 +383,19 @@ if command -v docker &>/dev/null; then
     fail "Docker Compose not available. Install: $hint"
   fi
 else
-  warn "Running orchestrator directly (no Docker)."
-  node src/orchestrator/main.ts &
-  ORCH_PID=$!
-  info "Orchestrator PID: $ORCH_PID"
+  if [ "$DRY_RUN" = true ]; then
+    info "DRY RUN — would run orchestrator directly (no Docker)"
+  else
+    warn "Running orchestrator directly (no Docker)."
+    node src/orchestrator/main.ts &
+    ORCH_PID=$!
+    info "Orchestrator PID: $ORCH_PID"
+  fi
+fi
+
+if [ "$DRY_RUN" = true ]; then
+  info "DRY RUN complete — exiting before health check / proxy start"
+  exit 0
 fi
 
 # ── Wait for Orchestrator Health ──
