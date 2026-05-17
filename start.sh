@@ -405,7 +405,11 @@ step "Waiting for orchestrator"
 MAX_WAIT=30
 WAITED=0
 while [ $WAITED -lt $MAX_WAIT ]; do
-  if curl -sf http://localhost:3000/api/orchestrator/status &>/dev/null; then
+  # The orchestrator container listens on port 3000, but docker-compose.yml
+  # publishes it to host port 3001 (the container-side port is reserved for
+  # other contributors who run without the host-port remap). Curl runs on the
+  # host, so it must hit :3001.
+  if curl -sf http://localhost:3001/api/orchestrator/status &>/dev/null; then
     info "Orchestrator healthy"
     break
   fi
@@ -431,6 +435,6 @@ else
   fail "Proxy failed to start in tmux session agentic-proxy"
 fi
 
-info "Dashboard: http://localhost:3000/dashboard"
+info "Dashboard: http://localhost:3001/dashboard"
 echo ""
 info "Bootstrap complete"

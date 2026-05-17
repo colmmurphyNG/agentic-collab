@@ -98,3 +98,27 @@ describe('start.sh — portable shell tooling', () => {
     assert.doesNotMatch(result.stderr, /grep:.*invalid option/);
   });
 });
+
+describe('start.sh — host-port references match docker-compose mapping', () => {
+  it('does not reference localhost:3000 — host port per docker-compose.yml is 3001', async () => {
+    // docker-compose.yml maps host :3001 → container :3000. The host-side
+    // health-check (curl) and dashboard URL must therefore use :3001, not
+    // :3000 (which silently never connects on this setup). Structural
+    // assertion on the script's source.
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(SCRIPT_PATH, 'utf-8');
+    const lines = source.split('\n');
+    const offenders: Array<{ lineNum: number; text: string }> = [];
+    lines.forEach((line, idx) => {
+      if (line.includes('localhost:3000')) {
+        offenders.push({ lineNum: idx + 1, text: line.trim() });
+      }
+    });
+    assert.equal(
+      offenders.length,
+      0,
+      `start.sh must not reference localhost:3000; host port per docker-compose is 3001.\n` +
+        offenders.map((o) => `  line ${o.lineNum}: ${o.text}`).join('\n'),
+    );
+  });
+});
