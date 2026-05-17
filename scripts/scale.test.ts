@@ -304,3 +304,63 @@ describe('scale-down.sh — safety guards', () => {
     assert.ok(!existsSync(worktreePath), 'worktree should be removed with --force');
   });
 });
+
+describe('scale-down.sh — destroy-API fail-fast', () => {
+  let f: Fixture;
+  beforeEach(() => { f = makeFixture(); });
+  afterEach(() => cleanupFixture(f));
+
+  // Helper: variant of runScaleDown that provides a real (test-only) secret file
+  // so the destroy API call is actually attempted. The URL still points at a
+  // guaranteed-closed port, so the call gets HTTP 000.
+  function runScaleDownWithSecret(args: string[]): { status: number; stdout: string; stderr: string } {
+    const secretFile = join(f.rootDir, 'test-secret');
+    writeFileSync(secretFile, 'test-secret-value\n');
+    const result = spawnSync('bash', [SCALE_DOWN, ...args], {
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        PERSONAS_DIR_OVERRIDE: f.personasDir,
+        ORCHESTRATOR_URL: 'http://127.0.0.1:1',
+        SECRET_FILE_OVERRIDE: secretFile,
+      },
+    });
+    return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  it('exits non-zero when destroy API is unreachable (HTTP 000) and --force is not passed', () => {
+    const up = runScaleUp(f, ['dev', 'dev-unreachable', 'feature/unreachable']);
+    assert.equal(up.status, 0);
+
+    const worktreePath = join(`${f.sourceRepo}-worktrees`, 'dev-unreachable');
+    const personaPath = join(f.personasDir, 'dev-unreachable.md');
+    assert.ok(existsSync(worktreePath));
+    assert.ok(existsSync(personaPath));
+
+    const down = runScaleDownWithSecret(['dev-unreachable']);
+    assert.notEqual(down.status, 0, 'scale-down must fail-fast when destroy API is unreachable');
+    assert.match(down.stderr, /destroy returned HTTP/);
+    assert.match(down.stderr, /Refusing to proceed/);
+
+    // Critical: on fail-fast, the worktree and persona file MUST still be intact —
+    // we refused to proceed precisely because a phantom DB row would remain otherwise.
+    assert.ok(existsSync(worktreePath), 'worktree must NOT be removed when destroy fail-fasts');
+    assert.ok(existsSync(personaPath), 'persona file must NOT be removed when destroy fail-fasts');
+  });
+
+  it('proceeds with worktree teardown when destroy fails AND --force is passed', () => {
+    const up = runScaleUp(f, ['dev', 'dev-force-destroy', 'feature/force-destroy']);
+    assert.equal(up.status, 0);
+
+    const worktreePath = join(`${f.sourceRepo}-worktrees`, 'dev-force-destroy');
+    const personaPath = join(f.personasDir, 'dev-force-destroy.md');
+
+    const down = runScaleDownWithSecret(['dev-force-destroy', '--force']);
+    assert.equal(down.status, 0, `scale-down --force should succeed:\n${down.stdout}\n${down.stderr}`);
+    assert.match(down.stderr, /Continuing anyway because --force was passed/);
+
+    // With --force, worktree teardown proceeds despite the destroy failure.
+    assert.ok(!existsSync(worktreePath), 'worktree should be removed when --force is passed');
+    assert.ok(!existsSync(personaPath), 'persona file should be removed when --force is passed');
+  });
+});
