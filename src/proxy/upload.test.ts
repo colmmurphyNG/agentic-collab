@@ -88,7 +88,12 @@ describe('Proxy /upload endpoint', () => {
   }
 
   before(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'proxy-upload-test-'));
+    // The handler under test calls `realpathSync(cwd)` (line ~55), so it returns
+    // the canonical path. On macOS `tmpdir()` returns `/var/folders/...` which is
+    // a symlink to `/private/var/folders/...`. Normalize at creation so the
+    // `resData.path === join(tmpDir, 'sized.txt')` assertion stays on one side
+    // of the symlink.
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), 'proxy-upload-test-')));
 
     server = createServer((req, res) => {
       if (req.method === 'POST' && req.url?.startsWith('/upload')) {
