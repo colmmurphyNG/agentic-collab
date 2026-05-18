@@ -1,7 +1,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Database } from './database.ts';
@@ -694,11 +694,21 @@ describe('API Routes — Personas', () => {
   let port: number;
   let tmpDir: string;
   let personasDir: string;
+  let prevPersonasHostDir: string | undefined;
 
   before(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'agentic-persona-route-test-'));
+    // realpathSync resolves macOS `/var/folders` → `/private/var/folders` so the
+    // path the route handler returns matches the path the test built. Without
+    // this, the basename check would compare the symlinked vs canonical halves.
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), 'agentic-persona-route-test-')));
     personasDir = join(tmpDir, 'personas');
     process.env['PERSONAS_DIR'] = personasDir;
+    // Save + clear PERSONAS_HOST_DIR so `toHostPath()` returns the container
+    // path verbatim during the test. In a real running container this env var
+    // remaps `/app/persistent-personas` to the host's mount; in the test we
+    // want the path to stay anchored to the tmpDir we just created.
+    prevPersonasHostDir = process.env['PERSONAS_HOST_DIR'];
+    delete process.env['PERSONAS_HOST_DIR'];
     mkdtempSync; // force eval
     const { mkdirSync } = await import('node:fs');
     mkdirSync(personasDir, { recursive: true });
@@ -741,6 +751,9 @@ describe('API Routes — Personas', () => {
 
   after(() => {
     delete process.env['PERSONAS_DIR'];
+    if (prevPersonasHostDir !== undefined) {
+      process.env['PERSONAS_HOST_DIR'] = prevPersonasHostDir;
+    }
     wss.close();
     server.close();
     db.close();
