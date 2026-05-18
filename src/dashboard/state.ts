@@ -78,9 +78,35 @@ export function getToken() {
 }
 
 export function setToken(token) {
-  if (token) localStorage.setItem('orchestrator_token', token);
-  else localStorage.removeItem('orchestrator_token');
+  if (token) {
+    localStorage.setItem('orchestrator_token', token);
+    syncTokenCookie(token);
+  } else {
+    localStorage.removeItem('orchestrator_token');
+    clearTokenCookie();
+  }
 }
+
+/**
+ * Mirror the bearer token into a `conductor_token` cookie. Browser-direct
+ * navigation to GET routes (e.g. `<a href="/scratch">`) can't add an
+ * Authorization header — the cookie is the fallback path the orchestrator's
+ * authorize() helper checks when the header is absent. SameSite=Strict
+ * prevents cross-site CSRF; the cookie is scoped to / so it covers /pages,
+ * /scratch, /docs, etc.
+ */
+function syncTokenCookie(token) {
+  document.cookie = `conductor_token=${encodeURIComponent(token)}; path=/; SameSite=Strict`;
+}
+
+function clearTokenCookie() {
+  document.cookie = 'conductor_token=; path=/; SameSite=Strict; max-age=0';
+}
+
+// Sync the cookie on module load — covers dashboard sessions that set the
+// token before this code (cookie-sync logic) existed.
+const _initialToken = getToken();
+if (_initialToken) syncTokenCookie(_initialToken);
 
 export function authHeaders() {
   const t = getToken();
