@@ -7,7 +7,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { request as httpRequest } from 'node:http';
 import { pipeline } from 'node:stream/promises';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, rmSync, statSync, createWriteStream } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, rmSync, statSync, createWriteStream, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { renderMarkdown, wrapInHtml, DOC_PAGES } from '../docs/render.ts';
@@ -973,6 +973,155 @@ route('GET', '/pages/:slug', async (_req, res, match, ctx) => {
   const links = visibleFiles.map(f => `<li><a href="/pages/${slug}/${f}">${f}</a></li>`).join('');
   res.writeHead(200, { 'Content-Type': 'text/html' });
   res.end(`<!DOCTYPE html><html><head><title>${slug}</title></head><body><h1>${slug}</h1><ul>${links}</ul></body></html>`);
+});
+
+// ── Scratch render (item R) ──
+//
+// Read-only renderer for ad-hoc markdown files under each whitelisted
+// project's `scratch/` directory. Lets the operator + agents view draft
+// docs (PR bodies, RCA drafts, ticket investigations) without going
+// through `collab publish` and polluting the pages index.
+//
+// Auth-gated by default — scratch frequently contains unfinished WIP
+// material. Returns 401 when ORCHESTRATOR_SECRET is set and the
+// request lacks a valid Bearer token. When the secret is unset (dev
+// mode) the routes are public, matching the rest of the orchestrator.
+//
+// Whitelist via PROJECT_RENDER_ROOTS env var (comma-separated absolute
+// paths). The basename of each entry becomes the URL segment, e.g.
+//   PROJECT_RENDER_ROOTS=/host-projects/conductor,/host-projects/project-a
+//   → /scratch/conductor/<rel-path>, /scratch/project-a/<rel-path>
+//
+// Security:
+//   - Path-traversal `..` rejected before resolving.
+//   - realpathSync + prefix check rejects symlink escape.
+//   - Only `.md` files are rendered.
+
+/** Parse PROJECT_RENDER_ROOTS into a map: project-name → absolute path. */
+function getProjectRenderRoots(): Map<string, string> {
+  const raw = process.env['PROJECT_RENDER_ROOTS'];
+  if (!raw) return new Map();
+  const map = new Map<string, string>();
+  for (const entry of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
+    if (!entry.startsWith('/')) continue; // must be absolute
+    const name = entry.split('/').pop();
+    if (!name) continue;
+    // If two roots share a basename, the second wins — operator-visible at
+    // boot via the index page (the duplicate would replace the first entry).
+    map.set(name, entry);
+  }
+  return map;
+}
+
+/** Resolve a (project, relPath) tuple to an absolute on-disk `.md` path.
+ *  Returns null + a reason string if any check fails. */
+function resolveScratchFile(project: string, relPath: string): { path: string } | { error: string; status: number } {
+  if (relPath.includes('..')) return { error: 'Invalid path', status: 400 };
+  if (!relPath.toLowerCase().endsWith('.md')) return { error: 'Only .md files are renderable', status: 400 };
+
+  const roots = getProjectRenderRoots();
+  const projectRoot = roots.get(project);
+  if (!projectRoot) return { error: 'Unknown project', status: 404 };
+
+  const scratchRoot = join(projectRoot, 'scratch');
+  let scratchRootReal: string;
+  try { scratchRootReal = realpathSync(scratchRoot); } catch { return { error: 'Project has no scratch directory', status: 404 }; }
+
+  const candidate = join(scratchRoot, relPath);
+  if (!existsSync(candidate)) return { error: 'File not found', status: 404 };
+
+  let candidateReal: string;
+  try { candidateReal = realpathSync(candidate); } catch { return { error: 'File not found', status: 404 }; }
+
+  // Symlink-escape guard: realpath must stay under the project's scratch realroot.
+  if (!candidateReal.startsWith(scratchRootReal + '/') && candidateReal !== scratchRootReal) {
+    return { error: 'Path escapes project scratch dir', status: 400 };
+  }
+  return { path: candidateReal };
+}
+
+/** Recursively collect all `.md` files under a directory. Returns paths
+ *  relative to `root`. Skips hidden dirs (dot-prefixed) and node_modules. */
+function listMarkdownRecursive(root: string): Array<{ relPath: string; size: number; mtimeMs: number }> {
+  const results: Array<{ relPath: string; size: number; mtimeMs: number }> = [];
+  function walk(dir: string, prefix: string): void {
+    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+      const full = join(dir, entry.name);
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(full, rel);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
+        try {
+          const st = statSync(full);
+          results.push({ relPath: rel, size: st.size, mtimeMs: st.mtimeMs });
+        } catch { /* file vanished between readdir and stat — skip */ }
+      }
+    }
+  }
+  walk(root, '');
+  return results;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function formatRelativeAge(mtimeMs: number, nowMs: number = Date.now()): string {
+  const ageMs = nowMs - mtimeMs;
+  const m = Math.floor(ageMs / 60_000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d} d ago`;
+  const mo = Math.floor(d / 30);
+  return `${mo} mo ago`;
+}
+
+route('GET', '/scratch', async (req, res, _match, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+
+  const roots = getProjectRenderRoots();
+  if (roots.size === 0) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(wrapMarkdownPage('Scratch', renderMarkdown('# Scratch files\n\n_No projects are configured for scratch rendering. Set `PROJECT_RENDER_ROOTS` to a comma-separated list of absolute paths._')));
+    return;
+  }
+
+  const lines: string[] = ['# Scratch files', ''];
+  for (const [project, projectRoot] of [...roots.entries()].sort()) {
+    const scratchRoot = join(projectRoot, 'scratch');
+    const files = listMarkdownRecursive(scratchRoot).sort((a, b) => b.mtimeMs - a.mtimeMs);
+    lines.push(`## ${project} (${files.length} file${files.length === 1 ? '' : 's'})`);
+    lines.push('');
+    if (files.length === 0) {
+      lines.push('_No markdown files under `scratch/`._');
+    } else {
+      for (const f of files) {
+        lines.push(`- [${f.relPath}](/scratch/${project}/${f.relPath}) — ${formatBytes(f.size)}, ${formatRelativeAge(f.mtimeMs)}`);
+      }
+    }
+    lines.push('');
+  }
+  const html = wrapMarkdownPage('Scratch', renderMarkdown(lines.join('\n')));
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(html);
+});
+
+route('GET', '/scratch/:project/:path+', async (req, res, match, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+
+  const project = match.pathname.groups['project']!;
+  const relPath = match.pathname.groups['path']!;
+  const resolved = resolveScratchFile(project, relPath);
+  if ('error' in resolved) return json(res, resolved.status, { error: resolved.error });
+  serveMarkdownAsHtml(res, resolved.path, `${project}/${relPath}`);
 });
 
 route('GET', '/pages/:slug/:path+', async (_req, res, match, ctx) => {
