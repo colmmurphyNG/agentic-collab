@@ -129,11 +129,29 @@ else
   git worktree add -b "$BRANCH" "$WORKTREE_PATH" "$BASE_BRANCH"
 fi
 
-# Copy persona file with cwd swapped to the worktree.
-echo "[scale-up] Writing $NEW_FILE (cwd → $WORKTREE_PATH)..."
+# Copy persona file with cwd swapped to the worktree and `derived_from`
+# injected into the frontmatter. The `derived_from` field lets the orchestrator
+# (specifically lifecycle.ts:resolveMasterPersona) map this scaled instance
+# back to its base persona at destroy time — replacing the legacy
+# name-pattern-stripping heuristic which was fragile around hyphenated names.
+echo "[scale-up] Writing $NEW_FILE (cwd → $WORKTREE_PATH, derived_from → $BASE_PERSONA)..."
 # Resolve to absolute path to keep persona deterministic regardless of where it's read from.
 ABS_WORKTREE_PATH="$(cd "$WORKTREE_PATH" && pwd)"
-sed -E "s|^cwd:[[:space:]]+.*$|cwd: $ABS_WORKTREE_PATH|" "$BASE_FILE" > "$NEW_FILE"
+# Single awk pass: (a) swap the cwd line inside frontmatter, (b) drop any
+# pre-existing derived_from line (we never want a chain of derivations),
+# (c) inject `derived_from: $BASE_PERSONA` immediately before the closing `---`.
+awk -v cwd="$ABS_WORKTREE_PATH" -v derived="$BASE_PERSONA" '
+  BEGIN { fm = 0 }
+  /^---[[:space:]]*$/ {
+    fm++
+    if (fm == 2) print "derived_from: " derived
+    print
+    next
+  }
+  fm == 1 && /^cwd:[[:space:]]/  { print "cwd: " cwd; next }
+  fm == 1 && /^derived_from:[[:space:]]/ { next }
+  { print }
+' "$BASE_FILE" > "$NEW_FILE"
 
 echo ""
 echo "[scale-up] Done."

@@ -17,7 +17,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, unlinkSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Database } from './database.ts';
 import type { DashboardMessage } from '../shared/types.ts';
@@ -26,7 +26,7 @@ import type { ProxyCommand, ProxyResponse, AgentRecord, PipelineStep } from '../
 import { sessionName, requireProxy, canSuspend, canResume } from '../shared/agent-entity.ts';
 import { shellQuote, sleep } from '../shared/utils.ts';
 import { getAdapter } from './adapters/index.ts';
-import { resolvePersonaPath, loadPersona, composeSystemPrompt, getPersonasDir, toHostPath } from './persona.ts';
+import { resolvePersonaPath, loadPersona, composeSystemPrompt, getPersonasDir, toHostPath, parseFrontmatter } from './persona.ts';
 import { resolveHook } from './hook-resolver.ts';
 import type { HookResult, TemplateVars } from './hook-resolver.ts';
 import type { AccountStore } from './accounts.ts';
@@ -861,20 +861,130 @@ export async function suspendAgent(
 }
 
 /**
- * Resolve the "master" persona name for a possibly-scaled-up agent. Scaled
- * copies follow the `<master>-<suffix>` convention (e.g. `pwa-a`, `qa-1701`),
- * so we strip the suffix and check whether the resulting name corresponds to
- * an existing persona file. If yes, that's the master. If not (singleton
- * agents like `tl`, `brain`, hyphenated-but-unique names like `Tridion-expert`),
- * the agent is its own master.
+ * Resolve the "master" persona name for a possibly-scaled-up agent.
+ *
+ * Resolution order:
+ *   1. Explicit `derived_from: <master>` field in the agent's persona
+ *      frontmatter (preferred — `scripts/scale-up.sh` writes this when
+ *      cloning a base persona).
+ *   2. Name-pattern stripping: `pwa-a` → `pwa` if `pwa.md` exists. Used
+ *      as a fallback for older scaled personas that pre-date the
+ *      `derived_from` field.
+ *   3. Self-master: singletons (`tl`, `brain`, hyphenated-but-unique
+ *      names like `Tridion-expert`) where nothing else matches.
+ *
+ * In every case, the returned name must correspond to an existing persona
+ * file under `getPersonasDir()` — a `derived_from` pointing at a missing
+ * persona is ignored so we don't write to a dangling memory dir.
  */
 function resolveMasterPersona(name: string): string {
+  const personasDir = getPersonasDir();
+
+  // 1. Frontmatter `derived_from` (preferred path).
+  const ownPath = join(personasDir, `${name}.md`);
+  if (existsSync(ownPath)) {
+    try {
+      const raw = readFileSync(ownPath, 'utf-8');
+      const { frontmatter } = parseFrontmatter(raw);
+      const derived = frontmatter['derived_from'];
+      if (typeof derived === 'string' && derived.length > 0 && derived !== name) {
+        const derivedPath = join(personasDir, `${derived}.md`);
+        if (existsSync(derivedPath)) return derived;
+        console.warn(`[handoff] ${name}: derived_from='${derived}' but ${derivedPath} not found — falling back`);
+      }
+    } catch {
+      // Frontmatter read failures are non-fatal here — fall through to step 2.
+    }
+  }
+
+  // 2. Name-pattern stripping (legacy fallback for personas without derived_from).
   const dashIdx = name.lastIndexOf('-');
-  if (dashIdx <= 0) return name;
-  const candidate = name.slice(0, dashIdx);
-  const candidatePath = join(getPersonasDir(), `${candidate}.md`);
-  if (existsSync(candidatePath)) return candidate;
+  if (dashIdx > 0) {
+    const candidate = name.slice(0, dashIdx);
+    const candidatePath = join(personasDir, `${candidate}.md`);
+    if (existsSync(candidatePath)) return candidate;
+  }
+
+  // 3. Self-master.
   return name;
+}
+
+/**
+ * Map a host-side project directory (e.g. `/Users/colm.murphy/dev/SFCC-webapp`)
+ * to the Claude Code projects slug convention used by `~/.claude/projects/`:
+ * a leading `-` followed by the absolute path with each `/` AND each `.`
+ * replaced by `-`. The `.` mapping is what turns `colm.murphy` (the host
+ * username with a dot) into `colm-murphy` in the slug.
+ *
+ * `/Users/colm.murphy/dev/conductor` → `-Users-colm-murphy-dev-conductor`
+ *
+ * Returns null if the input is not an absolute path.
+ */
+function projectMemorySlug(cwd: string): string | null {
+  if (!cwd.startsWith('/')) return null;
+  return cwd.replace(/[/.]/g, '-');
+}
+
+/**
+ * Best-effort mirror of the destroy handoff snapshot into the master's
+ * project memory directory, where it can be picked up by future Claude
+ * Code sessions of the master persona via that project's `MEMORY.md` index.
+ *
+ * Writes:
+ *   - `<CLAUDE_PROJECTS_DIR>/<projectSlug>/memory/handoff_<name>_<ts>.md`
+ *   - one-line pointer appended to `<CLAUDE_PROJECTS_DIR>/<projectSlug>/memory/MEMORY.md`
+ *
+ * Silently no-ops when:
+ *   - `CLAUDE_PROJECTS_DIR` env is unset (test mode / operators who haven't
+ *     opted in to the bind-mount)
+ *   - the master persona has no resolvable cwd
+ *   - the cwd is not an absolute host path
+ */
+function mirrorHandoffToProjectMemory(
+  master: string,
+  destroyedName: string,
+  timestamp: string,
+  body: string,
+): void {
+  const projectsDir = process.env['CLAUDE_PROJECTS_DIR'];
+  if (!projectsDir) return;
+
+  try {
+    const masterPath = join(getPersonasDir(), `${master}.md`);
+    if (!existsSync(masterPath)) return;
+    const { frontmatter } = parseFrontmatter(readFileSync(masterPath, 'utf-8'));
+    const cwd = frontmatter['cwd'];
+    if (typeof cwd !== 'string' || cwd.length === 0) return;
+
+    const slug = projectMemorySlug(cwd);
+    if (!slug) return;
+
+    const memoryDir = join(projectsDir, slug, 'memory');
+    mkdirSync(memoryDir, { recursive: true });
+
+    const filename = `handoff_${destroyedName}_${timestamp}.md`;
+    const filePath = join(memoryDir, filename);
+    const frontmatterHeader =
+      `---\n` +
+      `name: Handoff from ${destroyedName}\n` +
+      `description: Destroy-time snapshot of ${destroyedName} (scaled from ${master}) — last tmux pane + recent dashboard messages\n` +
+      `type: project\n` +
+      `---\n\n`;
+    writeFileSync(filePath, frontmatterHeader + body, 'utf-8');
+
+    // Append pointer to MEMORY.md (create if missing).
+    const indexPath = join(memoryDir, 'MEMORY.md');
+    const isoDate = timestamp.slice(0, 4) + '-' + timestamp.slice(4, 6) + '-' + timestamp.slice(6, 8);
+    const pointer = `- [Handoff: ${destroyedName}](${filename}) — ${isoDate} destroy-time snapshot for master \`${master}\`\n`;
+    if (existsSync(indexPath)) {
+      appendFileSync(indexPath, pointer);
+    } else {
+      writeFileSync(indexPath, pointer);
+    }
+    console.log(`[handoff] ${destroyedName}: mirrored to ${filePath}`);
+  } catch (err) {
+    console.warn(`[handoff] ${destroyedName}: project-memory mirror failed: ${(err as Error).message}`);
+  }
 }
 
 /**
@@ -935,8 +1045,9 @@ function composeHandoffBody(
   lines.push(
     '_This page was generated automatically by the orchestrator at agent-destroy time. ' +
       'It captures the last visible state of the agent so the master persona (and operator) can ' +
-      'pick up where the destroyed instance left off. Future-brain plans to also surface this in ' +
-      'the master persona\'s project memory dir; see brain backlog item Q for the v2 scope._',
+      'pick up where the destroyed instance left off. When `CLAUDE_PROJECTS_DIR` is configured, ' +
+      'an identical snapshot is also mirrored to the master\'s project memory directory so ' +
+      'future Claude Code sessions of the master pick it up via that project\'s `MEMORY.md` index._',
   );
   return lines.join('\n');
 }
@@ -1010,6 +1121,11 @@ async function captureDestroyHandoff(
       totalBytes,
     });
     console.log(`[handoff] Captured for ${agent.name} → /pages/${slug} (master: ${master})`);
+
+    // Best-effort mirror to the master's project memory dir (no-op when
+    // CLAUDE_PROJECTS_DIR is unset, e.g. tests or operators who haven't
+    // opted in to the bind-mount).
+    mirrorHandoffToProjectMemory(master, agent.name, ts, body);
   } catch (err) {
     console.warn(`[handoff] ${agent.name}: capture failed (continuing with destroy): ${(err as Error).message}`);
   }
