@@ -653,6 +653,106 @@ describe('HealthMonitor', () => {
     assert.notEqual(db.getAgent(agentName)!.state, 'failed');
   });
 
+  it('detects zsh continuation prompt (heredoc/unmatched-quote wedge)', async () => {
+    // Regression test for the resume-deadlock bug
+    // (scratch/brain/lifecycle-resume-bug.md). When a persona's onboarding paste
+    // contains an unmatched quote, zsh enters a continuation prompt
+    // ("cmdand quote>") which previously matched no shellPromptPattern and so
+    // detectCliExit never fired. The agent stayed `idle` while being dead.
+    const agentName = 'health-zsh-continuation';
+    db.createAgent({ name: agentName, engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    const a = db.getAgent(agentName)!;
+    db.updateAgentState(agentName, 'active', a.version, { tmuxSession: `agent-${agentName}` });
+
+    captureOutput = 'cmdand quote> \n';
+
+    const monitor = makeMonitor();
+    await monitor.pollAgent(db.getAgent(agentName)!);
+    assert.equal(db.getAgent(agentName)!.state, 'active'); // 1st poll: counter only
+    ensureActive(agentName);
+    await monitor.pollAgent(db.getAgent(agentName)!);
+    assert.equal(db.getAgent(agentName)!.state, 'failed');
+  });
+
+  it('detects other zsh continuation prompts (dquote / heredoc / cmdsubst / quote)', async () => {
+    // Each zsh continuation prompt shape should trigger detectCliExit.
+    const variants = ['dquote> \n', 'heredoc> \n', 'cmdsubst> \n', 'quote> \n'];
+    for (const [i, output] of variants.entries()) {
+      const agentName = `health-zsh-continuation-${i}`;
+      db.createAgent({ name: agentName, engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      const a = db.getAgent(agentName)!;
+      db.updateAgentState(agentName, 'active', a.version, { tmuxSession: `agent-${agentName}` });
+
+      captureOutput = output;
+      const monitor = makeMonitor();
+      await monitor.pollAgent(db.getAgent(agentName)!);
+      ensureActive(agentName);
+      await monitor.pollAgent(db.getAgent(agentName)!);
+      assert.equal(db.getAgent(agentName)!.state, 'failed', `variant "${output.trim()}" should trigger detectCliExit`);
+    }
+  });
+
+  it('clears currentSessionId and captured_vars.SESSION_ID on confirmed resume failure', async () => {
+    // Regression test for the resume-deadlock bug
+    // (scratch/brain/lifecycle-resume-bug.md). Without this, autoRecover loops
+    // forever re-using the same dead UUID: the resume hook is picked over the
+    // start hook because the agent still has a (dead) session id on the row.
+    const agentName = 'health-resume-failure-clears-session';
+    db.createAgent({ name: agentName, engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    const a = db.getAgent(agentName)!;
+    db.updateAgentState(agentName, 'active', a.version, {
+      tmuxSession: `agent-${agentName}`,
+      currentSessionId: '67749c98-1c7b-4bdb-8f0e-5a1c5ed7e9be',
+    });
+    db.updateAgentCapturedVar(agentName, 'SESSION_ID', '67749c98-1c7b-4bdb-8f0e-5a1c5ed7e9be');
+
+    captureOutput = [
+      'No conversation found with session ID: 67749c98-1c7b-4bdb-8f0e-5a1c5ed7e9be',
+      'user@host:~$ ',
+    ].join('\n');
+
+    const monitor = makeMonitor();
+    await monitor.pollAgent(db.getAgent(agentName)!);
+    ensureActive(agentName);
+    await monitor.pollAgent(db.getAgent(agentName)!);
+
+    const final = db.getAgent(agentName)!;
+    assert.equal(final.state, 'failed');
+    assert.equal(final.failureReason, 'CLI session not found — resume failed');
+    assert.equal(final.currentSessionId, null,
+      'currentSessionId must be cleared on resume failure');
+    assert.equal(final.capturedVars?.['SESSION_ID'], undefined,
+      'captured_vars.SESSION_ID must be deleted on resume failure');
+  });
+
+  it('keeps currentSessionId intact when CLI exit is NOT a resume failure', async () => {
+    // The clear-on-resume-failure branch must be tight: a generic shell-prompt
+    // exit (no "No conversation found" line) should NOT wipe the session id,
+    // because the id may still be useful for a subsequent recovery.
+    const agentName = 'health-generic-exit-preserves-session';
+    const liveId = 'cccccccc-dddd-eeee-ffff-000000000000';
+    db.createAgent({ name: agentName, engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    const a = db.getAgent(agentName)!;
+    db.updateAgentState(agentName, 'active', a.version, {
+      tmuxSession: `agent-${agentName}`,
+      currentSessionId: liveId,
+    });
+    db.updateAgentCapturedVar(agentName, 'SESSION_ID', liveId);
+
+    // Generic shell prompt — no failure message, just a bare bash prompt.
+    captureOutput = 'user@host:~$ \n';
+
+    const monitor = makeMonitor();
+    await monitor.pollAgent(db.getAgent(agentName)!);
+    ensureActive(agentName);
+    await monitor.pollAgent(db.getAgent(agentName)!);
+
+    const final = db.getAgent(agentName)!;
+    assert.equal(final.state, 'failed');
+    assert.equal(final.currentSessionId, liveId);
+    assert.equal(final.capturedVars?.['SESSION_ID'], liveId);
+  });
+
   // ── CLI Recovery Detection ──
 
   it('heals failed agent when CLI is detected alive in tmux', async () => {
