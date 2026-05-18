@@ -1315,3 +1315,142 @@ describe('API Routes — Pages archive', () => {
     assert.ok(existsSync(join(slugDir, 'index.md')), 'page files must not be removed on unarchive either');
   });
 });
+
+describe('API Routes — /api/notify (H1: delivery receipts)', () => {
+  let server: Server;
+  let db: Database;
+  let wss: WebSocketServer;
+  let port: number;
+  let tmpDir: string;
+  /** Captures (token, chatId, text, notifyId) for every TelegramDispatcher.send call. */
+  let sendCalls: Array<{ token: string; chatId: string; text: string; notifyId: string | undefined }>;
+  /** Controls what every TelegramDispatcher.send call returns. */
+  let sendReturnsOk: boolean;
+
+  before(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'agentic-notify-test-'));
+    db = new Database(join(tmpDir, 'test.db'));
+    wss = new WebSocketServer();
+    sendCalls = [];
+    sendReturnsOk = true;
+
+    const mockProxyDispatch = async (_proxyId: string, _command: ProxyCommand): Promise<ProxyResponse> => ({ ok: true });
+    const locks = new LockManager(db.rawDb);
+
+    const ctx: RouteContext = {
+      db,
+      wss,
+      locks,
+      proxyDispatch: mockProxyDispatch,
+      getDashboardHtml: () => '<html></html>',
+      orchestratorHost: 'http://localhost:3000',
+      orchestratorSecret: null,
+      messageDispatcher: makeTestDispatcher(db, locks, mockProxyDispatch),
+      usagePoller: { getUsageData: () => ({}), pollNow: async () => {} } as any,
+      voiceEnabled: false,
+      accountStore: new AccountStore({ accountsDir: join(tmpDir, 'accounts'), agentHomesDir: join(tmpDir, 'agent-homes'), skipAutoRegister: true }),
+      telegramDispatcher: {
+        startPolling: () => {},
+        stopPolling: () => {},
+        send: async (token: string, chatId: string, text: string, notifyId?: string) => {
+          sendCalls.push({ token, chatId, text, notifyId });
+          return sendReturnsOk;
+        },
+      } as unknown as TelegramDispatcher,
+      pagesDir: join(tmpDir, 'pages'),
+      storesDir: join(tmpDir, 'stores'),
+    };
+
+    const router = createRouter(ctx);
+    server = createServer(async (req, res) => { await router(req, res); });
+    await new Promise<void>((resolve) => {
+      server.listen(0, () => {
+        const addr = server.address();
+        port = typeof addr === 'object' && addr ? addr.port : 0;
+        resolve();
+      });
+    });
+  });
+
+  after(() => {
+    wss.close();
+    server.close();
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    sendCalls = [];
+    sendReturnsOk = true;
+    // Each test starts from a clean destination list so attempted/sent counts
+    // assert on a known state rather than the running total across the suite.
+    for (const d of db.listDestinations()) {
+      db.deleteDestination(d.name);
+    }
+  });
+
+  async function api(method: string, path: string, body?: unknown): Promise<{ status: number; data: any }> {
+    const init: RequestInit = { method };
+    if (body !== undefined) {
+      init.headers = { 'content-type': 'application/json' };
+      init.body = JSON.stringify(body);
+    }
+    const resp = await fetch(`http://localhost:${port}${path}`, init);
+    const data = await resp.json();
+    return { status: resp.status, data };
+  }
+
+  it('returns 400 when message is missing', async () => {
+    const { status, data } = await api('POST', '/api/notify', { agent: 'brain' });
+    assert.equal(status, 400);
+    assert.match(String(data.error), /message required/);
+  });
+
+  it('returns notifyId, attempted, and sent in the response body', async () => {
+    // Seed a single enabled telegram destination.
+    db.createDestination({ name: 'notify-tg-1', type: 'telegram', config: { botToken: 't', chatId: '42' } });
+
+    const { status, data } = await api('POST', '/api/notify', { message: 'hello', agent: 'brain' });
+
+    assert.equal(status, 200);
+    assert.equal(data.ok, true);
+    assert.equal(data.attempted, 1);
+    assert.equal(data.sent, 1);
+    assert.ok(typeof data.notifyId === 'string' && data.notifyId.length > 0, 'notifyId must be a non-empty string');
+    // UUID v4 shape (8-4-4-4-12 hex). The exact version isn't load-bearing; we
+    // just want a stable, unique-enough correlator that downstream logs can grep.
+    assert.match(data.notifyId, /^[0-9a-f-]{36}$/);
+  });
+
+  it('passes notifyId through to TelegramDispatcher.send', async () => {
+    db.createDestination({ name: 'notify-tg-2', type: 'telegram', config: { botToken: 't2', chatId: '43' } });
+
+    const { data } = await api('POST', '/api/notify', { message: 'thread me', agent: 'brain' });
+
+    const sendCall = sendCalls.find(c => c.chatId === '43');
+    assert.ok(sendCall, 'TelegramDispatcher.send should have been invoked for the seeded destination');
+    assert.equal(sendCall.notifyId, data.notifyId, 'notifyId in send() call must match the one in the response');
+    assert.equal(sendCall.text, '[brain] thread me', 'text must include the agent prefix');
+  });
+
+  it('counts dropped destinations when send returns false (visibility, not retry)', async () => {
+    db.createDestination({ name: 'notify-tg-3', type: 'telegram', config: { botToken: 't3', chatId: '44' } });
+    sendReturnsOk = false;
+
+    const { status, data } = await api('POST', '/api/notify', { message: 'will fail' });
+
+    assert.equal(status, 200, 'endpoint always returns 200 — visibility is via the body, not status');
+    assert.equal(data.attempted, 1);
+    assert.equal(data.sent, 0, 'failed send must not be counted as delivered');
+    assert.ok(data.notifyId, 'notifyId must be returned even on full-drop');
+  });
+
+  it('issues a fresh notifyId per request', async () => {
+    db.createDestination({ name: 'notify-tg-4', type: 'telegram', config: { botToken: 't4', chatId: '45' } });
+
+    const a = await api('POST', '/api/notify', { message: 'first' });
+    const b = await api('POST', '/api/notify', { message: 'second' });
+
+    assert.notEqual(a.data.notifyId, b.data.notifyId, 'two distinct calls must get two distinct notifyIds');
+  });
+});
