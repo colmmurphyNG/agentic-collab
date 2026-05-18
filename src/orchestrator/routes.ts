@@ -6,7 +6,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { request as httpRequest } from 'node:http';
 import { pipeline } from 'node:stream/promises';
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, rmSync, statSync, createWriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -2000,8 +2000,17 @@ route('POST', '/api/notify', async (req, res, _match, ctx) => {
   const priority = (body.priority as string) ?? 'normal';
   if (!message) return json(res, 400, { error: 'message required' });
 
+  // Generate a correlation id so log lines for this notification's destinations
+  // can be threaded together. Returned in the response so callers can correlate
+  // an upstream user action to a downstream Telegram drop. See brain backlog H1.
+  const notifyId = randomUUID();
+
   const destinations = ctx.db.listDestinations().filter(d => d.enabled);
+  const telegramDestCount = destinations.filter(d => d.type === 'telegram').length;
+  console.log(`[notify] notify_id=${notifyId} agent=${agent ?? '<none>'} priority=${priority} destinations=${destinations.length} telegram_destinations=${telegramDestCount} bytes=${message.length}`);
+
   let sent = 0;
+  let attempted = 0;
 
   for (const dest of destinations) {
     const text = agent ? `[${agent}] ${message}` : message;
@@ -2009,21 +2018,29 @@ route('POST', '/api/notify', async (req, res, _match, ctx) => {
       if (dest.type === 'telegram') {
         const botToken = dest.config.botToken as string;
         const chatId = dest.config.chatId as string;
-        const ok = await ctx.telegramDispatcher.send(botToken, chatId, text);
+        attempted++;
+        const ok = await ctx.telegramDispatcher.send(botToken, chatId, text, notifyId);
         if (ok) sent++;
       }
-    } catch { /* best-effort per destination */ }
+    } catch (err) {
+      // best-effort per destination; surface the failure for diagnosis instead
+      // of swallowing silently the way the pre-H1 path did.
+      console.error(`[notify] notify_id=${notifyId} destination_error dest=${dest.name} error=${(err as Error).message}`);
+    }
   }
 
-  // Broadcast to dashboard for browser notifications
+  console.log(`[notify] notify_id=${notifyId} summary attempted=${attempted} delivered=${sent} dropped=${attempted - sent}`);
+
+  // Broadcast to dashboard for browser notifications.
   ctx.wss.broadcast(JSON.stringify({
     type: 'notification',
     agent: agent ?? null,
     message,
     priority,
+    notifyId,
   }));
 
-  json(res, 200, { ok: true, sent });
+  json(res, 200, { ok: true, sent, attempted, notifyId });
 });
 
   return routes;
