@@ -122,6 +122,29 @@ describe('scale-up.sh — ticket-first mode', () => {
     assert.ok(existsSync(newPersonaPath), 'new persona file should exist');
     const personaContent = readFileSync(newPersonaPath, 'utf-8');
     assert.match(personaContent, new RegExp(`^cwd: ${worktreePath}$`, 'm'), 'persona cwd should point to the worktree');
+    // derived_from is injected so lifecycle.ts:resolveMasterPersona can map
+    // this scaled instance back to its base at destroy time without relying
+    // on the fragile name-pattern-stripping heuristic.
+    assert.match(personaContent, /^derived_from: dev$/m, 'persona should declare derived_from: dev');
+  });
+
+  it('overrides any pre-existing derived_from in the base persona (no chaining)', () => {
+    // If someone (incorrectly) seeded the base persona with its own derived_from,
+    // scale-up must overwrite it so the new persona points to THIS base rather
+    // than the base's claimed ancestor.
+    const basePath = join(f.personasDir, `${f.baseName}.md`);
+    const polluted = readFileSync(basePath, 'utf-8').replace(
+      /^---$/m,
+      '---\nderived_from: some-other-ancestor',
+    );
+    writeFileSync(basePath, polluted);
+
+    const result = runScaleUp(f, ['dev', 'dev-clean', 'feature/clean']);
+    assert.equal(result.status, 0, `scale-up failed:\n${result.stdout}\n${result.stderr}`);
+
+    const newContent = readFileSync(join(f.personasDir, 'dev-clean.md'), 'utf-8');
+    assert.match(newContent, /^derived_from: dev$/m, 'new persona should derive from the immediate base');
+    assert.doesNotMatch(newContent, /some-other-ancestor/, 'pre-existing derived_from must be dropped');
   });
 
   it('respects an explicit base-branch argument', () => {
