@@ -31,6 +31,7 @@ import { resolveHook } from './hook-resolver.ts';
 import type { HookResult, TemplateVars } from './hook-resolver.ts';
 import type { AccountStore } from './accounts.ts';
 import { resolveEffectiveConfig } from './engine-config-resolver.ts';
+import { stripCliFailureLines } from './cli-failure-patterns.ts';
 
 export type LifecycleContext = {
   db: Database;
@@ -200,7 +201,13 @@ async function dispatchHookResult(
               ? '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
               : step.regex;
             const re = new RegExp(regexStr);
-            const match = re.exec(captureResult.data);
+            // Strip CLI-failure lines first so a UUID inside an error message
+            // ("No conversation found with session ID: <uuid>") cannot be
+            // captured and re-written to the DB as the live session id.
+            // Without this filter, a stale-resume produces an infinite recovery
+            // loop on the dead UUID (see scratch/brain/lifecycle-resume-bug.md).
+            const sanitised = stripCliFailureLines(captureResult.data);
+            const match = re.exec(sanitised);
             if (match && match[1]) {
               const captured = match[1].trim();
               ctx.db.updateAgentCapturedVar(opts.agentName, step.var, captured);

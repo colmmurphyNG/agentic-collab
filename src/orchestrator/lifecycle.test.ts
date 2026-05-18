@@ -1290,6 +1290,105 @@ describe('Lifecycle', () => {
       assert.equal(agent.capturedVars!['SESSION_ID'], 'a1b2c3d4-e5f6-7890-abcd-ef1234567890');
     });
 
+    it('refuses to capture a UUID that appears inside a CLI failure line', async () => {
+      // Regression test for the resume-deadlock bug
+      // (scratch/brain/lifecycle-resume-bug.md). Without the strip-failure-lines
+      // guard in lifecycle.ts, the capture step happily extracts the dead UUID
+      // from "No conversation found with session ID: <uuid>" and writes it back
+      // to the DB as the live session id — kicking off an infinite recovery loop.
+      const exitPipeline = JSON.stringify([
+        { type: 'shell', command: '/exit' },
+        { type: 'capture', lines: 50, regex: 'uuid', var: 'SESSION_ID' },
+      ]);
+      db.createAgent({
+        name: 'capture-deadlock-uuid',
+        engine: 'claude',
+        cwd: '/tmp',
+        proxyId: 'p1',
+        hookExit: exitPipeline,
+      });
+      const a = db.getAgent('capture-deadlock-uuid')!;
+      db.updateAgentState('capture-deadlock-uuid', 'active', a.version, {
+        tmuxSession: 'agent-capture-deadlock-uuid',
+        proxyId: 'p1',
+      });
+
+      const captureCtx: LifecycleContext = {
+        ...ctx,
+        proxyDispatch: async (_proxyId: string, command: ProxyCommand): Promise<ProxyResponse> => {
+          proxyCommands.push(command);
+          if (command.action === 'capture') {
+            return {
+              ok: true,
+              data: 'No conversation found with session ID: 67749c98-1c7b-4bdb-8f0e-5a1c5ed7e9be\nuser@host:~$ ',
+            };
+          }
+          if (command.action === 'has_session') return { ok: true, data: false };
+          return { ok: true };
+        },
+      };
+
+      proxyCommands = [];
+      await suspendAgent(captureCtx, 'capture-deadlock-uuid');
+
+      const agent = db.getAgent('capture-deadlock-uuid')!;
+      // The dead UUID from the error message must NOT be captured.
+      assert.equal(agent.capturedVars?.['SESSION_ID'], undefined,
+        'SESSION_ID must not be captured from a CLI-failure error line');
+      assert.equal(agent.currentSessionId, null,
+        'currentSessionId must not be written from a CLI-failure error line');
+    });
+
+    it('captures a fresh UUID even when the pane also contains a failure line with a different UUID', async () => {
+      // A noisier variant of the regression above — scrollback may contain a
+      // historical failure line while a live /status output below carries the
+      // real session id. The strip filter must remove only the failure line
+      // and leave the live UUID intact.
+      const exitPipeline = JSON.stringify([
+        { type: 'shell', command: '/exit' },
+        { type: 'capture', lines: 50, regex: 'uuid', var: 'SESSION_ID' },
+      ]);
+      db.createAgent({
+        name: 'capture-prefers-live-uuid',
+        engine: 'claude',
+        cwd: '/tmp',
+        proxyId: 'p1',
+        hookExit: exitPipeline,
+      });
+      const a = db.getAgent('capture-prefers-live-uuid')!;
+      db.updateAgentState('capture-prefers-live-uuid', 'active', a.version, {
+        tmuxSession: 'agent-capture-prefers-live-uuid',
+        proxyId: 'p1',
+      });
+
+      const liveUuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const captureCtx: LifecycleContext = {
+        ...ctx,
+        proxyDispatch: async (_proxyId: string, command: ProxyCommand): Promise<ProxyResponse> => {
+          proxyCommands.push(command);
+          if (command.action === 'capture') {
+            return {
+              ok: true,
+              data: [
+                'No conversation found with session ID: 11111111-2222-3333-4444-555555555555',
+                'Session abc-123 not found',
+                `Session: ${liveUuid}`,
+                '$',
+              ].join('\n'),
+            };
+          }
+          if (command.action === 'has_session') return { ok: true, data: false };
+          return { ok: true };
+        },
+      };
+
+      proxyCommands = [];
+      await suspendAgent(captureCtx, 'capture-prefers-live-uuid');
+
+      const agent = db.getAgent('capture-prefers-live-uuid')!;
+      assert.equal(agent.capturedVars!['SESSION_ID'], liveUuid);
+    });
+
     it('captures session ID via exit pipeline on reload', async () => {
       const exitPipeline = JSON.stringify([
         { type: 'shell', command: '/exit' },
