@@ -1,6 +1,6 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Database } from './database.ts';
@@ -661,6 +661,226 @@ describe('Lifecycle', () => {
         if (origPagesDir === undefined) delete process.env['PAGES_DIR'];
         else process.env['PAGES_DIR'] = origPagesDir;
         process.env['PERSONAS_DIR'] = origPersonasDir;
+        rmSync(personasDir, { recursive: true, force: true });
+      }
+    });
+
+    it('prefers derived_from frontmatter over name-pattern stripping (item Q v2)', async () => {
+      // Without derived_from, name-stripping would pick the LONGEST prefix that
+      // has a matching persona file. With derived_from, the persona explicitly
+      // declares its master, side-stepping the heuristic entirely.
+      const pagesDir = mkdtempSync(join(tmpdir(), 'pages-derived-from-'));
+      const personasDir = mkdtempSync(join(tmpdir(), 'personas-derived-from-'));
+      const origPagesDir = process.env['PAGES_DIR'];
+      const origPersonasDir = process.env['PERSONAS_DIR'];
+      process.env['PAGES_DIR'] = pagesDir;
+      process.env['PERSONAS_DIR'] = personasDir;
+
+      try {
+        // Seed: both `qa.md` and `qa-runner.md` exist. Name-stripping on
+        // "qa-runner-1701" would yield "qa-runner" (last-hyphen-stripping).
+        // But the persona declares `derived_from: qa`, so master must be `qa`.
+        writeFileSync(join(personasDir, 'qa.md'), '---\nengine: claude\ncwd: /tmp/qa\n---\n');
+        writeFileSync(join(personasDir, 'qa-runner.md'), '---\nengine: claude\ncwd: /tmp/qar\n---\n');
+        writeFileSync(
+          join(personasDir, 'qa-runner-1701.md'),
+          '---\nengine: claude\ncwd: /tmp/qar-1701\nderived_from: qa\n---\n',
+        );
+
+        db.createAgent({ name: 'qa-runner-1701', engine: 'claude', cwd: '/tmp/qar-1701', proxyId: 'p1' });
+        const a = db.getAgent('qa-runner-1701')!;
+        db.updateAgentState('qa-runner-1701', 'active', a.version, {
+          tmuxSession: 'agent-qa-runner-1701',
+          proxyId: 'p1',
+        });
+
+        await destroyAgent(ctx, 'qa-runner-1701');
+
+        const pages = db.listPages();
+        const handoffPage = pages.find((p) => p.slug.startsWith('handoff-qa-runner-1701-'));
+        assert.ok(handoffPage);
+        assert.equal(handoffPage.agent, 'qa', 'master should be qa (declared via derived_from), not qa-runner (name-stripping)');
+
+        const body = readFileSync(join(pagesDir, handoffPage.slug, 'index.md'), 'utf-8');
+        assert.match(body, /# Handoff: qa-runner-1701 → qa/);
+      } finally {
+        process.env['PAGES_DIR'] = origPagesDir;
+        process.env['PERSONAS_DIR'] = origPersonasDir;
+        rmSync(pagesDir, { recursive: true, force: true });
+        rmSync(personasDir, { recursive: true, force: true });
+      }
+    });
+
+    it('falls back to name-stripping when derived_from points at a non-existent persona (item Q v2)', async () => {
+      // A dangling derived_from must not write the handoff to a master that
+      // doesn't exist on disk — we silently fall through to the legacy
+      // name-stripping heuristic so the snapshot still has a home.
+      const pagesDir = mkdtempSync(join(tmpdir(), 'pages-dangling-'));
+      const personasDir = mkdtempSync(join(tmpdir(), 'personas-dangling-'));
+      const origPagesDir = process.env['PAGES_DIR'];
+      const origPersonasDir = process.env['PERSONAS_DIR'];
+      process.env['PAGES_DIR'] = pagesDir;
+      process.env['PERSONAS_DIR'] = personasDir;
+
+      try {
+        // `pwa.md` exists; `nope.md` does not.
+        writeFileSync(join(personasDir, 'pwa.md'), '---\nengine: claude\ncwd: /tmp/pwa\n---\n');
+        writeFileSync(
+          join(personasDir, 'pwa-a.md'),
+          '---\nengine: claude\ncwd: /tmp/pwa-a\nderived_from: nope\n---\n',
+        );
+
+        db.createAgent({ name: 'pwa-a', engine: 'claude', cwd: '/tmp/pwa-a', proxyId: 'p1' });
+        const a = db.getAgent('pwa-a')!;
+        db.updateAgentState('pwa-a', 'active', a.version, { tmuxSession: 'agent-pwa-a', proxyId: 'p1' });
+
+        await destroyAgent(ctx, 'pwa-a');
+
+        const pages = db.listPages();
+        const handoffPage = pages.find((p) => p.slug.startsWith('handoff-pwa-a-'));
+        assert.ok(handoffPage);
+        assert.equal(handoffPage.agent, 'pwa', 'dangling derived_from should fall through to name-stripping → pwa');
+      } finally {
+        process.env['PAGES_DIR'] = origPagesDir;
+        process.env['PERSONAS_DIR'] = origPersonasDir;
+        rmSync(pagesDir, { recursive: true, force: true });
+        rmSync(personasDir, { recursive: true, force: true });
+      }
+    });
+
+    it('mirrors handoff to project memory dir when CLAUDE_PROJECTS_DIR is set (item Q v2)', async () => {
+      const pagesDir = mkdtempSync(join(tmpdir(), 'pages-mirror-'));
+      const personasDir = mkdtempSync(join(tmpdir(), 'personas-mirror-'));
+      const projectsDir = mkdtempSync(join(tmpdir(), 'claude-projects-mirror-'));
+      const origPagesDir = process.env['PAGES_DIR'];
+      const origPersonasDir = process.env['PERSONAS_DIR'];
+      const origProjectsDir = process.env['CLAUDE_PROJECTS_DIR'];
+      process.env['PAGES_DIR'] = pagesDir;
+      process.env['PERSONAS_DIR'] = personasDir;
+      process.env['CLAUDE_PROJECTS_DIR'] = projectsDir;
+
+      try {
+        // Master persona with a host-style cwd that the slug derivation can
+        // convert: `/Users/colm.murphy/dev/SFCC-webapp` → `-Users-colm-murphy-dev-SFCC-webapp`.
+        writeFileSync(
+          join(personasDir, 'pwa.md'),
+          '---\nengine: claude\ncwd: /Users/colm.murphy/dev/SFCC-webapp\n---\n',
+        );
+        writeFileSync(
+          join(personasDir, 'pwa-b.md'),
+          '---\nengine: claude\ncwd: /tmp/pwa-b\nderived_from: pwa\n---\n',
+        );
+
+        db.createAgent({ name: 'pwa-b', engine: 'claude', cwd: '/tmp/pwa-b', proxyId: 'p1' });
+        const a = db.getAgent('pwa-b')!;
+        db.updateAgentState('pwa-b', 'active', a.version, { tmuxSession: 'agent-pwa-b', proxyId: 'p1' });
+
+        await destroyAgent(ctx, 'pwa-b');
+
+        const expectedMemoryDir = join(projectsDir, '-Users-colm-murphy-dev-SFCC-webapp', 'memory');
+        assert.ok(existsSync(expectedMemoryDir), 'project memory dir should be created');
+
+        // Find the handoff_*.md file (timestamp varies per run).
+        const memoryFiles = readdirSync(expectedMemoryDir).filter((f) => f.startsWith('handoff_pwa-b_'));
+        assert.equal(memoryFiles.length, 1, `expected exactly one handoff mirror; got: ${memoryFiles.join(', ')}`);
+
+        const mirroredBody = readFileSync(join(expectedMemoryDir, memoryFiles[0]!), 'utf-8');
+        assert.match(mirroredBody, /^---$/m, 'mirror must have frontmatter');
+        assert.match(mirroredBody, /^type: project$/m, 'mirror frontmatter must declare type: project');
+        assert.match(mirroredBody, /^name: Handoff from pwa-b$/m);
+        assert.match(mirroredBody, /# Handoff: pwa-b → pwa/);
+
+        // MEMORY.md should have a pointer entry.
+        const memoryIndex = readFileSync(join(expectedMemoryDir, 'MEMORY.md'), 'utf-8');
+        assert.match(memoryIndex, /Handoff: pwa-b/);
+        assert.match(memoryIndex, new RegExp(memoryFiles[0]!.replace('.', '\\.')));
+      } finally {
+        process.env['PAGES_DIR'] = origPagesDir;
+        process.env['PERSONAS_DIR'] = origPersonasDir;
+        if (origProjectsDir === undefined) delete process.env['CLAUDE_PROJECTS_DIR'];
+        else process.env['CLAUDE_PROJECTS_DIR'] = origProjectsDir;
+        rmSync(pagesDir, { recursive: true, force: true });
+        rmSync(personasDir, { recursive: true, force: true });
+        rmSync(projectsDir, { recursive: true, force: true });
+      }
+    });
+
+    it('appends to existing MEMORY.md instead of overwriting (item Q v2)', async () => {
+      const pagesDir = mkdtempSync(join(tmpdir(), 'pages-append-'));
+      const personasDir = mkdtempSync(join(tmpdir(), 'personas-append-'));
+      const projectsDir = mkdtempSync(join(tmpdir(), 'claude-projects-append-'));
+      const origPagesDir = process.env['PAGES_DIR'];
+      const origPersonasDir = process.env['PERSONAS_DIR'];
+      const origProjectsDir = process.env['CLAUDE_PROJECTS_DIR'];
+      process.env['PAGES_DIR'] = pagesDir;
+      process.env['PERSONAS_DIR'] = personasDir;
+      process.env['CLAUDE_PROJECTS_DIR'] = projectsDir;
+
+      try {
+        writeFileSync(
+          join(personasDir, 'algo.md'),
+          '---\nengine: claude\ncwd: /Users/colm.murphy/dev/EcommerceAI\n---\n',
+        );
+        writeFileSync(
+          join(personasDir, 'algo-x.md'),
+          '---\nengine: claude\ncwd: /tmp/algo-x\nderived_from: algo\n---\n',
+        );
+
+        // Seed an existing MEMORY.md with an unrelated entry.
+        const memoryDir = join(projectsDir, '-Users-colm-murphy-dev-EcommerceAI', 'memory');
+        mkdirSync(memoryDir, { recursive: true });
+        const preexisting = '- [Existing entry](existing.md) — preserved across handoff writes\n';
+        writeFileSync(join(memoryDir, 'MEMORY.md'), preexisting);
+
+        db.createAgent({ name: 'algo-x', engine: 'claude', cwd: '/tmp/algo-x', proxyId: 'p1' });
+        const a = db.getAgent('algo-x')!;
+        db.updateAgentState('algo-x', 'active', a.version, { tmuxSession: 'agent-algo-x', proxyId: 'p1' });
+
+        await destroyAgent(ctx, 'algo-x');
+
+        const memoryIndex = readFileSync(join(memoryDir, 'MEMORY.md'), 'utf-8');
+        assert.ok(memoryIndex.includes(preexisting), 'pre-existing MEMORY.md entries must be preserved');
+        assert.match(memoryIndex, /Handoff: algo-x/, 'new pointer must be appended');
+      } finally {
+        process.env['PAGES_DIR'] = origPagesDir;
+        process.env['PERSONAS_DIR'] = origPersonasDir;
+        if (origProjectsDir === undefined) delete process.env['CLAUDE_PROJECTS_DIR'];
+        else process.env['CLAUDE_PROJECTS_DIR'] = origProjectsDir;
+        rmSync(pagesDir, { recursive: true, force: true });
+        rmSync(personasDir, { recursive: true, force: true });
+        rmSync(projectsDir, { recursive: true, force: true });
+      }
+    });
+
+    it('skips project-memory mirror silently when CLAUDE_PROJECTS_DIR is unset (item Q v2)', async () => {
+      const pagesDir = mkdtempSync(join(tmpdir(), 'pages-no-mirror-'));
+      const personasDir = mkdtempSync(join(tmpdir(), 'personas-no-mirror-'));
+      const origPagesDir = process.env['PAGES_DIR'];
+      const origPersonasDir = process.env['PERSONAS_DIR'];
+      const origProjectsDir = process.env['CLAUDE_PROJECTS_DIR'];
+      process.env['PAGES_DIR'] = pagesDir;
+      process.env['PERSONAS_DIR'] = personasDir;
+      delete process.env['CLAUDE_PROJECTS_DIR'];
+
+      try {
+        writeFileSync(join(personasDir, 'brain.md'), '---\nengine: claude\ncwd: /Users/colm.murphy/dev/conductor\n---\n');
+
+        db.createAgent({ name: 'brain', engine: 'claude', cwd: '/Users/colm.murphy/dev/conductor', proxyId: 'p1' });
+        const a = db.getAgent('brain')!;
+        db.updateAgentState('brain', 'active', a.version, { tmuxSession: 'agent-brain', proxyId: 'p1' });
+
+        await destroyAgent(ctx, 'brain');
+
+        // The /pages handoff must still exist (mirror is additive, not a
+        // replacement). And destroy must complete.
+        const pages = db.listPages();
+        assert.ok(pages.some((p) => p.slug.startsWith('handoff-brain-')), 'handoff page must still be written without CLAUDE_PROJECTS_DIR');
+        assert.equal(db.getAgent('brain'), undefined, 'destroy must complete');
+      } finally {
+        process.env['PAGES_DIR'] = origPagesDir;
+        process.env['PERSONAS_DIR'] = origPersonasDir;
+        if (origProjectsDir !== undefined) process.env['CLAUDE_PROJECTS_DIR'] = origProjectsDir;
+        rmSync(pagesDir, { recursive: true, force: true });
         rmSync(personasDir, { recursive: true, force: true });
       }
     });
