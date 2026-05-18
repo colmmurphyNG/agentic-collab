@@ -17,8 +17,9 @@ import {
 
 describe('field-registry', () => {
   describe('CONFIG_FIELDS', () => {
-    it('has 19 entries covering all config fields', () => {
-      assert.equal(CONFIG_FIELDS.length, 19);
+    it('has 20 entries covering all config fields', () => {
+      // 20 since item O (PR #5) added hookReload as a first-class registry field.
+      assert.equal(CONFIG_FIELDS.length, 20);
     });
 
     it('has unique field names', () => {
@@ -63,8 +64,9 @@ describe('field-registry', () => {
   describe('nestedPersonaKeys', () => {
     it('produces the same set as current NESTED_FIELDS (minus spawn)', () => {
       const keys = nestedPersonaKeys();
-      // Registry produces all hook fields except 'env' (json kind, not hook) and 'spawn' (legacy alias, not in registry)
-      const expected = new Set(['start', 'resume', 'compact', 'exit', 'interrupt', 'submit']);
+      // Registry produces all hook fields except 'env' (json kind, not hook) and 'spawn' (legacy alias, not in registry).
+      // 'reload' added by item O (PR #5) — first-class hookReload field.
+      const expected = new Set(['start', 'resume', 'compact', 'exit', 'interrupt', 'reload', 'submit']);
       assert.deepEqual(keys, expected);
     });
 
@@ -159,12 +161,13 @@ describe('field-registry', () => {
   describe('configInsertColumns', () => {
     it('matches createAgent INSERT column order', () => {
       const cols = configInsertColumns();
-      // Registry provides everything except 'name' and 'state' (prepended/appended manually)
+      // Registry provides everything except 'name' and 'state' (prepended/appended manually).
+      // hook_reload sits between hook_interrupt and hook_submit per item O (PR #5).
       const expected = [
         'engine', 'model', 'thinking', 'cwd', 'persona', 'permissions',
         'proxy_id', 'agent_group', 'account', 'launch_env',
         'hook_start', 'hook_resume', 'hook_compact', 'hook_exit',
-        'hook_interrupt', 'hook_submit', 'custom_buttons', 'indicators', 'icon',
+        'hook_interrupt', 'hook_reload', 'hook_submit', 'custom_buttons', 'indicators', 'icon',
       ];
       assert.deepEqual(cols, expected);
     });
@@ -182,7 +185,7 @@ describe('field-registry', () => {
         'engine', 'model', 'thinking', 'cwd', 'persona', 'permissions',
         'agent_group', 'account', 'launch_env',
         'hook_start', 'hook_resume', 'hook_compact', 'hook_exit',
-        'hook_interrupt', 'hook_submit', 'custom_buttons', 'indicators', 'icon',
+        'hook_interrupt', 'hook_reload', 'hook_submit', 'custom_buttons', 'indicators', 'icon',
       ];
       assert.deepEqual(cols, expected);
     });
@@ -212,7 +215,7 @@ describe('field-registry', () => {
       };
 
       const params = serializeConfigParams(opts);
-      assert.equal(params.length, 19); // 19 config fields
+      assert.equal(params.length, 20); // 20 config fields (hookReload added by item O)
       assert.equal(params[0], 'claude'); // engine
       assert.equal(params[1], null);    // model
       assert.equal(params[2], null);    // thinking
@@ -312,7 +315,7 @@ describe('field-registry', () => {
       };
 
       const params = serializeUpsertParams(opts);
-      assert.equal(params.length, 18); // 19 - 1 (proxyId)
+      assert.equal(params.length, 19); // 20 (CONFIG_FIELDS) - 1 (proxyId, createOnly)
       // proxyId value 'p1' should NOT appear
       assert.ok(!params.includes('p1'));
     });
