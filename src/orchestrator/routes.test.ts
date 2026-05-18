@@ -1467,3 +1467,210 @@ describe('API Routes — /api/notify (H1: delivery receipts)', () => {
     assert.notEqual(a.data.notifyId, b.data.notifyId, 'two distinct calls must get two distinct notifyIds');
   });
 });
+
+describe('API Routes — /scratch (R: render-only endpoint)', () => {
+  let server: Server;
+  let db: Database;
+  let wss: WebSocketServer;
+  let port: number;
+  let tmpDir: string;
+  let projectA: string;
+  let projectB: string;
+  let prevProjectRenderRoots: string | undefined;
+  /** Set to non-null to enable auth-required mode in the test server. */
+  let testSecret: string | null;
+
+  before(async () => {
+    // realpathSync the tmpdir for the same macOS symlink reason as the V2 cleanup.
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), 'agentic-scratch-test-')));
+    projectA = join(tmpDir, 'project-a');
+    projectB = join(tmpDir, 'project-b');
+    mkdirSync(join(projectA, 'scratch', 'sub'), { recursive: true });
+    mkdirSync(join(projectB, 'scratch'), { recursive: true });
+
+    // Seed: project-a has two markdown files (one nested), project-b has one.
+    writeFileSync(join(projectA, 'scratch', 'top.md'), '# Top\nProject A top-level note.');
+    writeFileSync(join(projectA, 'scratch', 'sub', 'deep.md'), '# Deep\nProject A nested note.');
+    writeFileSync(join(projectB, 'scratch', 'b.md'), '# B\nProject B note.');
+    // Non-markdown file should be invisible to the index and rejected by render.
+    writeFileSync(join(projectA, 'scratch', 'secret.txt'), 'should not appear');
+
+    prevProjectRenderRoots = process.env['PROJECT_RENDER_ROOTS'];
+    process.env['PROJECT_RENDER_ROOTS'] = `${projectA},${projectB}`;
+    testSecret = null; // dev mode by default; per-test can flip via setSecret()
+
+    db = new Database(join(tmpDir, 'test.db'));
+    wss = new WebSocketServer();
+
+    const mockProxyDispatch = async (_proxyId: string, _command: ProxyCommand): Promise<ProxyResponse> => ({ ok: true });
+    const locks = new LockManager(db.rawDb);
+
+    // The router reads orchestratorSecret from the ctx at construction time,
+    // but the authorize() helper called inside our handler re-reads it from
+    // ctx each request — so we mutate ctx.orchestratorSecret via a getter.
+    const ctx: RouteContext = {
+      db,
+      wss,
+      locks,
+      proxyDispatch: mockProxyDispatch,
+      getDashboardHtml: () => '<html></html>',
+      orchestratorHost: 'http://localhost:3000',
+      get orchestratorSecret() { return testSecret; },
+      messageDispatcher: makeTestDispatcher(db, locks, mockProxyDispatch),
+      usagePoller: { getUsageData: () => ({}), pollNow: async () => {} } as any,
+      voiceEnabled: false,
+      accountStore: new AccountStore({ accountsDir: join(tmpDir, 'accounts'), agentHomesDir: join(tmpDir, 'agent-homes'), skipAutoRegister: true }),
+      telegramDispatcher: makeStubTelegramDispatcher(),
+      pagesDir: join(tmpDir, 'pages'),
+      storesDir: join(tmpDir, 'stores'),
+    } as RouteContext;
+
+    const router = createRouter(ctx);
+    server = createServer(async (req, res) => { await router(req, res); });
+    await new Promise<void>((resolve) => {
+      server.listen(0, () => {
+        const addr = server.address();
+        port = typeof addr === 'object' && addr ? addr.port : 0;
+        resolve();
+      });
+    });
+  });
+
+  after(() => {
+    wss.close();
+    server.close();
+    db.close();
+    if (prevProjectRenderRoots !== undefined) {
+      process.env['PROJECT_RENDER_ROOTS'] = prevProjectRenderRoots;
+    } else {
+      delete process.env['PROJECT_RENDER_ROOTS'];
+    }
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    testSecret = null;
+  });
+
+  async function getHtml(path: string, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
+    const resp = await fetch(`http://localhost:${port}${path}`, { method: 'GET', headers });
+    return { status: resp.status, body: await resp.text() };
+  }
+
+  async function getJson(path: string, headers: Record<string, string> = {}): Promise<{ status: number; data: any }> {
+    const resp = await fetch(`http://localhost:${port}${path}`, { method: 'GET', headers });
+    const data = await resp.json().catch(() => ({}));
+    return { status: resp.status, data };
+  }
+
+  it('GET /scratch renders an index grouped by project with markdown links', async () => {
+    const { status, body } = await getHtml('/scratch');
+    assert.equal(status, 200);
+    assert.match(body, /project-a/);
+    assert.match(body, /project-b/);
+    // Both files in project-a should appear, with hrefs to /scratch/<project>/<relpath>.
+    assert.match(body, /\/scratch\/project-a\/top\.md/);
+    assert.match(body, /\/scratch\/project-a\/sub\/deep\.md/);
+    assert.match(body, /\/scratch\/project-b\/b\.md/);
+    // Non-markdown sibling must not appear in the index.
+    assert.ok(!body.includes('secret.txt'), 'non-.md files must not be listed');
+  });
+
+  it('GET /scratch/:project/:path+ renders a .md file as HTML', async () => {
+    const { status, body } = await getHtml('/scratch/project-a/top.md');
+    assert.equal(status, 200);
+    assert.match(body, /Project A top-level note/);
+    // Should be wrapped in the markdown-page HTML shell.
+    assert.match(body, /<!DOCTYPE html>/);
+  });
+
+  it('GET /scratch/:project/:path+ resolves nested paths', async () => {
+    const { status, body } = await getHtml('/scratch/project-a/sub/deep.md');
+    assert.equal(status, 200);
+    assert.match(body, /Project A nested note/);
+  });
+
+  it('returns 404 for an unknown project', async () => {
+    const { status, data } = await getJson('/scratch/no-such-project/whatever.md');
+    assert.equal(status, 404);
+    assert.match(String(data.error), /Unknown project/);
+  });
+
+  it('returns 404 when the file does not exist', async () => {
+    const { status, data } = await getJson('/scratch/project-a/does-not-exist.md');
+    assert.equal(status, 404);
+    assert.match(String(data.error), /File not found/);
+  });
+
+  it('returns 400 for non-.md files', async () => {
+    const { status, data } = await getJson('/scratch/project-a/secret.txt');
+    assert.equal(status, 400);
+    assert.match(String(data.error), /Only \.md files/);
+  });
+
+  it('rejects path traversal at the URL level (..) — normalizes off-route', async () => {
+    // Both `..` and URL-encoded `%2e%2e` get folded by Node's URL parser before
+    // reaching the route, so the request lands on a path that either doesn't
+    // match `/scratch/:project/:path+` (→ 404) or matches with a different
+    // project segment whose path component fails the `.md` check (→ 400).
+    // Either way the server never serves `/etc/passwd` via this route. The
+    // explicit `relPath.includes('..')` guard in resolveScratchFile is
+    // defense-in-depth for unusual clients that don't normalize at the URL layer.
+    const { status } = await getJson('/scratch/project-a/../../../etc/passwd');
+    assert.ok(status === 400 || status === 404, `expected traversal to be rejected (400 or 404), got ${status}`);
+  });
+
+  it('rejects symlink escape (file is a symlink to outside the project scratch dir)', async () => {
+    // Create a symlink inside scratch that points at a file outside the project.
+    const outside = join(tmpDir, 'outside.md');
+    writeFileSync(outside, '# OUTSIDE\nSensitive content that should not be reachable.');
+    const linkPath = join(projectA, 'scratch', 'escape.md');
+    // symlinkSync may fail in restricted filesystems — guard with try/catch.
+    try {
+      const { symlinkSync } = await import('node:fs');
+      symlinkSync(outside, linkPath);
+    } catch {
+      // Skip the assertion path if symlinks can't be created in this env.
+      return;
+    }
+
+    const { status, data } = await getJson('/scratch/project-a/escape.md');
+    assert.equal(status, 400);
+    assert.match(String(data.error), /escapes project scratch dir/);
+  });
+
+  it('returns 401 when secret is set and no auth header is provided', async () => {
+    testSecret = 'shh';
+    const { status } = await getJson('/scratch');
+    assert.equal(status, 401);
+  });
+
+  it('returns 401 when secret is set and the wrong bearer is provided', async () => {
+    testSecret = 'shh';
+    const { status } = await getJson('/scratch', { authorization: 'Bearer wrong' });
+    assert.equal(status, 401);
+  });
+
+  it('returns 200 when the correct bearer is provided', async () => {
+    testSecret = 'correct-token';
+    const { status } = await getHtml('/scratch', { authorization: 'Bearer correct-token' });
+    assert.equal(status, 200);
+  });
+
+  it('returns 401 on the per-file route when secret is set and no auth header is provided', async () => {
+    testSecret = 'shh';
+    const { status } = await getJson('/scratch/project-a/top.md');
+    assert.equal(status, 401);
+  });
+
+  it('renders a friendly empty-state when PROJECT_RENDER_ROOTS is empty', async () => {
+    delete process.env['PROJECT_RENDER_ROOTS'];
+    try {
+      const { status, body } = await getHtml('/scratch');
+      assert.equal(status, 200);
+      assert.match(body, /No projects are configured/);
+    } finally {
+      process.env['PROJECT_RENDER_ROOTS'] = `${projectA},${projectB}`;
+    }
+  });
+});
