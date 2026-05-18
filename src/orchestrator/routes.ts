@@ -2286,16 +2286,47 @@ export function createRouter(ctx: RouteContext): (req: IncomingMessage, res: Ser
 
 function authorize(secret: string | null, req: IncomingMessage): boolean {
   if (!secret) return true; // dev mode — no auth
+
+  // Bearer header path — used by curl, agents, and dashboard fetch() calls.
   const header = req.headers['authorization'];
-  if (typeof header !== 'string') return false;
-  const spaceIdx = header.indexOf(' ');
-  if (spaceIdx === -1) return false;
-  const scheme = header.slice(0, spaceIdx);
-  if (scheme !== 'Bearer') return false;
-  const token = header.slice(spaceIdx + 1);
-  // Timing-safe comparison to prevent token extraction via timing attacks
-  if (token.length !== secret.length) return false;
-  return timingSafeEqual(Buffer.from(token), Buffer.from(secret));
+  if (typeof header === 'string') {
+    const spaceIdx = header.indexOf(' ');
+    if (spaceIdx !== -1) {
+      const scheme = header.slice(0, spaceIdx);
+      const token = header.slice(spaceIdx + 1);
+      if (scheme === 'Bearer' && token.length === secret.length &&
+          timingSafeEqual(Buffer.from(token), Buffer.from(secret))) {
+        return true;
+      }
+    }
+  }
+
+  // Cookie fallback — used by browser-direct navigation (e.g. clicking a link
+  // to /scratch or /pages from the dashboard, where the browser can't add a
+  // bearer header). The dashboard sets `conductor_token` from its localStorage
+  // copy of the secret; same value, same timing-safe comparison.
+  const cookieHeader = req.headers['cookie'];
+  if (typeof cookieHeader === 'string') {
+    const cookieToken = parseCookieToken(cookieHeader);
+    if (cookieToken && cookieToken.length === secret.length &&
+        timingSafeEqual(Buffer.from(cookieToken), Buffer.from(secret))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Extract the `conductor_token` value from a Cookie header. Returns null if
+ *  absent or malformed. Tolerates standard `k=v; k2=v2; ...` formatting. */
+function parseCookieToken(cookieHeader: string): string | null {
+  for (const part of cookieHeader.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    const k = part.slice(0, eq).trim();
+    if (k === 'conductor_token') return part.slice(eq + 1).trim();
+  }
+  return null;
 }
 
 // ── Helpers ──
