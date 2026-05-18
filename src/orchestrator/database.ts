@@ -431,12 +431,17 @@ export class Database {
   /**
    * Merge a single captured variable into the agent's captured_vars JSON map.
    * Creates the map if null, overwrites the key if already present.
+   * Passing `null` for value deletes the key from the map.
    */
-  updateAgentCapturedVar(name: string, varName: string, value: string): void {
+  updateAgentCapturedVar(name: string, varName: string, value: string | null): void {
     const agent = this.getAgent(name);
     if (!agent) return;
     const vars = agent.capturedVars ?? {};
-    vars[varName] = value;
+    if (value === null) {
+      delete vars[varName];
+    } else {
+      vars[varName] = value;
+    }
     this.db.prepare('UPDATE agents SET captured_vars = ? WHERE name = ?').run(
       JSON.stringify(vars),
       name,

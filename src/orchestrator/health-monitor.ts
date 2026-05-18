@@ -22,6 +22,7 @@ import { sessionName, canSuspend } from '../shared/agent-entity.ts';
 import { getAdapter } from './adapters/index.ts';
 import { reloadAgent, recoverAgent, type LifecycleContext } from './lifecycle.ts';
 import { resolveEffectiveConfig } from './engine-config-resolver.ts';
+import { cliFailurePatterns } from './cli-failure-patterns.ts';
 
 type CompiledDetection = {
   json: string;
@@ -595,15 +596,10 @@ export class HealthMonitor {
     // Signal 1: Known CLI exit messages in RECENT output only (last 8 lines).
     // Only scanning recent lines prevents stale error text in tmux scrollback
     // from re-triggering false positives after an agent heals and restarts.
+    // Patterns are shared with lifecycle.ts so the capture step strips the same
+    // failure lines before extracting a UUID — see cli-failure-patterns.ts.
     const recentLines = lines.slice(-8).join('\n');
-    const exitPatterns = [
-      /No conversation found with session ID/,      // claude --resume <stale-id>
-      /Session .+ not found/i,                       // generic session lookup failure
-      /command not found.*claude/i,                  // claude not installed
-      /command not found.*codex/i,                   // codex not installed
-      /command not found.*opencode/i,                // opencode not installed
-    ];
-    const hasExitMessage = exitPatterns.some(re => re.test(recentLines));
+    const hasExitMessage = cliFailurePatterns.some(re => re.test(recentLines));
 
     // Signal 2: Bare shell prompt at the bottom of the pane.
     // Covers common shell configurations:
@@ -612,10 +608,16 @@ export class HealthMonitor {
     //   fish:  user@host ~/path>
     //   root:  root@host:~#
     //   minimal: bash-5.2$ or sh-5.2$
+    //
+    // Also catches zsh continuation prompts that appear when a paste contains
+    // an unmatched quote, heredoc, or paren — the persona onboarding heredoc
+    // can drop the shell into `cmdand quote>` / `dquote>` and never recover.
+    // Without these, wedged agents look idle forever to detectCliExit.
     const shellPromptPatterns = [
-      /\w+@\w+[:\s].*[$%#>]\s*$/,     // user@host:path$ / user@host path% / root@host:~#
-      /^\[?\w+@\w+\s.*\]?[$%#]\s*$/,  // [user@host path]$
-      /^(?:ba)?sh[\d.-]*[$#]\s*$/,     // bash-5.2$ or sh$
+      /\w+@\w+[:\s].*[$%#>]\s*$/,                                       // user@host:path$ / user@host path% / root@host:~#
+      /^\[?\w+@\w+\s.*\]?[$%#]\s*$/,                                    // [user@host path]$
+      /^(?:ba)?sh[\d.-]*[$#]\s*$/,                                       // bash-5.2$ or sh$
+      /^(?:cmdand\s+quote|quote|dquote|heredoc|cmdsubst|cmdor)>\s*$/i,  // zsh continuation prompts
     ];
     const isShellPrompt = shellPromptPatterns.some(re => re.test(lastLine));
 
@@ -643,10 +645,21 @@ export class HealthMonitor {
     console.warn(`[health] ${agent.name}: ${reason}`);
     // Snapshot pane at failure time so heal detection can distinguish stale output
     this.failureSnapshot.set(agent.name, paneOutput);
+
+    // On confirmed resume failure, clear the dead session id so the next
+    // recovery falls through to the `start` hook instead of looping on the
+    // same dead UUID. resolveResumeOrStartHook picks the resume hook whenever
+    // currentSessionId OR capturedVars.SESSION_ID is set, so both must be
+    // cleared. See scratch/brain/lifecycle-resume-bug.md.
+    const isResumeFailure = reason === 'CLI session not found — resume failed';
     this.db.updateAgentState(agent.name, 'failed', agent.version, {
       failedAt: new Date().toISOString(),
       failureReason: reason,
+      ...(isResumeFailure ? { currentSessionId: null } : {}),
     });
+    if (isResumeFailure) {
+      this.db.updateAgentCapturedVar(agent.name, 'SESSION_ID', null);
+    }
     this.db.logEvent(agent.name, 'cli_exit_detected', undefined, { reason, lastLine });
     this.emitSystemMessage(agent.name, `Failed — ${reason}`);
     this.onAgentUpdate(agent.name);
