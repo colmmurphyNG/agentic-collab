@@ -22,16 +22,27 @@ export class TelegramDispatcher {
   /**
    * Send a message to a Telegram chat via Bot API.
    * Respects rate limit of 1 message/second per chatId.
+   *
+   * `notifyId` is an optional correlation id (typically a UUID generated at the
+   * /api/notify entry point) used to thread logs across attempt / outcome so
+   * silent drops are diagnosable after the fact. Format key=value, parseable
+   * via `grep notify_id=<id>` (see brain backlog item H1).
    */
-  async send(botToken: string, chatId: string, text: string): Promise<boolean> {
-    // Rate limit: 1 msg/sec per chatId
+  async send(botToken: string, chatId: string, text: string, notifyId?: string): Promise<boolean> {
+    const idTag = notifyId ? `notify_id=${notifyId} ` : '';
+
+    // Rate limit: 1 msg/sec per chatId.
     const now = Date.now();
     const lastSent = lastSendTimestamps.get(chatId) ?? 0;
     const elapsed = now - lastSent;
     if (elapsed < 1000) {
-      await new Promise<void>((r) => setTimeout(r, 1000 - elapsed));
+      const waitMs = 1000 - elapsed;
+      if (notifyId) console.log(`[telegram] ${idTag}rate_limit_wait ms=${waitMs} chat_id=${chatId}`);
+      await new Promise<void>((r) => setTimeout(r, waitMs));
     }
     lastSendTimestamps.set(chatId, Date.now());
+
+    if (notifyId) console.log(`[telegram] ${idTag}attempt chat_id=${chatId} bytes=${text.length}`);
 
     try {
       const resp = await fetch(`${TELEGRAM_API}/bot${botToken}/sendMessage`, {
@@ -42,12 +53,19 @@ export class TelegramDispatcher {
       });
       if (!resp.ok) {
         const body = await resp.text().catch(() => '');
-        console.error(`[telegram] sendMessage failed (${resp.status}): ${body}`);
+        // Full body, no truncation — Telegram error bodies are small and the
+        // detail is what tells you whether it was rate-limit / bad token / etc.
+        console.error(`[telegram] ${idTag}delivery_failed http_status=${resp.status} chat_id=${chatId} body=${body}`);
         return false;
       }
+      if (notifyId) console.log(`[telegram] ${idTag}delivered http_status=${resp.status} chat_id=${chatId}`);
       return true;
     } catch (err) {
-      console.error(`[telegram] sendMessage error: ${(err as Error).message}`);
+      const e = err as Error;
+      // Surface the error class (TimeoutError / TypeError / AbortError) — they
+      // diagnose differently. TimeoutError = api.telegram.org didn't respond in
+      // 10s; TypeError = DNS / TLS / connection failure.
+      console.error(`[telegram] ${idTag}delivery_error error_name=${e.name} chat_id=${chatId} message=${e.message}`);
       return false;
     }
   }
