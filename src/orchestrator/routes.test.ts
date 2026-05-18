@@ -1657,6 +1657,22 @@ describe('API Routes — /scratch (R: render-only endpoint)', () => {
     assert.equal(status, 200);
   });
 
+  it('returns 200 when the correct token is provided via conductor_token cookie', async () => {
+    // The dashboard mirrors its bearer token into a cookie so browser-direct
+    // navigation (e.g. clicking the Scratch header link) works without an
+    // Authorization header. authorize() falls back to the cookie when the
+    // header is absent.
+    testSecret = 'cookie-token';
+    const { status } = await getHtml('/scratch', { cookie: 'other=foo; conductor_token=cookie-token; bar=baz' });
+    assert.equal(status, 200);
+  });
+
+  it('returns 401 when the conductor_token cookie holds the wrong value', async () => {
+    testSecret = 'cookie-token';
+    const { status } = await getJson('/scratch', { cookie: 'conductor_token=wrong-value' });
+    assert.equal(status, 401);
+  });
+
   it('returns 401 on the per-file route when secret is set and no auth header is provided', async () => {
     testSecret = 'shh';
     const { status } = await getJson('/scratch/project-a/top.md');
