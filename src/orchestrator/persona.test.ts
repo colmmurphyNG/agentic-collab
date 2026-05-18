@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readFileSync } from 'node:fs';
@@ -11,7 +11,12 @@ describe('Persona', () => {
   let tmpDir: string;
 
   before(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'persona-test-'));
+    // Normalize to the canonical path so assertions match what the code under
+    // test returns. On macOS, mkdtempSync(tmpdir()) returns `/var/folders/...`
+    // but `/var/folders` is a symlink to `/private/var/folders`; resolvePersonaPath
+    // canonicalises via realpathSync, producing the `/private/...` form. Without
+    // this, assertions like `equal(resolvePersonaPath(...), path)` fail.
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), 'persona-test-')));
   });
 
   after(() => {
