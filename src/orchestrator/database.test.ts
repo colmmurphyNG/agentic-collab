@@ -893,6 +893,32 @@ describe('Database', () => {
       assert.deepEqual(agent.capturedVars, { SESSION_ID: 'new-id' });
     });
 
+    it('deletes the key when value is null', () => {
+      db.createAgent({
+        name: 'capture-test-delete',
+        engine: 'claude',
+        cwd: '/tmp/test',
+      });
+      db.updateAgentCapturedVar('capture-test-delete', 'SESSION_ID', 'sess-1');
+      db.updateAgentCapturedVar('capture-test-delete', 'BUILD_ID', 'build-42');
+      // Null deletes only the named key, leaves others intact.
+      db.updateAgentCapturedVar('capture-test-delete', 'SESSION_ID', null);
+      const agent = db.getAgent('capture-test-delete')!;
+      assert.deepEqual(agent.capturedVars, { BUILD_ID: 'build-42' });
+    });
+
+    it('tolerates null on an unset key', () => {
+      db.createAgent({
+        name: 'capture-test-delete-missing',
+        engine: 'claude',
+        cwd: '/tmp/test',
+      });
+      // Deleting a key that was never set is a no-op (does not throw).
+      db.updateAgentCapturedVar('capture-test-delete-missing', 'SESSION_ID', null);
+      const agent = db.getAgent('capture-test-delete-missing')!;
+      assert.deepEqual(agent.capturedVars, {});
+    });
+
     it('preserves capturedVars through upsertAgentFromPersona', () => {
       db.createAgent({
         name: 'capture-test-5',
