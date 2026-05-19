@@ -365,6 +365,61 @@ async function finalizeToActive(
 }
 
 /**
+ * Read the persona's `mcps:` allowlist from its frontmatter, if present.
+ * Returns the string array (possibly empty) when defined, or undefined when
+ * the persona doesn't declare the field. Caller distinguishes:
+ *   undefined → fall back to default MCP resolution (no --mcp-config flag)
+ *   [] / non-empty → materialise the file and pass --mcp-config + --strict-mcp-config
+ */
+function resolveMcpAllowlist(personaPath: string): string[] | undefined {
+  const content = loadPersona(personaPath);
+  if (!content) return undefined;
+  const { frontmatter } = parseFrontmatter(content);
+  const mcps = frontmatter['mcps'];
+  if (mcps === undefined) return undefined;
+  if (Array.isArray(mcps) && mcps.every((m) => typeof m === 'string')) {
+    return mcps as string[];
+  }
+  return undefined;
+}
+
+/**
+ * Ask the proxy to materialise a per-agent MCP config file on the host.
+ * Returns the host path to feed into `claude --mcp-config`, or undefined
+ * if the proxy call failed (allowlist couldn't be materialised — skip the
+ * flag and fall back to default behaviour rather than blocking the spawn).
+ */
+async function materialiseMcpConfigForAgent(
+  ctx: LifecycleContext,
+  proxyId: string,
+  agentName: string,
+  cwd: string,
+  allowlist: string[],
+): Promise<string | undefined> {
+  try {
+    const response = await ctx.proxyDispatch(proxyId, {
+      action: 'materialise_mcp_config',
+      agentName,
+      allowlist,
+      cwd,
+    });
+    if (!response.ok) {
+      console.warn(`[lifecycle] ${agentName}: materialise_mcp_config failed: ${response.error}`);
+      return undefined;
+    }
+    const data = response.data as { path: string | null; missing?: string[] } | undefined;
+    if (!data || typeof data.path !== 'string') return undefined;
+    if (data.missing && data.missing.length > 0) {
+      console.warn(`[lifecycle] ${agentName}: MCP allowlist entries not found in host config: ${data.missing.join(', ')}`);
+    }
+    return data.path;
+  } catch (err) {
+    console.warn(`[lifecycle] ${agentName}: materialise_mcp_config threw: ${(err as Error).message}`);
+    return undefined;
+  }
+}
+
+/**
  * Resolve whether to use the resume hook (existing session) or start hook (fresh spawn).
  * Shared by resumeAgent and reloadAgent.
  *
@@ -387,7 +442,10 @@ function resolveResumeOrStartHook(params: {
   systemPrompt: string | null;
   permissions: string | null;
   templateVars: TemplateVars;
+  /** Host path to the materialised per-agent MCP config, when the persona declares `mcps:`. */
+  mcpConfigPath?: string;
 }): { result: HookResult; sessionId: string | null } {
+  const mcpOpts = params.mcpConfigPath !== undefined ? { mcpConfigPath: params.mcpConfigPath } : {};
   if (params.sessionId) {
     const result = resolveHook('resume', params.hookResume, params.agentRecord, {
       resumeOpts: {
@@ -396,6 +454,7 @@ function resolveResumeOrStartHook(params: {
         cwd: params.cwd,
         task: params.resumeTask,
         appendSystemPrompt: params.systemPrompt,
+        ...mcpOpts,
       },
       templateVars: params.templateVars,
     });
@@ -412,6 +471,7 @@ function resolveResumeOrStartHook(params: {
       appendSystemPrompt: params.systemPrompt,
       dangerouslySkipPermissions: params.permissions === 'skip',
       sessionId: newSessionId,
+      ...mcpOpts,
     },
     templateVars: params.templateVars,
   });
@@ -544,6 +604,15 @@ export async function spawnAgent(
 
     // 4. Build and paste spawn command via hook resolver
     const personaFile = resolvePersonaFilePath(opts.name, opts.persona);
+
+    // 4a. If the persona declares an `mcps:` allowlist, ask the proxy to
+    // materialise a per-agent MCP config file on the host filesystem. The
+    // returned path is passed to claude via --mcp-config + --strict-mcp-config.
+    const mcpAllowlist = resolveMcpAllowlist(personaFile);
+    const mcpConfigPath = mcpAllowlist !== undefined
+      ? await materialiseMcpConfigForAgent(ctx, opts.proxyId, opts.name, opts.cwd, mcpAllowlist)
+      : undefined;
+
     const templateVars: TemplateVars = {
       AGENT_NAME: opts.name,
       AGENT_CWD: opts.cwd,
@@ -562,6 +631,7 @@ export async function spawnAgent(
         appendSystemPrompt: systemPrompt,
         dangerouslySkipPermissions: permissions === 'skip',
         sessionId: generatedSessionId,
+        ...(mcpConfigPath !== undefined ? { mcpConfigPath } : {}),
       },
       templateVars,
     });
@@ -705,6 +775,13 @@ export async function resumeAgent(
     //    Use hook resolver: hookResume for existing session, hookStart for fresh spawn.
     const personaFile = resolvePersonaFilePath(name, persona);
 
+    // 4a. Per-persona MCP allowlist (CC). Same flow as spawnAgent — re-materialise
+    // on resume so persona-file edits between sessions are honoured.
+    const mcpAllowlist = resolveMcpAllowlist(personaFile);
+    const mcpConfigPath = mcpAllowlist !== undefined
+      ? await materialiseMcpConfigForAgent(ctx, proxyId, name, cwd, mcpAllowlist)
+      : undefined;
+
     // SESSION_ID resolution: DB currentSessionId → capturedVars.SESSION_ID → null (fresh spawn)
     const resolvedSessionId = currentSessionId
       ?? phase1.current.capturedVars?.['SESSION_ID']
@@ -735,6 +812,7 @@ export async function resumeAgent(
       systemPrompt,
       permissions,
       templateVars: resumeTemplateVars,
+      ...(mcpConfigPath !== undefined ? { mcpConfigPath } : {}),
     });
 
     // Scaffold isolated HOME if agent has an account configured
@@ -1298,6 +1376,14 @@ export async function reloadAgent(
       : undefined;
 
     const personaFile = resolvePersonaFilePath(name, persona);
+
+    // Per-persona MCP allowlist (CC). Reload is the natural place to pick up
+    // mcps: edits — operator dashboards trigger reload after persona edits.
+    const mcpAllowlist = resolveMcpAllowlist(personaFile);
+    const mcpConfigPath = mcpAllowlist !== undefined
+      ? await materialiseMcpConfigForAgent(ctx, proxyId, name, cwd, mcpAllowlist)
+      : undefined;
+
     // Read-after-write outside lock: the exit pipeline's capture step wrote
     // capturedVars atomically via updateAgentCapturedVar (SQL UPDATE) during
     // Phase 2's dispatchHookResult. This read is intentionally outside the
@@ -1328,6 +1414,7 @@ export async function reloadAgent(
       systemPrompt,
       permissions,
       templateVars: reloadTemplateVars,
+      ...(mcpConfigPath !== undefined ? { mcpConfigPath } : {}),
     });
 
     // Scaffold isolated HOME if agent has an account configured
@@ -1461,6 +1548,12 @@ export async function recoverAgent(
       'Resume your work from where you left off.',
     ].join('\n');
 
+    // Per-persona MCP allowlist (CC) — recover path also honours mcps:.
+    const mcpAllowlist = resolveMcpAllowlist(personaFile);
+    const mcpConfigPath = mcpAllowlist !== undefined
+      ? await materialiseMcpConfigForAgent(ctx, proxyId, name, cwd, mcpAllowlist)
+      : undefined;
+
     const startResult = resolveHook('start', hookStart, effectiveCurrent, {
       spawnOpts: {
         name,
@@ -1469,6 +1562,7 @@ export async function recoverAgent(
         appendSystemPrompt: systemPrompt,
         dangerouslySkipPermissions: permissions === 'skip',
         sessionId: generatedSessionId,
+        ...(mcpConfigPath !== undefined ? { mcpConfigPath } : {}),
       },
       templateVars,
     });

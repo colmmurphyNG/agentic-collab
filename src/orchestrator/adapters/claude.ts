@@ -30,6 +30,13 @@ export class ClaudeAdapter implements EngineAdapter {
       parts.push('--session-id', opts.sessionId);
     }
 
+    // Per-persona MCP allowlist (CC). Always paired with --strict-mcp-config
+    // so the materialised file is authoritative (ignores ~/.claude.json globals
+    // and per-cwd .claude/settings.json that aren't already merged in).
+    if (opts.mcpConfigPath) {
+      parts.push('--mcp-config', shellQuote(opts.mcpConfigPath), '--strict-mcp-config');
+    }
+
     if (opts.appendSystemPrompt) {
       parts.push('--append-system-prompt', shellQuote(opts.appendSystemPrompt));
     }
@@ -48,6 +55,10 @@ export class ClaudeAdapter implements EngineAdapter {
 
     if (opts.sessionId) {
       parts.push('--resume', opts.sessionId);
+    }
+
+    if (opts.mcpConfigPath) {
+      parts.push('--mcp-config', shellQuote(opts.mcpConfigPath), '--strict-mcp-config');
     }
 
     if (opts.appendSystemPrompt) {
