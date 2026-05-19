@@ -384,6 +384,16 @@ function resolveMcpAllowlist(personaPath: string): string[] | undefined {
 }
 
 /**
+ * Build the shell-fragment string that pipeline-hook personas can embed via
+ * `$MCP_CONFIG_FLAGS`. Returns the empty string when no MCP config materialised
+ * so the placeholder vanishes cleanly from the shell command.
+ */
+function mcpConfigFlagsFor(mcpConfigPath: string | undefined): string {
+  if (!mcpConfigPath) return '';
+  return `--mcp-config ${shellQuote(mcpConfigPath)} --strict-mcp-config`;
+}
+
+/**
  * Ask the proxy to materialise a per-agent MCP config file on the host.
  * Returns the host path to feed into `claude --mcp-config`, or undefined
  * if the proxy call failed (allowlist couldn't be materialised — skip the
@@ -619,6 +629,7 @@ export async function spawnAgent(
       SESSION_ID: generatedSessionId,
       PERSONA_PROMPT: systemPrompt,
       PERSONA_PROMPT_FILEPATH: personaFile ?? undefined,
+      MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
       capturedVars: phase1.current.capturedVars ?? undefined,
     };
     const startResult = resolveHook('start', hookStart, effectiveCurrent, {
@@ -792,6 +803,7 @@ export async function resumeAgent(
       SESSION_ID: resolvedSessionId ?? undefined,
       PERSONA_PROMPT: systemPrompt,
       PERSONA_PROMPT_FILEPATH: personaFile ?? undefined,
+      MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
       capturedVars: phase1.current.capturedVars ?? undefined,
     };
 
@@ -1398,6 +1410,7 @@ export async function reloadAgent(
       SESSION_ID: existingSessionId ?? name,
       PERSONA_PROMPT: systemPrompt,
       PERSONA_PROMPT_FILEPATH: personaFile ?? undefined,
+      MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
       capturedVars: postExitAgent?.capturedVars ?? phase1.current.capturedVars ?? undefined,
     };
 
@@ -1530,12 +1543,22 @@ export async function recoverAgent(
     // 4. Build spawn command with new session ID
     const generatedSessionId = randomUUID();
     const personaFile = resolvePersonaFilePath(name, persona);
+
+    // Per-persona MCP allowlist (CC) — recover path also honours mcps:.
+    // Resolve BEFORE templateVars so the MCP_CONFIG_FLAGS substitution can
+    // see it.
+    const mcpAllowlist = resolveMcpAllowlist(personaFile);
+    const mcpConfigPath = mcpAllowlist !== undefined
+      ? await materialiseMcpConfigForAgent(ctx, proxyId, name, cwd, mcpAllowlist)
+      : undefined;
+
     const templateVars: TemplateVars = {
       AGENT_NAME: name,
       AGENT_CWD: cwd,
       SESSION_ID: generatedSessionId,
       PERSONA_PROMPT: systemPrompt,
       PERSONA_PROMPT_FILEPATH: personaFile ?? undefined,
+      MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
     };
 
     const recoveryTask = [
@@ -1547,12 +1570,6 @@ export async function recoverAgent(
       '5. Notify the operator you have recovered: \`collab send operator --topic recovery "Session recovered, reconstructing context"\`',
       'Resume your work from where you left off.',
     ].join('\n');
-
-    // Per-persona MCP allowlist (CC) — recover path also honours mcps:.
-    const mcpAllowlist = resolveMcpAllowlist(personaFile);
-    const mcpConfigPath = mcpAllowlist !== undefined
-      ? await materialiseMcpConfigForAgent(ctx, proxyId, name, cwd, mcpAllowlist)
-      : undefined;
 
     const startResult = resolveHook('start', hookStart, effectiveCurrent, {
       spawnOpts: {

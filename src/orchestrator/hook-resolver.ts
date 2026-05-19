@@ -53,6 +53,17 @@ export type TemplateVars = {
   PERSONA_PROMPT?: string;
   /** Path to the persona prompt file on disk */
   PERSONA_PROMPT_FILEPATH?: string;
+  /**
+   * CC opt-in for pipeline-style hooks. Set to
+   *   '--mcp-config <shell-quoted-path> --strict-mcp-config'
+   * when the persona declares an `mcps:` allowlist; empty string otherwise.
+   * Personas that want to honour the allowlist embed `$MCP_CONFIG_FLAGS`
+   * in their shell command, e.g.
+   *   start:
+   *     - shell: claude --dangerously-skip-permissions $MCP_CONFIG_FLAGS --append-system-prompt $PERSONA_PROMPT
+   * Personas without the placeholder keep current behaviour.
+   */
+  MCP_CONFIG_FLAGS?: string;
   /** Captured variables from pipeline capture steps (fallback for $VAR interpolation) */
   capturedVars?: Record<string, string>;
 };
