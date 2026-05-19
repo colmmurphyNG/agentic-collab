@@ -506,6 +506,32 @@ describe('hook-resolver', () => {
       assert.equal(result, 'claude --help');
     });
 
+    it('substitutes $MCP_CONFIG_FLAGS into pipeline-hook shell commands (CC 1.1)', () => {
+      const result = interpolateTemplateVars(
+        'claude --dangerously-skip-permissions $MCP_CONFIG_FLAGS --append-system-prompt $PERSONA_PROMPT',
+        {
+          MCP_CONFIG_FLAGS: "--mcp-config '/home/user/.config/agentic-collab/mcp-configs/brain.json' --strict-mcp-config",
+          PERSONA_PROMPT: 'You are brain',
+        },
+      );
+      assert.equal(
+        result,
+        "claude --dangerously-skip-permissions --mcp-config '/home/user/.config/agentic-collab/mcp-configs/brain.json' --strict-mcp-config --append-system-prompt 'You are brain'",
+      );
+    });
+
+    it('removes $MCP_CONFIG_FLAGS placeholder cleanly when allowlist not set (CC 1.1 backward compat)', () => {
+      const result = interpolateTemplateVars(
+        'claude --dangerously-skip-permissions $MCP_CONFIG_FLAGS --append-system-prompt $PERSONA_PROMPT',
+        { MCP_CONFIG_FLAGS: '', PERSONA_PROMPT: 'You are brain' },
+      );
+      // Empty MCP_CONFIG_FLAGS just collapses to two spaces — shell tolerates it.
+      assert.equal(
+        result,
+        "claude --dangerously-skip-permissions  --append-system-prompt 'You are brain'",
+      );
+    });
+
     it('replaces $AGENT_NAME and $AGENT_CWD', () => {
       const result = interpolateTemplateVars(
         'echo $AGENT_NAME in $AGENT_CWD',
