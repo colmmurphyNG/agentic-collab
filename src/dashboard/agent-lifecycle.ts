@@ -22,8 +22,8 @@ export function setup({ handleAuthError, selectAgent }) {
 
 // ── Constants ──
 
-const DESTRUCTIVE_ACTIONS = new Set(['kill', 'destroy', 'reload']);
-const ACTION_LABELS = { kill: 'Kill', destroy: 'Destroy', exit: 'Exit', resume: 'Resume', interrupt: 'Interrupt', compact: 'Compact', spawn: 'Spawn', reload: 'Reload' };
+const DESTRUCTIVE_ACTIONS = new Set(['kill', 'destroy', 'reload', 'recycle']);
+const ACTION_LABELS = { kill: 'Kill', destroy: 'Destroy', exit: 'Exit', resume: 'Resume', interrupt: 'Interrupt', compact: 'Compact', spawn: 'Spawn', reload: 'Reload', recycle: 'Recycle' };
 
 const ENGINE_TEMPLATES = {
   claude: `---
@@ -140,7 +140,10 @@ You are a specialist agent. Describe your role and responsibilities here.
 
 export async function agentAction(name, act) {
   if (DESTRUCTIVE_ACTIONS.has(act)) {
-    const confirmed = await confirmAction(`${ACTION_LABELS[act] || act} agent "${name}"? This cannot be undone.`);
+    const prompt = act === 'recycle'
+      ? `Recycle agent "${name}"? Writes a handoff snapshot, kills the session, then spawns fresh with a new SESSION_ID. Context is wiped; DB row and persona file are preserved.`
+      : `${ACTION_LABELS[act] || act} agent "${name}"? This cannot be undone.`;
+    const confirmed = await confirmAction(prompt);
     if (!confirmed) return;
   }
 
