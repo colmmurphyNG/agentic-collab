@@ -370,8 +370,17 @@ async function finalizeToActive(
  * the persona doesn't declare the field. Caller distinguishes:
  *   undefined → fall back to default MCP resolution (no --mcp-config flag)
  *   [] / non-empty → materialise the file and pass --mcp-config + --strict-mcp-config
+ *
+ * IMPORTANT: this runs inside the orchestrator container and reads the
+ * persona file off the bind-mounted /app/persistent-personas directory via
+ * resolvePersonaPath (which returns the CONTAINER-side path). Earlier callers
+ * passed the toHostPath() result here — that path doesn't exist inside the
+ * container and the read silently failed, leaving the allowlist dormant.
  */
-function resolveMcpAllowlist(personaPath: string): string[] | undefined {
+function resolveMcpAllowlist(agentName: string, persona?: string | null): string[] | undefined {
+  const explicitPath = persona && (persona.includes('/') || persona.endsWith('.md')) ? persona : null;
+  const personaPath = resolvePersonaPath(agentName, explicitPath);
+  if (!personaPath) return undefined;
   const content = loadPersona(personaPath);
   if (!content) return undefined;
   const { frontmatter } = parseFrontmatter(content);
@@ -618,7 +627,7 @@ export async function spawnAgent(
     // 4a. If the persona declares an `mcps:` allowlist, ask the proxy to
     // materialise a per-agent MCP config file on the host filesystem. The
     // returned path is passed to claude via --mcp-config + --strict-mcp-config.
-    const mcpAllowlist = resolveMcpAllowlist(personaFile);
+    const mcpAllowlist = resolveMcpAllowlist(opts.name, opts.persona);
     const mcpConfigPath = mcpAllowlist !== undefined
       ? await materialiseMcpConfigForAgent(ctx, opts.proxyId, opts.name, opts.cwd, mcpAllowlist)
       : undefined;
@@ -788,7 +797,7 @@ export async function resumeAgent(
 
     // 4a. Per-persona MCP allowlist (CC). Same flow as spawnAgent — re-materialise
     // on resume so persona-file edits between sessions are honoured.
-    const mcpAllowlist = resolveMcpAllowlist(personaFile);
+    const mcpAllowlist = resolveMcpAllowlist(name, persona);
     const mcpConfigPath = mcpAllowlist !== undefined
       ? await materialiseMcpConfigForAgent(ctx, proxyId, name, cwd, mcpAllowlist)
       : undefined;
@@ -1391,7 +1400,7 @@ export async function reloadAgent(
 
     // Per-persona MCP allowlist (CC). Reload is the natural place to pick up
     // mcps: edits — operator dashboards trigger reload after persona edits.
-    const mcpAllowlist = resolveMcpAllowlist(personaFile);
+    const mcpAllowlist = resolveMcpAllowlist(name, persona);
     const mcpConfigPath = mcpAllowlist !== undefined
       ? await materialiseMcpConfigForAgent(ctx, proxyId, name, cwd, mcpAllowlist)
       : undefined;
@@ -1547,7 +1556,7 @@ export async function recoverAgent(
     // Per-persona MCP allowlist (CC) — recover path also honours mcps:.
     // Resolve BEFORE templateVars so the MCP_CONFIG_FLAGS substitution can
     // see it.
-    const mcpAllowlist = resolveMcpAllowlist(personaFile);
+    const mcpAllowlist = resolveMcpAllowlist(name, persona);
     const mcpConfigPath = mcpAllowlist !== undefined
       ? await materialiseMcpConfigForAgent(ctx, proxyId, name, cwd, mcpAllowlist)
       : undefined;
@@ -1705,7 +1714,7 @@ export async function recycleAgent(
 
     // Per-persona MCP allowlist (CC). Materialise BEFORE templateVars so the
     // MCP_CONFIG_FLAGS substitution can see it (when paired with PR #21).
-    const mcpAllowlist = resolveMcpAllowlist(personaFile);
+    const mcpAllowlist = resolveMcpAllowlist(name, persona);
     const mcpConfigPath = mcpAllowlist !== undefined
       ? await materialiseMcpConfigForAgent(ctx, proxyId, name, cwd, mcpAllowlist)
       : undefined;
