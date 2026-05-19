@@ -1716,6 +1716,7 @@ export async function recycleAgent(
       SESSION_ID: generatedSessionId,
       PERSONA_PROMPT: systemPrompt,
       PERSONA_PROMPT_FILEPATH: personaFile ?? undefined,
+      MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
     };
 
     const recycleTask = [
