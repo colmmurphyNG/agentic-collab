@@ -371,19 +371,22 @@ async function finalizeToActive(
  *   undefined → fall back to default MCP resolution (no --mcp-config flag)
  *   [] / non-empty → materialise the file and pass --mcp-config + --strict-mcp-config
  *
- * IMPORTANT: this runs inside the orchestrator container and reads the
- * persona file off the bind-mounted /app/persistent-personas directory via
- * resolvePersonaPath (which returns the CONTAINER-side path). Earlier callers
- * passed the toHostPath() result here — that path doesn't exist inside the
- * container and the read silently failed, leaving the allowlist dormant.
+ * Reads the persona file RAW (via fs.readFileSync) rather than via
+ * loadPersona() — the latter applies the default-persona inheritance prepend
+ * and returns body-only (no `---` delimiters), which would defeat
+ * parseFrontmatter.
  */
 function resolveMcpAllowlist(agentName: string, persona?: string | null): string[] | undefined {
   const explicitPath = persona && (persona.includes('/') || persona.endsWith('.md')) ? persona : null;
   const personaPath = resolvePersonaPath(agentName, explicitPath);
   if (!personaPath) return undefined;
-  const content = loadPersona(personaPath);
-  if (!content) return undefined;
-  const { frontmatter } = parseFrontmatter(content);
+  let raw: string;
+  try {
+    raw = readFileSync(personaPath, 'utf-8');
+  } catch {
+    return undefined;
+  }
+  const { frontmatter } = parseFrontmatter(raw);
   const mcps = frontmatter['mcps'];
   if (mcps === undefined) return undefined;
   if (Array.isArray(mcps) && mcps.every((m) => typeof m === 'string')) {
