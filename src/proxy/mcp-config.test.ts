@@ -112,6 +112,92 @@ describe('proxy/mcp-config', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+
+    it('reads per-project mcpServers from ~/.claude.json projects[<cwd>] map', () => {
+      const dir = tmpDir();
+      try {
+        const cwd = join(dir, 'my-project');
+        mkdirSync(cwd, { recursive: true });
+        const globalPath = join(dir, '.claude.json');
+        writeJson(globalPath, {
+          mcpServers: { atlassian: { command: 'global-atlassian' } },
+          projects: {
+            [cwd]: {
+              mcpServers: {
+                'sfcc-dev': { command: 'sfcc-mcp' },
+                github: { command: 'github-mcp' },
+              },
+            },
+          },
+        });
+
+        const { servers, missing } = buildAgentMcpConfig({
+          allowlist: ['atlassian', 'sfcc-dev', 'github'],
+          cwd,
+          globalConfigPath: globalPath,
+        });
+
+        assert.deepEqual(Object.keys(servers).sort(), ['atlassian', 'github', 'sfcc-dev']);
+        assert.deepEqual(missing, []);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('reads cwd/.mcp.json mcpServers (Claude Code project-root standard)', () => {
+      const dir = tmpDir();
+      try {
+        const cwd = join(dir, 'my-project');
+        mkdirSync(cwd, { recursive: true });
+        writeJson(join(cwd, '.mcp.json'), {
+          mcpServers: { foo: { command: 'foo-mcp' } },
+        });
+        const globalPath = join(dir, '.claude.json');
+        writeJson(globalPath, { mcpServers: {} });
+
+        const { servers } = buildAgentMcpConfig({
+          allowlist: ['foo'],
+          cwd,
+          globalConfigPath: globalPath,
+        });
+
+        assert.equal((servers['foo'] as { command: string }).command, 'foo-mcp');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('cwd/.mcp.json overrides per-project map which overrides global on name collision', () => {
+      const dir = tmpDir();
+      try {
+        const cwd = join(dir, 'my-project');
+        mkdirSync(cwd, { recursive: true });
+        const globalPath = join(dir, '.claude.json');
+        writeJson(globalPath, {
+          mcpServers: { atlassian: { command: 'GLOBAL' } },
+          projects: {
+            [cwd]: { mcpServers: { atlassian: { command: 'PROJECT-SCOPED' } } },
+          },
+        });
+        writeJson(join(cwd, '.claude', 'settings.json'), {
+          mcpServers: { atlassian: { command: 'CWD-SETTINGS' } },
+        });
+        writeJson(join(cwd, '.mcp.json'), {
+          mcpServers: { atlassian: { command: 'CWD-MCP-JSON' } },
+        });
+
+        const { servers } = buildAgentMcpConfig({
+          allowlist: ['atlassian'],
+          cwd,
+          globalConfigPath: globalPath,
+        });
+
+        // Most-specific source wins.
+        assert.equal((servers['atlassian'] as { command: string }).command, 'CWD-MCP-JSON');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('materialiseMcpConfig', () => {
