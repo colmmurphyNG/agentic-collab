@@ -1598,6 +1598,163 @@ export async function recoverAgent(
   }
 }
 
+const RECYCLE_TIMEOUT_MS = parseInt(process.env['RECYCLE_TIMEOUT_MS'] ?? '60000', 10);
+
+/**
+ * Recycle an agent: write a Q v1/v2 handoff snapshot, kill the existing
+ * tmux session, then spawn fresh with a new SESSION_ID. The DB row and
+ * persona file are preserved (in contrast to destroy).
+ *
+ * Sits between Reload (no context refresh — same session id via --resume)
+ * and Destroy (terminal — removes the agent entirely):
+ *
+ *   Reload  → same SESSION_ID, persona prompt reapplied. Context preserved.
+ *   Recycle → handoff snapshot + fresh SESSION_ID. Context wiped; new
+ *             instance reads the snapshot via its master's MEMORY.md.
+ *   Destroy → handoff snapshot + remove DB row + unlink persona file.
+ *
+ * Accepts agents in 'active', 'idle', or 'failed' state. Three-phase
+ * locking. Reuses captureDestroyHandoff + spawn machinery.
+ *
+ * Foundation for Z (auto-recycle at 92% ctx) — same primitive, different
+ * trigger source.
+ */
+export async function recycleAgent(
+  ctx: LifecycleContext,
+  name: string,
+): Promise<AgentRecord> {
+  const peers = computePeers(ctx, name);
+
+  // ── Phase 1: validate + transition to 'spawning' ──
+  const phase1 = await ctx.locks.withLock(name, async () => {
+    const agent = ctx.db.getAgent(name);
+    if (!agent) throw new Error(`Agent "${name}" not found`);
+    const acceptable = new Set(['active', 'idle', 'failed']);
+    if (!acceptable.has(agent.state)) {
+      throw new Error(`Agent "${name}" is in state "${agent.state}", recycle requires one of: active, idle, failed`);
+    }
+    const proxyId = requireProxy(agent);
+
+    const current = ctx.db.updateAgentState(name, 'spawning', agent.version, {
+      lastActivity: new Date().toISOString(),
+    });
+
+    return {
+      current,
+      proxyId,
+      cwd: agent.cwd,
+      persona: agent.persona,
+      spawnCount: agent.spawnCount,
+      oldTmuxSession: sessionName(agent),
+      agentSnapshot: agent,
+    };
+  });
+
+  const { proxyId, cwd, persona, spawnCount, oldTmuxSession, agentSnapshot } = phase1;
+
+  const engineConfig = ctx.db.getEngineConfig(phase1.current.engine);
+  const effectiveCurrent = resolveEffectiveConfig(phase1.current, engineConfig);
+  const engine = effectiveCurrent.engine;
+  const permissions = effectiveCurrent.permissions;
+  const hookStart = effectiveCurrent.hookStart;
+
+  const watchdog = startWatchdog(ctx, name, 'spawning', RECYCLE_TIMEOUT_MS, proxyId, oldTmuxSession);
+
+  try {
+    // ── Phase 2: handoff + kill + fresh spawn (no lock) ──
+    const adapter = getAdapter(engine);
+
+    // 1. Write handoff snapshot BEFORE killing — the tmux capture would
+    //    return empty once the session is gone.
+    await captureDestroyHandoff(ctx, agentSnapshot);
+
+    // 2. Kill the existing tmux session (best-effort — may already be gone
+    //    if the agent was in 'failed' state).
+    await ctx.proxyDispatch(proxyId, {
+      action: 'kill_session',
+      sessionName: oldTmuxSession,
+    }).catch(() => {});
+
+    // 3. Compose system prompt
+    const systemPrompt = buildSystemPrompt(ctx, name, peers, persona);
+
+    // 4. Create fresh tmux session
+    const tmuxSession = `agent-${name}`;
+    await createSessionAndWriteProfile(ctx, proxyId, tmuxSession, cwd, adapter, name, systemPrompt);
+
+    // 5. Build start command with new SESSION_ID
+    const generatedSessionId = randomUUID();
+    const personaFile = resolvePersonaFilePath(name, persona);
+
+    // Per-persona MCP allowlist (CC). Materialise BEFORE templateVars so the
+    // MCP_CONFIG_FLAGS substitution can see it (when paired with PR #21).
+    const mcpAllowlist = resolveMcpAllowlist(personaFile);
+    const mcpConfigPath = mcpAllowlist !== undefined
+      ? await materialiseMcpConfigForAgent(ctx, proxyId, name, cwd, mcpAllowlist)
+      : undefined;
+
+    const templateVars: TemplateVars = {
+      AGENT_NAME: name,
+      AGENT_CWD: cwd,
+      SESSION_ID: generatedSessionId,
+      PERSONA_PROMPT: systemPrompt,
+      PERSONA_PROMPT_FILEPATH: personaFile ?? undefined,
+    };
+
+    const recycleTask = [
+      'Your previous instance was recycled to reset context. Reconstruct from durable state:',
+      '1. Your persona is reloaded (system prompt + body) — re-read it.',
+      `2. Recent activity: \`git log --oneline -20\``,
+      '3. Peer status: \`collab agents\`',
+      '4. Your last messages: \`collab queue --limit 20\`',
+      `5. Handoff snapshot from the previous instance is available via the master persona's project MEMORY.md (look for \`handoff_${name}_<timestamp>.md\` pointers). Read it to recover context.`,
+      'Resume your work; notify the operator if anything needs attention.',
+    ].join('\n');
+
+    const startResult = resolveHook('start', hookStart, effectiveCurrent, {
+      spawnOpts: {
+        name,
+        cwd,
+        task: recycleTask,
+        appendSystemPrompt: systemPrompt,
+        dangerouslySkipPermissions: permissions === 'skip',
+        sessionId: generatedSessionId,
+        ...(mcpConfigPath !== undefined ? { mcpConfigPath } : {}),
+      },
+      templateVars,
+    });
+
+    // Scaffold isolated HOME if agent has an account configured
+    let accountHome: string | undefined;
+    if (phase1.current.account && ctx.accountStore) {
+      const home = ctx.accountStore.scaffoldAgentHome(name, phase1.current.account);
+      if (home) accountHome = home;
+    }
+
+    const wrappedStart = wrapLaunchResult(startResult, effectiveCurrent, personaFile, accountHome);
+    await dispatchHookResult(ctx, proxyId, tmuxSession, wrappedStart, { agentName: name });
+
+    // 6. Inject /rename + brief settle
+    await injectRename(ctx, proxyId, tmuxSession, adapter, name);
+    await sleep(POST_SPAWN_ACTIVE_DELAY_MS);
+
+    // ── Phase 3: finalize ──
+    return await finalizeToActive(ctx, name, 'spawning', 'recycle_interrupted', {
+      tmuxSession,
+      spawnCount: spawnCount + 1,
+      lastContextPct: 0,
+      lastActivity: new Date().toISOString(),
+      currentSessionId: generatedSessionId,
+    }, 'recycled', {
+      engine,
+      sessionId: generatedSessionId,
+      previousSessionId: agentSnapshot.currentSessionId ?? undefined,
+    }, 'recycle');
+  } finally {
+    clearTimeout(watchdog);
+  }
+}
+
 /**
  * Interrupt an active agent: send escape keys to cancel current operation.
  * Single-phase lock — fast operation.
