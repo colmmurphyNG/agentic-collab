@@ -260,6 +260,16 @@ async function executeCommand(command: ProxyCommand): Promise<ProxyResponse> {
         tmux.clearHistory(command.sessionName);
         return { ok: true };
 
+      case 'materialise_mcp_config': {
+        const { materialiseMcpConfig } = await import('./mcp-config.ts');
+        const result = materialiseMcpConfig({
+          agentName: command.agentName,
+          allowlist: command.allowlist,
+          cwd: command.cwd,
+        });
+        return { ok: true, data: result };
+      }
+
       default:
         return { ok: false, error: `Unknown action: ${(command as Record<string, unknown>).action}` };
     }
