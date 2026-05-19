@@ -222,15 +222,24 @@ route('GET', '/api/agents/:name', async (_req, res, match, ctx) => {
 });
 
 route('POST', '/api/agents', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
+  const body = await readJson<{
+    name?: string;
+    cwd?: string;
+    engine?: string;
+    model?: string;
+    thinking?: string;
+    permissions?: string;
+    proxyId?: string;
+    group?: string;
+  }>(req);
   if (!body.name || !body.cwd) {
     return json(res, 400, { error: 'name, cwd required' });
   }
 
-  const nameError = validateAgentName(body.name as string);
+  const nameError = validateAgentName(body.name);
   if (nameError) return json(res, 400, { error: nameError });
 
-  const resolvedEngine = body.engine as string | undefined;
+  const resolvedEngine = body.engine;
   if (!resolvedEngine) {
     return json(res, 400, { error: 'engine is required' });
   }
@@ -308,7 +317,13 @@ route('DELETE', '/api/agents/:name', async (_req, res, match, ctx) => {
 // ── Agent Messaging ──
 
 route('POST', '/api/agents/send', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
+  const body = await readJson<{
+    from?: string;
+    to?: string;
+    message?: string;
+    topic?: string;
+    replyReminder?: number | boolean;
+  }>(req);
   if (!body.from || !body.to || !body.message || !body.topic) {
     return json(res, 400, { error: 'from, to, message, topic required' });
   }
@@ -321,37 +336,37 @@ route('POST', '/api/agents/send', async (req, res, _match, ctx) => {
 
   const messageId = generateMessageId();
   const sanitized = sanitizeMessage(body.message);
-  const topicStr = body.topic as string;
+  const topicStr = body.topic;
 
   // Format envelope with topic
-  const envelope = buildReplyEnvelope(body.from as string, topicStr, sanitized);
+  const envelope = buildReplyEnvelope(body.from, topicStr, sanitized);
 
   // Enqueue for async delivery
   const pending = ctx.db.enqueueMessage({
-    sourceAgent: body.from as string,
-    targetAgent: body.to as string,
+    sourceAgent: body.from,
+    targetAgent: body.to,
     envelope,
   });
 
   // Store in dashboard_messages for sender thread (from_agent direction — agent sent it)
-  const senderMsg = ctx.db.addDashboardMessage(body.from as string, 'from_agent', sanitized, {
+  const senderMsg = ctx.db.addDashboardMessage(body.from, 'from_agent', sanitized, {
     topic: topicStr,
-    sourceAgent: body.from as string,
-    targetAgent: body.to as string,
+    sourceAgent: body.from,
+    targetAgent: body.to,
   });
   ctx.db.linkDashboardMessageToQueue(senderMsg.id, pending.id);
 
   // Store in dashboard_messages for receiver thread (to_agent direction — message going to agent)
-  const receiverMsg = ctx.db.addDashboardMessage(body.to as string, 'to_agent', sanitized, {
+  const receiverMsg = ctx.db.addDashboardMessage(body.to, 'to_agent', sanitized, {
     topic: topicStr,
-    sourceAgent: body.from as string,
-    targetAgent: body.to as string,
+    sourceAgent: body.from,
+    targetAgent: body.to,
   });
   ctx.db.linkDashboardMessageToQueue(receiverMsg.id, pending.id);
 
   // Log routing events
-  ctx.db.logEvent(body.from as string, 'message_queued', messageId, { to: body.to, queueId: pending.id });
-  ctx.db.logEvent(body.to as string, 'message_queued', messageId, { from: body.from, queueId: pending.id });
+  ctx.db.logEvent(body.from, 'message_queued', messageId, { to: body.to, queueId: pending.id });
+  ctx.db.logEvent(body.to, 'message_queued', messageId, { from: body.from, queueId: pending.id });
 
   // Broadcast both messages + queue update to dashboard
   const linkedSenderMsg = { ...senderMsg, queueId: pending.id, deliveryStatus: 'pending' };
@@ -364,11 +379,11 @@ route('POST', '/api/agents/send', async (req, res, _match, ctx) => {
   if (body.replyReminder) {
     const cadence = typeof body.replyReminder === 'number' ? body.replyReminder : 30;
     const prompt = `[reply-reminder] topic: ${topicStr} | from: ${body.from} | "${sanitized}" — Please respond if you haven't already.`;
-    ctx.db.createReminder({ agentName: body.to as string, createdBy: body.from as string, prompt, cadenceMinutes: Math.max(cadence, 5) });
+    ctx.db.createReminder({ agentName: body.to, createdBy: body.from, prompt, cadenceMinutes: Math.max(cadence, 5) });
   }
 
   // Event-driven delivery — attempt immediately, don't block response
-  ctx.messageDispatcher.tryDeliver(body.to as string).catch((err) => {
+  ctx.messageDispatcher.tryDeliver(body.to).catch((err) => {
     console.error(`[routes] Immediate delivery failed for ${body.to}:`, (err as Error).message);
   });
 
@@ -378,7 +393,12 @@ route('POST', '/api/agents/send', async (req, res, _match, ctx) => {
 // ── Dashboard Messages ──
 
 route('POST', '/api/dashboard/send', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
+  const body = await readJson<{
+    agent?: string;
+    message?: string;
+    topic?: string;
+    replyReminder?: number | boolean;
+  }>(req);
   if (!body.agent || !body.message || !body.topic) {
     return json(res, 400, { error: 'agent, message, topic required' });
   }
@@ -387,16 +407,16 @@ route('POST', '/api/dashboard/send', async (req, res, _match, ctx) => {
   if (!agent) return json(res, 404, { error: `Agent "${body.agent}" not found` });
 
   const sanitized = sanitizeMessage(body.message);
-  const topicStr = body.topic as string;
+  const topicStr = body.topic;
 
   const envelope = buildReplyEnvelope('dashboard', topicStr, sanitized);
   const { msg, pending } = enqueueAndDeliver(ctx, {
-    agentName: body.agent as string,
+    agentName: body.agent,
     displayMessage: sanitized,
     envelope,
     topic: topicStr,
     sourceAgent: 'dashboard',
-    targetAgent: body.agent as string,
+    targetAgent: body.agent,
     queueSourceAgent: null,
   });
 
@@ -404,7 +424,7 @@ route('POST', '/api/dashboard/send', async (req, res, _match, ctx) => {
   if (body.replyReminder) {
     const cadence = typeof body.replyReminder === 'number' ? body.replyReminder : 30;
     const prompt = `[reply-reminder] topic: ${topicStr} | from: dashboard | "${sanitized}" — Please respond if you haven't already.`;
-    ctx.db.createReminder({ agentName: body.agent as string, createdBy: 'dashboard', prompt, cadenceMinutes: Math.max(cadence, 5) });
+    ctx.db.createReminder({ agentName: body.agent, createdBy: 'dashboard', prompt, cadenceMinutes: Math.max(cadence, 5) });
   }
 
   json(res, 202, { ok: true, msg, queueId: pending.id, status: 'pending' });
@@ -506,13 +526,17 @@ route('POST', '/api/dashboard/upload', async (req, res, _match, ctx) => {
 });
 
 route('POST', '/api/dashboard/reply', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
+  const body = await readJson<{
+    agent?: string;
+    message?: string;
+    topic?: string;
+  }>(req);
   if (!body.agent || !body.message || !body.topic) {
     return json(res, 400, { error: 'agent, message, topic required' });
   }
 
   const sanitized = sanitizeMessage(body.message);
-  const msg = ctx.db.addDashboardMessage(body.agent, 'from_agent', sanitized, { topic: body.topic as string, sourceAgent: body.agent as string });
+  const msg = ctx.db.addDashboardMessage(body.agent, 'from_agent', sanitized, { topic: body.topic, sourceAgent: body.agent });
 
   // Broadcast to dashboard WebSocket
   ctx.wss.broadcast(JSON.stringify({ type: 'message', msg }));
@@ -585,7 +609,12 @@ route('POST', '/api/dashboard/messages/:id/withdraw', async (_req, res, match, c
 // ── Proxy Registration ──
 
 route('POST', '/api/proxy/register', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
+  const body = await readJson<{
+    proxyId?: string;
+    token?: string;
+    host?: string;
+    version?: string;
+  }>(req);
   if (!body.proxyId || !body.token || !body.host) {
     return json(res, 400, { error: 'proxyId, token, host required' });
   }
@@ -612,7 +641,7 @@ route('POST', '/api/proxy/register', async (req, res, _match, ctx) => {
 });
 
 route('POST', '/api/proxy/heartbeat', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
+  const body = await readJson<{ proxyId?: string }>(req);
   if (!body.proxyId) return json(res, 400, { error: 'proxyId required' });
 
   const updated = ctx.db.updateProxyHeartbeat(body.proxyId);
@@ -703,11 +732,11 @@ route('GET', '/api/engine-configs/:name', async (_req, res, match, ctx) => {
 });
 
 route('POST', '/api/engine-configs', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
+  const body = await readJson<{ name?: string; engine?: string }>(req);
   if (!body.name || !body.engine) return json(res, 400, { error: 'name and engine required' });
   try {
     ctx.db.createEngineConfig(body as Parameters<typeof ctx.db.createEngineConfig>[0]);
-    const config = ctx.db.getEngineConfig(body.name as string);
+    const config = ctx.db.getEngineConfig(body.name);
     ctx.wss.broadcast(JSON.stringify({ type: 'engine_config_update', config }));
     json(res, 201, config);
   } catch (err) {
@@ -2338,7 +2367,7 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 
 const MAX_BODY_BYTES = 1_048_576; // 1 MB
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJson<T = Record<string, unknown>>(req: IncomingMessage): Promise<T> {
   const chunks: Buffer[] = [];
   let totalLength = 0;
   for await (const chunk of req) {
@@ -2351,7 +2380,7 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   const text = Buffer.concat(chunks).toString('utf-8');
   if (!text) return {};
   try {
-    return JSON.parse(text) as Record<string, unknown>;
+    return JSON.parse(text) as T;
   } catch {
     throw new Error('Invalid JSON body');
   }
