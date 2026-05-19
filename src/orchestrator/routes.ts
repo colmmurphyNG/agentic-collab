@@ -460,9 +460,10 @@ route('POST', '/api/dashboard/upload', async (req, res, _match, ctx) => {
   proxyUrl.searchParams.set('cwd', agent.cwd);
   proxyUrl.searchParams.set('filename', filename);
 
-  const proxyResult = await new Promise<{ ok: boolean; data?: Record<string, unknown>; error?: string }>((resolve) => {
+  type UploadProxyResult = { ok: boolean; data?: { path?: string; size?: number }; error?: string };
+  const proxyResult = await new Promise<UploadProxyResult>((resolve) => {
     let settled = false;
-    const settle = (result: { ok: boolean; data?: Record<string, unknown>; error?: string }) => {
+    const settle = (result: UploadProxyResult) => {
       if (settled) return;
       settled = true;
       resolve(result);
@@ -500,8 +501,8 @@ route('POST', '/api/dashboard/upload', async (req, res, _match, ctx) => {
     return json(res, 500, { error: proxyResult.error ?? 'File write failed' });
   }
 
-  const writtenPath = (proxyResult.data?.path as string) ?? `${agent.cwd}/${filename}`;
-  const fileSize = (proxyResult.data?.size as number) ?? 0;
+  const writtenPath = proxyResult.data?.path ?? `${agent.cwd}/${filename}`;
+  const fileSize = proxyResult.data?.size ?? 0;
 
   // Enqueue agent notification through existing pipeline
   const uploadNotice = `I uploaded ${writtenPath}`;
@@ -561,11 +562,11 @@ route('GET', '/api/dashboard/messages/search', async (req, res, _match, ctx) => 
 });
 
 route('PUT', '/api/dashboard/read-cursor', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
+  const body = await readJson<{ agent?: string }>(req);
   if (!body.agent || typeof body.agent !== 'string') {
     return json(res, 400, { error: 'agent (string) required' });
   }
-  ctx.db.updateReadCursor(body.agent as string);
+  ctx.db.updateReadCursor(body.agent);
   json(res, 200, { ok: true });
 });
 
@@ -942,7 +943,7 @@ route('GET', '/api/pages', async (req, res, _match, ctx) => {
  */
 route('POST', '/api/pages/:slug/archive', async (req, res, match, ctx) => {
   const slug = match.pathname.groups['slug']!;
-  const body = await readJson(req);
+  const body = await readJson<{ archived?: boolean }>(req);
   const archived = body.archived === undefined ? true : !!body.archived;
 
   const existing = ctx.db.getPage(slug);
@@ -1222,9 +1223,9 @@ function checkStoreSize(storesDir: string, name: string): boolean {
 }
 
 route('POST', '/api/stores', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
-  const name = body.name as string | undefined;
-  const agent = (body.agent as string | undefined) ?? null;
+  const body = await readJson<{ name?: string; agent?: string }>(req);
+  const name = body.name;
+  const agent = body.agent ?? null;
 
   if (!name || !SLUG_RE.test(name)) return json(res, 400, { error: 'Invalid store name (kebab-case, 2-64 chars)' });
 
@@ -1278,9 +1279,9 @@ route('POST', '/api/stores/:name/query', async (req, res, match, ctx) => {
   const record = ctx.db.getStore(name);
   if (!record) return json(res, 404, { error: 'Store not found' });
 
-  const body = await readJson(req);
-  const sql = body.sql as string | undefined;
-  const params = (body.params as unknown[]) ?? [];
+  const body = await readJson<{ sql?: string; params?: unknown[] }>(req);
+  const sql = body.sql;
+  const params = body.params ?? [];
 
   if (!sql) return json(res, 400, { error: 'sql is required' });
   const sqlErr = validateStoreSql(sql);
@@ -1338,10 +1339,14 @@ route('DELETE', '/api/stores/:name', async (_req, res, match, ctx) => {
 // ── Destinations (Telegram, etc.) ──
 
 route('POST', '/api/destinations', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
-  const name = body.name as string | undefined;
-  const type = body.type as string | undefined;
-  const config = body.config as Record<string, unknown> | undefined;
+  const body = await readJson<{
+    name?: string;
+    type?: string;
+    config?: { botToken?: string; chatId?: string } & Record<string, unknown>;
+  }>(req);
+  const name = body.name;
+  const type = body.type;
+  const config = body.config;
 
   if (!name || typeof name !== 'string' || name.length < 1 || name.length > 64) {
     return json(res, 400, { error: 'name required (1-64 chars)' });
@@ -1382,9 +1387,9 @@ route('PATCH', '/api/destinations/:name', async (req, res, match, ctx) => {
   const existing = ctx.db.getDestination(name);
   if (!existing) return json(res, 404, { error: 'Destination not found' });
 
-  const body = await readJson(req);
-  const config = body.config as Record<string, unknown> | undefined;
-  const enabled = typeof body.enabled === 'boolean' ? (body.enabled as boolean) : undefined;
+  const body = await readJson<{ config?: Record<string, unknown>; enabled?: boolean }>(req);
+  const config = body.config;
+  const enabled = typeof body.enabled === 'boolean' ? body.enabled : undefined;
 
   if (config === undefined && enabled === undefined) {
     return json(res, 400, { error: 'At least one of "config" or "enabled" must be provided' });
@@ -1441,16 +1446,16 @@ route('POST', '/api/destinations/:name/send', async (req, res, match, ctx) => {
   if (!dest) return json(res, 404, { error: 'Destination not found' });
   if (!dest.enabled) return json(res, 400, { error: 'Destination is disabled' });
 
-  const body = await readJson(req);
-  const message = body.message as string | undefined;
+  const body = await readJson<{ message?: string; fromAgent?: string }>(req);
+  const message = body.message;
   if (!message) return json(res, 400, { error: 'message required' });
 
-  const fromAgent = body.fromAgent as string | undefined;
+  const fromAgent = body.fromAgent;
   const text = fromAgent ? `[${fromAgent}] ${message}` : message;
 
   if (dest.type === 'telegram') {
-    const botToken = dest.config.botToken as string;
-    const chatId = dest.config.chatId as string;
+    const botToken = dest.config['botToken'] as string;
+    const chatId = dest.config['chatId'] as string;
     const ok = await ctx.telegramDispatcher.send(botToken, chatId, text);
     if (!ok) return json(res, 502, { error: 'Telegram send failed' });
     json(res, 200, { ok: true });
@@ -1465,8 +1470,8 @@ route('POST', '/api/destinations/:name/test', async (_req, res, match, ctx) => {
   if (!dest) return json(res, 404, { error: 'Destination not found' });
 
   if (dest.type === 'telegram') {
-    const botToken = dest.config.botToken as string;
-    const chatId = dest.config.chatId as string;
+    const botToken = dest.config['botToken'] as string;
+    const chatId = dest.config['chatId'] as string;
     const ok = await ctx.telegramDispatcher.send(botToken, chatId, `[agentic-collab] Test message from destination "${name}"`);
     if (!ok) return json(res, 502, { error: 'Telegram test send failed' });
     json(res, 200, { ok: true });
@@ -1505,7 +1510,7 @@ route('GET', '/api/personas/:name', async (_req, res, match) => {
 route('PUT', '/api/personas/:name', async (req, res, match) => {
   const name = match.pathname.groups['name']!;
   if (!NAME_RE.test(name)) return json(res, 400, { error: 'Invalid persona name' });
-  const body = await readJson(req);
+  const body = await readJson<{ content?: string }>(req);
   if (typeof body.content !== 'string') return json(res, 400, { error: 'content (string) required' });
   try {
     const dir = getPersonasDir();
@@ -1518,7 +1523,7 @@ route('PUT', '/api/personas/:name', async (req, res, match) => {
 });
 
 route('POST', '/api/personas', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
+  const body = await readJson<{ name?: string; content?: string }>(req);
   if (!body.name || typeof body.name !== 'string') {
     return json(res, 400, { error: 'name (string) required' });
   }
@@ -1526,11 +1531,11 @@ route('POST', '/api/personas', async (req, res, _match, ctx) => {
     return json(res, 400, { error: 'content (string) required' });
   }
 
-  const name = body.name as string;
+  const name = body.name;
   if (!NAME_RE.test(name)) return json(res, 400, { error: 'Invalid persona name' });
 
   try {
-    const persona = createPersonaAndAgent(ctx.db, name, body.content as string);
+    const persona = createPersonaAndAgent(ctx.db, name, body.content);
     const agent = ctx.db.getAgent(name);
     ctx.db.logEvent(name, 'persona_created');
     broadcastAgentUpdate(ctx, name);
@@ -1556,7 +1561,14 @@ route('POST', '/api/sync-personas', async (_req, res, _match, ctx) => {
 
 route('POST', '/api/agents/:name/spawn', async (req, res, match, ctx) => {
   const name = match.pathname.groups['name']!;
-  const body = await readJson(req);
+  const body = await readJson<{
+    model?: string;
+    thinking?: string;
+    cwd?: string;
+    persona?: string;
+    proxyId?: string;
+    task?: string;
+  }>(req);
 
   try {
     const lifecycleCtx = makeLifecycleCtx(ctx);
@@ -1568,12 +1580,12 @@ route('POST', '/api/agents/:name/spawn', async (req, res, match, ctx) => {
     const result = await spawnAgent(lifecycleCtx, {
       name,
       engine: agent.engine,
-      model: (body.model as string | undefined) ?? agent.model ?? undefined,
-      thinking: (body.thinking as string | undefined) ?? agent.thinking ?? undefined,
-      cwd: (body.cwd as string | undefined) ?? agent.cwd,
-      persona: (body.persona as string | undefined) ?? agent.persona ?? undefined,
-      proxyId: resolveProxyId(ctx, agent, body.proxyId as string | undefined),
-      task: body.task as string | undefined,
+      model: body.model ?? agent.model ?? undefined,
+      thinking: body.thinking ?? agent.thinking ?? undefined,
+      cwd: body.cwd ?? agent.cwd,
+      persona: body.persona ?? agent.persona ?? undefined,
+      proxyId: resolveProxyId(ctx, agent, body.proxyId),
+      task: body.task,
     });
 
     broadcastAgentUpdate(ctx, name);
@@ -1586,7 +1598,7 @@ route('POST', '/api/agents/:name/spawn', async (req, res, match, ctx) => {
 
 route('POST', '/api/agents/:name/resume', async (req, res, match, ctx) => {
   const name = match.pathname.groups['name']!;
-  const body = await readJson(req);
+  const body = await readJson<{ proxyId?: string; task?: string }>(req);
 
   try {
     const lifecycleCtx = makeLifecycleCtx(ctx);
@@ -1596,13 +1608,13 @@ route('POST', '/api/agents/:name/resume', async (req, res, match, ctx) => {
     if (!agent) return json(res, 404, { error: 'Agent not found' });
 
     // Pre-assign proxy if the agent doesn't have one (e.g. first resume after persona sync)
-    const proxyId = resolveProxyId(ctx, agent, body.proxyId as string | undefined);
+    const proxyId = resolveProxyId(ctx, agent, body.proxyId);
     if (proxyId && !agent.proxyId) {
       ctx.db.updateAgentState(name, agent.state, agent.version, { proxyId });
     }
 
     const result = await resumeAgent(lifecycleCtx, name, {
-      task: body.task as string | undefined,
+      task: body.task,
     });
     broadcastAgentUpdate(ctx, name);
     broadcastLifecycleEvent(ctx, name, 'Resumed');
@@ -1631,15 +1643,15 @@ route('POST', '/api/agents/:name/suspend', handleExit);
 
 route('POST', '/api/agents/:name/reload', async (req, res, match, ctx) => {
   const name = match.pathname.groups['name']!;
-  const body = await readJson(req);
+  const body = await readJson<{ immediate?: boolean; task?: string }>(req);
 
   try {
     const lifecycleCtx = makeLifecycleCtx(ctx);
     // Re-sync persona from disk to pick up config changes (engine, model, etc.)
     syncSinglePersona(ctx.db, name);
     const result = await reloadAgent(lifecycleCtx, name, {
-      immediate: body.immediate as boolean | undefined,
-      task: body.task as string | undefined,
+      immediate: body.immediate,
+      task: body.task,
     });
     broadcastAgentUpdate(ctx, name);
     broadcastLifecycleEvent(ctx, name, 'Reloaded');
@@ -1708,7 +1720,7 @@ route('GET', '/api/agents/:name/peek', async (req, res, match, ctx) => {
 
 route('POST', '/api/agents/:name/keys', async (req, res, match, ctx) => {
   const name = match.pathname.groups['name']!;
-  const body = await readJson(req);
+  const body = await readJson<{ keys?: string }>(req);
   const keys = body?.keys;
   if (typeof keys !== 'string' || !keys) { json(res, 400, { error: 'keys required' }); return; }
 
@@ -1769,7 +1781,7 @@ function parseTmuxResize(args: string[]): { width: number; height: number } {
 
 route('POST', '/api/agents/:name/tmux', async (req, res, match, ctx) => {
   const name = match.pathname.groups['name']!;
-  const body = await readJson(req);
+  const body = await readJson<{ args?: string[] }>(req);
   const args = body?.args;
   if (!Array.isArray(args) || args.length === 0 || !args.every((arg: unknown) => typeof arg === 'string')) {
     json(res, 400, { error: 'args (string[]) required' }); return;
@@ -1853,7 +1865,7 @@ route('POST', '/api/agents/:name/tmux', async (req, res, match, ctx) => {
 
 route('POST', '/api/agents/:name/type', async (req, res, match, ctx) => {
   const name = match.pathname.groups['name']!;
-  const body = await readJson(req);
+  const body = await readJson<{ text?: string; pressEnter?: boolean }>(req);
   const text = body?.text;
   if (typeof text !== 'string' || !text) { json(res, 400, { error: 'text required' }); return; }
 
@@ -1875,7 +1887,7 @@ route('POST', '/api/agents/:name/type', async (req, res, match, ctx) => {
 
 route('POST', '/api/agents/:name/resize', async (req, res, match, ctx) => {
   const name = match.pathname.groups['name']!;
-  const body = await readJson(req);
+  const body = await readJson<{ width?: number; height?: number }>(req);
   const width = body?.width;
   const height = body?.height;
   if (typeof width !== 'number' || typeof height !== 'number' || width < 1 || height < 1) {
@@ -1933,21 +1945,21 @@ route('POST', '/api/agents/:name/indicator/:indicator/:action', async (_req, res
 // ── Agent Reorder ──
 
 route('POST', '/api/agents/reorder', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
+  const body = await readJson<{ orders?: Array<{ name: string; sortOrder: number }> }>(req);
   const orders = body?.orders;
   if (!Array.isArray(orders) || !orders.every((o: unknown) =>
-    typeof o === 'object' && o !== null && typeof (o as Record<string, unknown>).name === 'string' && typeof (o as Record<string, unknown>).sortOrder === 'number'
+    typeof o === 'object' && o !== null && typeof (o as Record<string, unknown>)['name'] === 'string' && typeof (o as Record<string, unknown>)['sortOrder'] === 'number'
   )) {
     json(res, 400, { error: 'orders must be an array of {name, sortOrder}' });
     return;
   }
-  ctx.db.batchUpdateSortOrder(orders as Array<{ name: string; sortOrder: number }>);
+  ctx.db.batchUpdateSortOrder(orders);
   json(res, 200, { ok: true });
 });
 
 route('PATCH', '/api/agents/:name/group', async (req, res, match, ctx) => {
   const name = match.pathname.groups['name']!;
-  const body = await readJson(req);
+  const body = await readJson<{ group?: string }>(req);
   const group = body?.group;
   if (typeof group !== 'string') { json(res, 400, { error: 'group (string) required' }); return; }
 
@@ -2039,7 +2051,13 @@ route('GET', '/api/orchestrator/status', async (_req, res, _match, ctx) => {
 // ── Reminders ──
 
 route('POST', '/api/reminders', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
+  const body = await readJson<{
+    agentName?: string;
+    prompt?: string;
+    cadenceMinutes?: number;
+    createdBy?: string;
+    skipIfActive?: boolean;
+  }>(req);
   if (!body.agentName || typeof body.agentName !== 'string') {
     return json(res, 400, { error: 'agentName required' });
   }
@@ -2050,14 +2068,14 @@ route('POST', '/api/reminders', async (req, res, _match, ctx) => {
     return json(res, 400, { error: 'cadenceMinutes must be >= 5' });
   }
 
-  const agent = ctx.db.getAgent(body.agentName as string);
+  const agent = ctx.db.getAgent(body.agentName);
   if (!agent) return json(res, 404, { error: `Agent "${body.agentName}" not found` });
 
   const reminder = ctx.db.createReminder({
-    agentName: body.agentName as string,
-    createdBy: (body.createdBy as string | undefined) ?? undefined,
-    prompt: body.prompt as string,
-    cadenceMinutes: body.cadenceMinutes as number,
+    agentName: body.agentName,
+    createdBy: body.createdBy,
+    prompt: body.prompt,
+    cadenceMinutes: body.cadenceMinutes,
     skipIfActive: typeof body.skipIfActive === 'boolean' ? body.skipIfActive : undefined,
   });
 
@@ -2112,7 +2130,7 @@ route('PATCH', '/api/reminders/:id', async (req, res, match, ctx) => {
   const id = parseInt(match.pathname.groups['id']!, 10);
   if (isNaN(id)) return json(res, 400, { error: 'Invalid reminder ID' });
 
-  const body = await readJson(req);
+  const body = await readJson<{ prompt?: string; cadenceMinutes?: number; skipIfActive?: boolean }>(req);
   const opts: { prompt?: string; cadenceMinutes?: number; skipIfActive?: boolean } = {};
   if (typeof body.prompt === 'string') opts.prompt = body.prompt;
   if (typeof body.cadenceMinutes === 'number') opts.cadenceMinutes = body.cadenceMinutes;
@@ -2138,7 +2156,7 @@ route('DELETE', '/api/reminders/:id', async (_req, res, match, ctx) => {
 });
 
 route('POST', '/api/reminders/swap', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
+  const body = await readJson<{ a?: number; b?: number; id1?: number; id2?: number }>(req);
   // Accept both { a, b } (dashboard) and { id1, id2 } (API) field names
   const id1 = typeof body.a === 'number' ? body.a : body.id1;
   const id2 = typeof body.b === 'number' ? body.b : body.id2;
@@ -2146,7 +2164,7 @@ route('POST', '/api/reminders/swap', async (req, res, _match, ctx) => {
     return json(res, 400, { error: 'id1/id2 (or a/b) required' });
   }
 
-  const ok = ctx.db.swapReminderOrder(id1 as number, id2 as number);
+  const ok = ctx.db.swapReminderOrder(id1, id2);
   if (!ok) return json(res, 400, { error: 'Swap failed — reminders must exist and belong to same agent' });
 
   broadcastReminderUpdate(ctx);
@@ -2187,10 +2205,10 @@ route('DELETE', '/api/accounts/:name', async (_req, res, match, ctx) => {
 // ── Notify ──
 
 route('POST', '/api/notify', async (req, res, _match, ctx) => {
-  const body = await readJson(req);
-  const agent = body.agent as string | undefined;
-  const message = body.message as string | undefined;
-  const priority = (body.priority as string) ?? 'normal';
+  const body = await readJson<{ agent?: string; message?: string; priority?: string }>(req);
+  const agent = body.agent;
+  const message = body.message;
+  const priority = body.priority ?? 'normal';
   if (!message) return json(res, 400, { error: 'message required' });
 
   // Generate a correlation id so log lines for this notification's destinations
@@ -2209,8 +2227,8 @@ route('POST', '/api/notify', async (req, res, _match, ctx) => {
     const text = agent ? `[${agent}] ${message}` : message;
     try {
       if (dest.type === 'telegram') {
-        const botToken = dest.config.botToken as string;
-        const chatId = dest.config.chatId as string;
+        const botToken = dest.config['botToken'] as string;
+        const chatId = dest.config['chatId'] as string;
         attempted++;
         const ok = await ctx.telegramDispatcher.send(botToken, chatId, text, notifyId);
         if (ok) sent++;
@@ -2557,7 +2575,7 @@ function makeLifecycleCtx(ctx: RouteContext): LifecycleContext {
  * Exported for use in main.ts on startup.
  */
 export function startTelegramPolling(ctx: RouteContext, dest: DestinationRecord): void {
-  const botToken = dest.config.botToken as string;
+  const botToken = dest.config['botToken'] as string;
 
   ctx.telegramDispatcher.startPolling(botToken, (incomingChatId: string, text: string) => {
     routeTelegramMessage(ctx, dest, incomingChatId, text);
@@ -2579,7 +2597,7 @@ export function routeTelegramMessage(
   incomingChatId: string,
   text: string,
 ): void {
-  const botToken = dest.config.botToken as string;
+  const botToken = dest.config['botToken'] as string;
   console.log(`[telegram] Inbound from chat ${incomingChatId}: ${text.slice(0, 100)}`);
 
   // Parse @agent-name prefixes — supports multiple: @agent1 @agent2 message
