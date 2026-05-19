@@ -109,6 +109,43 @@ describe('Engine Adapters', () => {
       assert.ok(cmd.includes('abc-123'));
     });
 
+    it('builds spawn command with --mcp-config + --strict-mcp-config when mcpConfigPath set (CC)', () => {
+      const cmd = adapter.buildSpawnCommand({
+        name: 'test-agent',
+        cwd: '/tmp/test',
+        sessionId: 'session-uuid',
+        mcpConfigPath: '/host/path/to/agent.json',
+      });
+      assert.ok(cmd.includes("--mcp-config '/host/path/to/agent.json'"));
+      assert.ok(cmd.includes('--strict-mcp-config'));
+      // Order: --mcp-config must precede --append-system-prompt + positional task
+      const mcpIdx = cmd.indexOf('--mcp-config');
+      const sessionIdx = cmd.indexOf('--session-id');
+      assert.ok(sessionIdx < mcpIdx, 'session-id should appear before mcp-config');
+    });
+
+    it('omits --mcp-config when mcpConfigPath is undefined', () => {
+      const cmd = adapter.buildSpawnCommand({
+        name: 'test-agent',
+        cwd: '/tmp/test',
+        sessionId: 'session-uuid',
+      });
+      assert.ok(!cmd.includes('--mcp-config'));
+      assert.ok(!cmd.includes('--strict-mcp-config'));
+    });
+
+    it('builds resume command with --mcp-config + --strict-mcp-config when mcpConfigPath set (CC)', () => {
+      const cmd = adapter.buildResumeCommand({
+        name: 'test-agent',
+        sessionId: 'abc-123',
+        cwd: '/tmp/test',
+        mcpConfigPath: '/host/path/to/agent.json',
+      });
+      assert.ok(cmd.includes('--resume abc-123'));
+      assert.ok(cmd.includes("--mcp-config '/host/path/to/agent.json'"));
+      assert.ok(cmd.includes('--strict-mcp-config'));
+    });
+
     it('builds exit command', () => {
       assert.equal(adapter.buildExitCommand(), '/exit');
     });

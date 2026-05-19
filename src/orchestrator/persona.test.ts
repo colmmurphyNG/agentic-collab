@@ -249,6 +249,30 @@ describe('Persona', () => {
       assert.equal(frontmatter['resume'], undefined);
       assert.equal(frontmatter['compact'], undefined);
     });
+
+    it('parses inline flow-style mcps allowlist (CC)', () => {
+      const raw = '---\nengine: claude\ncwd: /tmp\nmcps: [atlassian, datadog, chrome-devtools]\n---\nBody';
+      const { frontmatter } = parseFrontmatter(raw);
+      assert.deepEqual(frontmatter['mcps'], ['atlassian', 'datadog', 'chrome-devtools']);
+    });
+
+    it('parses empty mcps array (CC explicit zero-MCPs)', () => {
+      const raw = '---\nengine: claude\ncwd: /tmp\nmcps: []\n---\nBody';
+      const { frontmatter } = parseFrontmatter(raw);
+      assert.deepEqual(frontmatter['mcps'], []);
+    });
+
+    it('strips quotes from inline mcps array entries (CC)', () => {
+      const raw = '---\nengine: claude\ncwd: /tmp\nmcps: ["atlassian", \'sfcc-dev\']\n---\nBody';
+      const { frontmatter } = parseFrontmatter(raw);
+      assert.deepEqual(frontmatter['mcps'], ['atlassian', 'sfcc-dev']);
+    });
+
+    it('leaves mcps undefined when not declared (CC fallback semantics)', () => {
+      const raw = '---\nengine: claude\ncwd: /tmp\n---\nBody';
+      const { frontmatter } = parseFrontmatter(raw);
+      assert.equal(frontmatter['mcps'], undefined);
+    });
   });
 
   describe('scanPersonas', () => {

@@ -71,6 +71,14 @@ export type PersonaFrontmatter = {
   indicators?: IndicatorDefinition[];
   /** Emoji or short text shown on agent cards and in page title. */
   icon?: string;
+  /**
+   * Optional MCP server allowlist. When set, the orchestrator passes
+   * `--mcp-config <materialised-path> --strict-mcp-config` to the spawn
+   * command so only listed servers are loaded. Omitted = fall back to
+   * Claude's default config resolution (all MCPs from ~/.claude.json).
+   * Explicit empty array = run with zero MCPs.
+   */
+  mcps?: string[];
 };
 
 export type ParsedPersona = {
@@ -83,6 +91,9 @@ import { nestedPersonaKeys, configFieldsChanged, buildUpsertOptsFromFrontmatter 
 
 /** Frontmatter field names that support structured (nested) values. */
 const NESTED_FIELDS = new Set([...nestedPersonaKeys(), 'env', 'spawn']);
+
+/** Frontmatter field names that accept inline flow-style string arrays (`[a, b, c]`). */
+const FLOW_ARRAY_FIELDS = new Set(['mcps']);
 
 /**
  * Parse YAML-like frontmatter from a markdown string.
@@ -143,6 +154,18 @@ export function parseFrontmatter(raw: string): { frontmatter: Record<string, unk
       const { value, nextLine } = parseBlockScalar(lines, i + 1);
       frontmatter[key] = value;
       i = nextLine;
+      continue;
+    }
+
+    // Inline flow-style array: `key: [a, b, c]` or `key: []`.
+    // Restricted to known string-array fields so we don't accidentally
+    // parse a value that happens to contain brackets.
+    if (FLOW_ARRAY_FIELDS.has(key) && trimmedVal.startsWith('[') && trimmedVal.endsWith(']')) {
+      const inner = trimmedVal.slice(1, -1).trim();
+      frontmatter[key] = inner === ''
+        ? []
+        : inner.split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '').replace(/['"]$/, ''));
+      i++;
       continue;
     }
 
