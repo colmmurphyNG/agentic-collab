@@ -23,6 +23,13 @@ export type SpawnOptions = {
   dangerouslySkipPermissions?: boolean;
   /** Pre-generated session ID for engines that support it (e.g. Claude --session-id). */
   sessionId?: string;
+  /**
+   * Host-absolute path to a materialised MCP config file. When set, the
+   * adapter emits `--mcp-config <path> --strict-mcp-config` so only the
+   * listed servers are loaded. Produced by the proxy `materialise_mcp_config`
+   * action from a persona's `mcps:` allowlist.
+   */
+  mcpConfigPath?: string;
 };
 
 export type ResumeOptions = {
@@ -31,6 +38,8 @@ export type ResumeOptions = {
   cwd: string;
   task?: string;
   appendSystemPrompt?: string;
+  /** Same semantics as SpawnOptions.mcpConfigPath. */
+  mcpConfigPath?: string;
 };
 
 export interface EngineAdapter {

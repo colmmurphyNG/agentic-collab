@@ -347,7 +347,16 @@ export type ProxyCommand =
   | { action: 'remove_codex_profile'; profileName: string }
   | { action: 'exec'; command: string; cwd?: string; timeoutMs?: number }
   | { action: 'resize_pane'; sessionName: string; width: number; height: number }
-  | { action: 'clear_history'; sessionName: string };
+  | { action: 'clear_history'; sessionName: string }
+  | { action: 'materialise_mcp_config'; agentName: string; allowlist: string[]; cwd: string };
+
+/** Response payload for the materialise_mcp_config action. */
+export type MaterialiseMcpConfigResult = {
+  /** Absolute host path of the per-agent MCP config file (or null if no MCPs to materialise). */
+  path: string | null;
+  /** Names from the allowlist that could not be resolved against the merged config sources. */
+  missing: string[];
+};
 
 export type ProxyResponse = {
   ok: boolean;
