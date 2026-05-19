@@ -58,9 +58,32 @@ function extractMcpServers(config: Record<string, unknown> | null): McpServersMa
 }
 
 /**
+ * Pluck the per-project mcpServers map from ~/.claude.json's
+ * `projects[<cwd>].mcpServers` slot, if present. Claude Code stores
+ * project-scoped MCP server definitions there (`claude mcp add` with the
+ * default --scope=local writes to this location).
+ */
+function extractProjectMcpServers(globalConfig: Record<string, unknown> | null, cwd: string): McpServersMap {
+  if (!globalConfig) return {};
+  const projects = globalConfig['projects'];
+  if (!projects || typeof projects !== 'object' || Array.isArray(projects)) return {};
+  const projectConf = (projects as Record<string, unknown>)[cwd];
+  if (!projectConf || typeof projectConf !== 'object' || Array.isArray(projectConf)) return {};
+  return extractMcpServers(projectConf as Record<string, unknown>);
+}
+
+/**
  * Build the merged-then-filtered mcpServers map for an agent.
- * Merge order: global ~/.claude.json first, then cwd's .claude/settings.json
- * (cwd entries override global where names collide). Filter to allowlist.
+ *
+ * Merge order (later sources override earlier on name collision):
+ *   1. global    `~/.claude.json` → mcpServers
+ *   2. per-project `~/.claude.json` → projects[<cwd>] → mcpServers
+ *      (Claude Code's `claude mcp add --scope=local` lands here)
+ *   3. per-cwd `<cwd>/.claude/settings.json` → mcpServers
+ *   4. per-cwd `<cwd>/.mcp.json` → mcpServers
+ *      (Claude Code's project-root MCP config — `claude mcp add --scope=project`)
+ *
+ * Then filter to allowlist.
  */
 export function buildAgentMcpConfig(opts: {
   allowlist: string[];
@@ -68,13 +91,20 @@ export function buildAgentMcpConfig(opts: {
   globalConfigPath?: string;
 }): { servers: McpServersMap; missing: string[] } {
   const globalPath = opts.globalConfigPath ?? globalClaudeConfigPath();
-  const cwdSettingsPath = join(opts.cwd, '.claude', 'settings.json');
+  const globalConfig = safeReadJsonObject(globalPath);
 
-  const globalServers = extractMcpServers(safeReadJsonObject(globalPath));
-  const cwdServers = extractMcpServers(safeReadJsonObject(cwdSettingsPath));
+  const globalServers = extractMcpServers(globalConfig);
+  const projectScopedServers = extractProjectMcpServers(globalConfig, opts.cwd);
+  const cwdSettingsServers = extractMcpServers(safeReadJsonObject(join(opts.cwd, '.claude', 'settings.json')));
+  const cwdMcpJsonServers = extractMcpServers(safeReadJsonObject(join(opts.cwd, '.mcp.json')));
 
-  // cwd overrides global where names collide
-  const merged: McpServersMap = { ...globalServers, ...cwdServers };
+  // Later sources override earlier on name collision.
+  const merged: McpServersMap = {
+    ...globalServers,
+    ...projectScopedServers,
+    ...cwdSettingsServers,
+    ...cwdMcpJsonServers,
+  };
 
   const servers: McpServersMap = {};
   const missing: string[] = [];
