@@ -74,6 +74,49 @@ describe('HealthMonitor', () => {
     monitor.stop(); // idempotent
   });
 
+  it('auto-recycle (Z) triggers on idle + ctx >= 92%, defers when active', () => {
+    db.createAgent({ name: 'z-test', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    let a = db.getAgent('z-test')!;
+    db.updateAgentState('z-test', 'idle', a.version, { tmuxSession: 'agent-z-test', proxyId: 'p1' });
+
+    let recycleCalls = 0;
+    const monitor = makeMonitor({
+      proxyDispatch: async (_p, _c): Promise<ProxyResponse> => {
+        // No real proxy interactions; recycle dispatcher records via the lifecycle event log.
+        return { ok: true };
+      },
+    });
+    // Stub the recycle path so we can count calls without actually firing lifecycle.
+    (monitor as unknown as { runAutoRecycle(name: string): Promise<void> }).runAutoRecycle = async (_name) => {
+      recycleCalls++;
+    };
+
+    a = db.getAgent('z-test')!;
+    monitor.maybeTriggerAutoRecycle(a, 91);  // below threshold — no fire
+    assert.equal(recycleCalls, 0, '91% should NOT trigger');
+
+    monitor.maybeTriggerAutoRecycle(a, 92);  // at threshold — fires
+    assert.equal(recycleCalls, 1, '92% on idle should trigger');
+
+    // Cool-down: subsequent call within window does not re-fire
+    monitor.maybeTriggerAutoRecycle(a, 95);
+    assert.equal(recycleCalls, 1, 'within cool-down should NOT re-trigger');
+  });
+
+  it('auto-recycle (Z) defers when agent is active (not idle)', () => {
+    db.createAgent({ name: 'z-active', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    let a = db.getAgent('z-active')!;
+    db.updateAgentState('z-active', 'active', a.version, { tmuxSession: 'agent-z-active', proxyId: 'p1' });
+
+    let recycleCalls = 0;
+    const monitor = makeMonitor({});
+    (monitor as unknown as { runAutoRecycle(name: string): Promise<void> }).runAutoRecycle = async () => { recycleCalls++; };
+
+    a = db.getAgent('z-active')!;
+    monitor.maybeTriggerAutoRecycle(a, 95);  // 95% but state=active
+    assert.equal(recycleCalls, 0, 'active state should NOT trigger recycle');
+  });
+
   it('polls active agents and captures pane output', async () => {
     db.createAgent({ name: 'health-a1', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
     const a = db.getAgent('health-a1')!;
