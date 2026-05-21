@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parsePortMapping } from './config.ts';
+import { parsePortMapping, resolveDataDirs } from './config.ts';
 
 describe('config', () => {
   describe('parsePortMapping', () => {
@@ -73,6 +73,58 @@ describe('config', () => {
       const { resolveSecret } = await import('./config.ts?file' + Date.now());
       assert.equal(resolveSecret(), 'file-secret');
       delete process.env['ORCHESTRATOR_SECRET_FILE'];
+    });
+  });
+
+  describe('resolveDataDirs (NN — env-driven PAGES_DIR / STORES_DIR)', () => {
+    it('should fall back to dirname(dbPath)/pages + /stores when env unset', () => {
+      const { pagesDir, storesDir } = resolveDataDirs({
+        envPagesDir: undefined,
+        envStoresDir: undefined,
+        dbPath: '/data/.agentic-collab/orchestrator.db',
+      });
+      assert.equal(pagesDir, '/data/.agentic-collab/pages');
+      assert.equal(storesDir, '/data/.agentic-collab/stores');
+    });
+
+    it('should let env PAGES_DIR win over the legacy default', () => {
+      const { pagesDir, storesDir } = resolveDataDirs({
+        envPagesDir: '/app/pages',
+        envStoresDir: undefined,
+        dbPath: '/data/.agentic-collab/orchestrator.db',
+      });
+      assert.equal(pagesDir, '/app/pages');
+      assert.equal(storesDir, '/data/.agentic-collab/stores');
+    });
+
+    it('should let env STORES_DIR win over the legacy default', () => {
+      const { pagesDir, storesDir } = resolveDataDirs({
+        envPagesDir: undefined,
+        envStoresDir: '/app/stores',
+        dbPath: '/data/.agentic-collab/orchestrator.db',
+      });
+      assert.equal(pagesDir, '/data/.agentic-collab/pages');
+      assert.equal(storesDir, '/app/stores');
+    });
+
+    it('should accept both env vars set independently', () => {
+      const { pagesDir, storesDir } = resolveDataDirs({
+        envPagesDir: '/host/pages',
+        envStoresDir: '/host/stores',
+        dbPath: '/data/.agentic-collab/orchestrator.db',
+      });
+      assert.equal(pagesDir, '/host/pages');
+      assert.equal(storesDir, '/host/stores');
+    });
+
+    it('should treat empty string env vars as unset (fallback to default)', () => {
+      const { pagesDir, storesDir } = resolveDataDirs({
+        envPagesDir: '',
+        envStoresDir: '',
+        dbPath: '/data/.agentic-collab/orchestrator.db',
+      });
+      assert.equal(pagesDir, '/data/.agentic-collab/pages');
+      assert.equal(storesDir, '/data/.agentic-collab/stores');
     });
   });
 });

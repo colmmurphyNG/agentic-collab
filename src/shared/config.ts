@@ -199,6 +199,31 @@ export function parsePortMapping(ports: string): number | null {
 }
 
 /**
+ * Resolve PAGES_DIR / STORES_DIR for the orchestrator. Allows operators
+ * to bind-mount host directories via PAGES_DIR / STORES_DIR env vars
+ * (so published pages and data stores survive container rebuilds and are
+ * inspectable on the host fs). Falls back to the legacy in-volume
+ * location next to the DB.
+ *
+ * Pure function — exported so it can be unit-tested without booting the
+ * orchestrator.
+ */
+export function resolveDataDirs(opts: {
+  envPagesDir?: string | undefined;
+  envStoresDir?: string | undefined;
+  dbPath: string;
+}): { pagesDir: string; storesDir: string } {
+  return {
+    pagesDir: opts.envPagesDir && opts.envPagesDir.length > 0
+      ? opts.envPagesDir
+      : join(dirname(opts.dbPath), 'pages'),
+    storesDir: opts.envStoresDir && opts.envStoresDir.length > 0
+      ? opts.envStoresDir
+      : join(dirname(opts.dbPath), 'stores'),
+  };
+}
+
+/**
  * Probe an orchestrator URL to see if it's alive.
  */
 async function probeOrchestrator(url: string): Promise<boolean> {
