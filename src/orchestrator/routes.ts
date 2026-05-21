@@ -786,6 +786,29 @@ route('POST', '/api/engine-configs/reset-defaults', async (_req, res, _match, ct
   json(res, 200, { ok: true, results });
 });
 
+// ── Preferences (dashboard prefs, item MM — server-side so they survive
+//    localStorage origin partitioning across port/host changes) ──
+
+route('GET', '/api/preferences', async (_req, res, _match, ctx) => {
+  json(res, 200, ctx.db.listPreferences());
+});
+
+route('PUT', '/api/preferences', async (req, res, _match, ctx) => {
+  const body = await readJson<Record<string, unknown>>(req);
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    return json(res, 400, { error: 'body must be a JSON object of key→value pairs' });
+  }
+  ctx.db.setPreferences(body);
+  json(res, 200, ctx.db.listPreferences());
+});
+
+route('DELETE', '/api/preferences/:key', async (_req, res, match, ctx) => {
+  const key = match.pathname.groups['key']!;
+  const deleted = ctx.db.deletePreference(key);
+  if (!deleted) return json(res, 404, { error: 'Preference not found' });
+  json(res, 200, { ok: true });
+});
+
 // ── Pages (static hosting) ──
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/;
