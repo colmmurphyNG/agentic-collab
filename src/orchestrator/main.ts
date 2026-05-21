@@ -21,7 +21,7 @@ import type { LifecycleContext } from './lifecycle.ts';
 import { syncPersonasToDb, syncPersonasWithDiff, getPersonasDir } from './persona.ts';
 import { AccountStore } from './accounts.ts';
 import { isRunning } from '../shared/agent-entity.ts';
-import { resolveSecret, getSecretPath } from '../shared/config.ts';
+import { resolveSecret, getSecretPath, resolveDataDirs } from '../shared/config.ts';
 import type { ProxyCommand, ProxyResponse, ProxyRegistration } from '../shared/types.ts';
 import { getVersion } from '../shared/version.ts';
 import { handleVoiceUpgrade, type VoiceProxyOptions } from './voice-proxy.ts';
@@ -38,11 +38,14 @@ if (!ORCHESTRATOR_SECRET) {
   console.log(`[orchestrator] Auth enabled (secret from ${process.env['ORCHESTRATOR_SECRET'] ? 'env' : getSecretPath()})`);
 }
 
-// Ensure DB + pages + stores directories exist
+// Ensure DB + pages + stores directories exist.
 mkdirSync(dirname(DB_PATH), { recursive: true });
-const PAGES_DIR = join(dirname(DB_PATH), 'pages');
+const { pagesDir: PAGES_DIR, storesDir: STORES_DIR } = resolveDataDirs({
+  envPagesDir: process.env['PAGES_DIR'],
+  envStoresDir: process.env['STORES_DIR'],
+  dbPath: DB_PATH,
+});
 mkdirSync(PAGES_DIR, { recursive: true });
-const STORES_DIR = join(dirname(DB_PATH), 'stores');
 mkdirSync(STORES_DIR, { recursive: true });
 
 const db = new Database(DB_PATH);
