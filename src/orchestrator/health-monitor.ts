@@ -20,7 +20,7 @@ import type { LockManager } from '../shared/lock.ts';
 import type { ProxyCommand, ProxyResponse, AgentRecord, PendingMessage, DashboardMessage, IndicatorDefinition, ActiveIndicator, PipelineStep, DetectionConfig } from '../shared/types.ts';
 import { sessionName, canSuspend } from '../shared/agent-entity.ts';
 import { getAdapter } from './adapters/index.ts';
-import { reloadAgent, recoverAgent, type LifecycleContext } from './lifecycle.ts';
+import { reloadAgent, recoverAgent, recycleAgent, type LifecycleContext } from './lifecycle.ts';
 import { resolveEffectiveConfig } from './engine-config-resolver.ts';
 import { cliFailurePatterns } from './cli-failure-patterns.ts';
 
@@ -88,6 +88,28 @@ export class HealthMonitor {
   private readonly lastActivityDetected = new Map<string, number>();
   /** Number of trailing pane lines to capture for screen-diff. */
   static readonly SNAPSHOT_LINES = 30;
+  /**
+   * Last auto-recycle timestamp per agent. Used to enforce the cool-down so
+   * an agent that just recycled doesn't immediately re-trigger if its new
+   * session somehow lands back above the threshold (e.g. operator pastes a
+   * huge prompt right after spawn).
+   */
+  private readonly lastAutoRecycleAt = new Map<string, number>();
+  /**
+   * Context-percentage threshold that triggers an auto-recycle. Above this,
+   * the agent is destroyed + respawned with a fresh SESSION_ID, with the
+   * existing Q v1/v2 handoff snapshot preserving its last 30 tmux lines and
+   * 10 dashboard messages for the new instance.
+   *
+   * Env-overridable for testing / dialing in.
+   */
+  static readonly AUTO_RECYCLE_THRESHOLD_PCT = parseInt(process.env['AUTO_RECYCLE_THRESHOLD_PCT'] ?? '92', 10);
+  /**
+   * Cool-down between auto-recycles for the same agent. Defense-in-depth so
+   * a cold-start ctx spike right after spawn doesn't immediately re-trigger.
+   * Default 30 min — set to 0 in tests.
+   */
+  static readonly AUTO_RECYCLE_COOLDOWN_MS = parseInt(process.env['AUTO_RECYCLE_COOLDOWN_MS'] ?? String(30 * 60 * 1000), 10);
   private readonly db: Database;
   private readonly locks: LockManager;
   private readonly proxyDispatch: (proxyId: string, command: ProxyCommand) => Promise<ProxyResponse>;
@@ -517,6 +539,59 @@ export class HealthMonitor {
       });
     } catch { /* version conflict — another operation changed the agent, skip this update */ }
     this.onAgentUpdate(agent.name);
+
+    // Auto-recycle (item Z): when ctx breaches the threshold and the agent is
+    // idle, destroy + respawn with a fresh SESSION_ID, leaning on the existing
+    // Q v1/v2 handoff snapshot to preserve last-state for the new instance.
+    // Gated on:
+    //   - latest.state === 'idle' (don't interrupt active work)
+    //   - cool-down since the last auto-recycle for this agent
+    // Fires async (no await) so the poll loop doesn't block. The lifecycle
+    // already has its own three-phase locking — concurrent invocations are
+    // safe (subsequent calls just see state ≠ idle and skip).
+    this.maybeTriggerAutoRecycle(latest, contextPct);
+  }
+
+  /**
+   * Background trigger for ctx-threshold auto-recycle. Idempotent + safe to
+   * call from the poll hot path (no awaits, no DB writes from this thread —
+   * the actual recycle happens off-thread via recycleAgent).
+   *
+   * NOTE: kept package-private (no `_` prefix) so tests can drive the
+   * threshold transitions directly without simulating a full poll cycle.
+   */
+  maybeTriggerAutoRecycle(agent: AgentRecord, contextPct: number): void {
+    if (contextPct < HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT) return;
+    if (agent.state !== 'idle') return; // active work — defer to next poll
+    const lastAt = this.lastAutoRecycleAt.get(agent.name) ?? 0;
+    const sinceLast = Date.now() - lastAt;
+    if (sinceLast < HealthMonitor.AUTO_RECYCLE_COOLDOWN_MS) {
+      // Don't spam — cool-down still active
+      return;
+    }
+    this.lastAutoRecycleAt.set(agent.name, Date.now());
+    console.log(
+      `[health] ${agent.name}: auto-recycle triggered (ctx=${contextPct}% ≥ ${HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT}%, state=idle)`,
+    );
+    this.db.logEvent(agent.name, 'auto_recycle_triggered', undefined, { contextPct });
+    // Fire-and-forget; recycleAgent handles its own locking + failure paths.
+    void this.runAutoRecycle(agent.name);
+  }
+
+  private async runAutoRecycle(agentName: string): Promise<void> {
+    try {
+      const lifecycleCtx = this.makeLifecycleCtx();
+      await recycleAgent(lifecycleCtx, agentName);
+      this.onAgentUpdate(agentName);
+    } catch (err) {
+      console.warn(
+        `[health] ${agentName}: auto-recycle failed: ${(err as Error).message}`,
+      );
+      // Clear the cool-down marker so we can retry on next poll if the agent
+      // is still above threshold (recycleAgent might have failed for a
+      // transient reason like a brief tmux race).
+      this.lastAutoRecycleAt.delete(agentName);
+    }
   }
 
   /**
