@@ -142,6 +142,12 @@ const SCHEMA = `
     created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
     updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
   );
+
+  CREATE TABLE IF NOT EXISTS preferences (
+    key            TEXT PRIMARY KEY,
+    value          TEXT NOT NULL,
+    updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+  );
 `;
 
 export class Database {
@@ -1018,6 +1024,41 @@ export class Database {
 
   deletePage(slug: string): boolean {
     const result = this.db.prepare('DELETE FROM pages WHERE slug = ?').run(slug);
+    return result.changes > 0;
+  }
+
+  // ── Preferences (operator-scoped dashboard prefs, item MM) ──
+
+  listPreferences(): Record<string, unknown> {
+    const rows = this.db.prepare('SELECT key, value FROM preferences').all() as Array<{ key: string; value: string }>;
+    const out: Record<string, unknown> = {};
+    for (const row of rows) {
+      try { out[row.key] = JSON.parse(row.value); }
+      catch { out[row.key] = row.value; }
+    }
+    return out;
+  }
+
+  getPreference(key: string): unknown {
+    const row = this.db.prepare('SELECT value FROM preferences WHERE key = ?').get(key) as { value: string } | undefined;
+    if (!row) return undefined;
+    try { return JSON.parse(row.value); }
+    catch { return row.value; }
+  }
+
+  setPreferences(updates: Record<string, unknown>): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO preferences(key, value, updated_at)
+      VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+    `);
+    for (const [key, value] of Object.entries(updates)) {
+      stmt.run(key, JSON.stringify(value));
+    }
+  }
+
+  deletePreference(key: string): boolean {
+    const result = this.db.prepare('DELETE FROM preferences WHERE key = ?').run(key);
     return result.changes > 0;
   }
 
