@@ -830,13 +830,21 @@ function pageMime(filePath: string): string {
 }
 
 /** Wrap rendered markdown in a minimal, readable HTML page (no docs nav). */
-function wrapMarkdownPage(title: string, bodyHtml: string): string {
+function wrapMarkdownPage(title: string, bodyHtml: string, baseHref?: string): string {
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // <base href> makes relative links in markdown (e.g. `[X](X.md)` references
+  // to sibling files inside a bundle) resolve against the bundle's URL
+  // rather than the browser's current URL. Without this, opening
+  // `/pages/<slug>` and clicking `[X](X.md)` resolves to `/pages/X.md` — a 404
+  // — because the browser drops the last URL segment when resolving the
+  // relative href. Only injected when the caller supplies a baseHref;
+  // generated index pages (which have no relative links) skip it.
+  const baseTag = baseHref ? `\n  <base href="${esc(baseHref)}">` : '';
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1">${baseTag}
   <title>${esc(title)}</title>
   <style>
     :root { color-scheme: light dark; }
@@ -874,10 +882,10 @@ ${bodyHtml}
 }
 
 /** Render a .md file as a full HTML page using the existing renderMarkdown utility. */
-function serveMarkdownAsHtml(res: ServerResponse, filePath: string, title: string): void {
+function serveMarkdownAsHtml(res: ServerResponse, filePath: string, title: string, baseHref?: string): void {
   const md = readFileSync(filePath, 'utf-8');
   const bodyHtml = renderMarkdown(md);
-  const html = wrapMarkdownPage(title, bodyHtml);
+  const html = wrapMarkdownPage(title, bodyHtml, baseHref);
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(html);
 }
@@ -1004,8 +1012,12 @@ route('GET', '/pages/:slug', async (_req, res, match, ctx) => {
     return;
   }
   // Fall back to index.md, rendered as HTML.
+  // baseHref is the trailing-slash form of the bundle URL so relative
+  // links in markdown (e.g. `[X](X.md)` references to sibling files in
+  // the same bundle) resolve correctly when the user is browsing
+  // `/pages/<slug>` without a trailing slash.
   if (existsSync(indexMdPath)) {
-    serveMarkdownAsHtml(res, indexMdPath, slug);
+    serveMarkdownAsHtml(res, indexMdPath, slug, `/pages/${slug}/`);
     return;
   }
   // No index — list files (or single-file fallback).
@@ -1014,7 +1026,7 @@ route('GET', '/pages/:slug', async (_req, res, match, ctx) => {
   if (files.length === 1) {
     const filePath = join(pageDir, files[0]!);
     if (filePath.toLowerCase().endsWith('.md')) {
-      serveMarkdownAsHtml(res, filePath, `${slug}/${files[0]}`);
+      serveMarkdownAsHtml(res, filePath, `${slug}/${files[0]}`, `/pages/${slug}/`);
       return;
     }
     res.writeHead(200, { 'Content-Type': pageMime(filePath) });
@@ -1174,7 +1186,11 @@ route('GET', '/scratch/:project/:path+', async (req, res, match, ctx) => {
   const relPath = match.pathname.groups['path']!;
   const resolved = resolveScratchFile(project, relPath);
   if ('error' in resolved) return json(res, resolved.status, { error: resolved.error });
-  serveMarkdownAsHtml(res, resolved.path, `${project}/${relPath}`);
+  // baseHref = directory of this file so relative links between scratch
+  // markdown files (e.g. `[A](./other.md)`) resolve correctly.
+  const lastSlash = relPath.lastIndexOf('/');
+  const dirPart = lastSlash >= 0 ? relPath.slice(0, lastSlash + 1) : '';
+  serveMarkdownAsHtml(res, resolved.path, `${project}/${relPath}`, `/scratch/${project}/${dirPart}`);
 });
 
 route('GET', '/pages/:slug/:path+', async (_req, res, match, ctx) => {
@@ -1185,8 +1201,14 @@ route('GET', '/pages/:slug/:path+', async (_req, res, match, ctx) => {
   if (!existsSync(fullPath)) return json(res, 404, { error: 'File not found' });
 
   // Render .md files as HTML so they display in the browser (instead of downloading).
+  // baseHref is the directory of this file so relative links to siblings
+  // (e.g. another .md in the same dir, or `../other-dir/file.md`) resolve
+  // correctly. Use the dirname of filePath inside the bundle — e.g.
+  // `runbooks/foo.md` → baseHref `/pages/<slug>/runbooks/`.
   if (filePath.toLowerCase().endsWith('.md')) {
-    serveMarkdownAsHtml(res, fullPath, `${slug}/${filePath}`);
+    const lastSlash = filePath.lastIndexOf('/');
+    const dirPart = lastSlash >= 0 ? filePath.slice(0, lastSlash + 1) : '';
+    serveMarkdownAsHtml(res, fullPath, `${slug}/${filePath}`, `/pages/${slug}/${dirPart}`);
     return;
   }
   res.writeHead(200, { 'Content-Type': pageMime(fullPath) });
