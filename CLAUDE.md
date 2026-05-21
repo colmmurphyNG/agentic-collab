@@ -5,18 +5,22 @@ Zero-dependency orchestrator for AI coding agents via tmux. Node 24 native TypeS
 ## Quick Start
 
 ```bash
-./start.sh          # orchestrator (Docker :3000) + proxy (host :3100)
+./start.sh          # orchestrator (host :8001 → container :3000) + proxy (host :3100)
 node --test 'src/**/*.test.ts'  # ~875 tests
 npx tsc --noEmit    # type check
 ```
 
+Host port is operator preference (default `8001`, configurable via `ORCHESTRATOR_HOST_PORT`
+env var or `.env` file) — avoids collisions with common dev servers on 3000/3001.
+Container always listens on 3000 internally. `--port <N>` flag overrides per invocation.
+
 ## Architecture
 
 ```
-Orchestrator (Docker :3000)      Proxy (host :3100)
-  SQLite WAL | HTTP API           tmux session mgmt
-  WebSocket | Health Monitor  ←→  File upload streaming
-  Persona loader                  Heartbeats every 15s
+Orchestrator (host :8001 → container :3000)   Proxy (host :3100)
+  SQLite WAL | HTTP API                        tmux session mgmt
+  WebSocket | Health Monitor               ←→  File upload streaming
+  Persona loader                               Heartbeats every 15s
 ```
 
 Agent state machine: `void → spawning → active ↔ idle → suspending → suspended → failed`
