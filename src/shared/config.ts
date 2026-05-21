@@ -147,8 +147,9 @@ export async function discoverOrchestrator(): Promise<DiscoveredOrchestrator | n
     if (alive) return { url: dockerUrl, fromDocker: true };
   }
 
-  // 3. Localhost fallback
-  for (const port of [3000, 3001]) {
+  // 3. Localhost fallback. Try new default (8001) first, then legacy compose
+  //    defaults (3000, 3001) for backwards compatibility with existing setups.
+  for (const port of [8001, 3000, 3001]) {
     const url = `http://localhost:${port}`;
     const alive = await probeOrchestrator(url);
     if (alive) return { url, fromDocker: false };

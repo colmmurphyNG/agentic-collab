@@ -62,7 +62,9 @@ async function discoverOrchestrator() {
     } catch {}
   }
 
-  for (const port of [3000, 3001]) {
+  // Localhost fallback. Try new default (8001) first, then legacy compose
+  // defaults (3000, 3001) for backwards compatibility with existing setups.
+  for (const port of [8001, 3000, 3001]) {
     const url = `http://localhost:${port}`;
     try {
       const r = await fetch(`${url}/api/orchestrator/status`, { signal: AbortSignal.timeout(3000) });
@@ -82,7 +84,7 @@ async function init() {
   _secret = resolveSecret();
   _host = await discoverOrchestrator();
   if (!_host) {
-    console.error('error: could not find orchestrator (tried Docker discovery + localhost:3000/3001)');
+    console.error('error: could not find orchestrator (tried Docker discovery + localhost:8001/3000/3001)');
     console.error('  set ORCHESTRATOR_URL or start the orchestrator first');
     process.exit(1);
   }

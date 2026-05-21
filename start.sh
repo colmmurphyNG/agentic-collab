@@ -432,8 +432,8 @@ fi
 #   2. ORCHESTRATOR_HOST_PORT env var (operator override for multi-instance dev).
 #   3. `docker compose port orchestrator 3000` (canonical: reflects whatever
 #      docker-compose.yml currently maps; auto-syncs if compose changes).
-#   4. Hardcoded fallback `3001` (current compose default — kept as a last
-#      resort if docker tooling is unavailable, with a warning).
+#   4. Hardcoded fallback `8001` (matches docker-compose.yml default — kept
+#      as a last resort if docker tooling is unavailable, with a warning).
 #
 # The container always listens on port 3000 internally; this only affects what
 # the host script and curl health-check use.
@@ -455,9 +455,9 @@ elif command -v docker &>/dev/null && docker compose version &>/dev/null 2>&1; t
   fi
 fi
 if [ -z "$HOST_PORT" ]; then
-  HOST_PORT=3001
+  HOST_PORT=8001
   PORT_SOURCE="fallback default"
-  warn "Could not resolve host port from docker compose; falling back to 3001."
+  warn "Could not resolve host port from docker compose; falling back to 8001."
   warn "Override with ORCHESTRATOR_HOST_PORT=<port> if your docker-compose maps differently."
 fi
 info "Orchestrator host port: $HOST_PORT (source: $PORT_SOURCE)"
