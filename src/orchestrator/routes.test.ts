@@ -1826,3 +1826,87 @@ describe('API Routes — /api/preferences (MM: server-side dashboard prefs)', ()
     assert.equal(res.status, 404);
   });
 });
+
+describe('API Routes — /pages/<slug> base href injection (relative-link fix)', () => {
+  let server: Server;
+  let db: Database;
+  let wss: WebSocketServer;
+  let port: number;
+  let tmpDir: string;
+  let pagesDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), 'agentic-pages-basehref-')));
+    pagesDir = join(tmpDir, 'pages');
+    // Seed a bundle with an index.md that links to a sibling file, mirroring
+    // the operator's INSTALLER-DESIGN.md case.
+    mkdirSync(join(pagesDir, 'sandbox-automation', 'runbooks'), { recursive: true });
+    writeFileSync(join(pagesDir, 'sandbox-automation', 'index.md'),
+      '# Sandbox automation\n\nSee [INSTALLER-DESIGN.md](INSTALLER-DESIGN.md) and [runbook](runbooks/foo.md).');
+    writeFileSync(join(pagesDir, 'sandbox-automation', 'INSTALLER-DESIGN.md'),
+      '# Installer design\n\nDesign content.');
+    writeFileSync(join(pagesDir, 'sandbox-automation', 'runbooks', 'foo.md'),
+      '# Runbook\n\nWith a relative link to [sibling](bar.md).');
+
+    db = new Database(join(tmpDir, 'test.db'));
+    wss = new WebSocketServer();
+
+    const mockProxyDispatch = async (_proxyId: string, _command: ProxyCommand): Promise<ProxyResponse> => ({ ok: true });
+    const locks = new LockManager(db.rawDb);
+
+    const ctx: RouteContext = {
+      db,
+      wss,
+      locks,
+      proxyDispatch: mockProxyDispatch,
+      getDashboardHtml: () => '<html></html>',
+      orchestratorHost: 'http://localhost:3000',
+      orchestratorSecret: null,
+      messageDispatcher: makeTestDispatcher(db, locks, mockProxyDispatch),
+      usagePoller: { getUsageData: () => ({}), pollNow: async () => {} } as any,
+      voiceEnabled: false,
+      accountStore: new AccountStore({ accountsDir: join(tmpDir, 'accounts'), agentHomesDir: join(tmpDir, 'agent-homes'), skipAutoRegister: true }),
+      telegramDispatcher: makeStubTelegramDispatcher(),
+      pagesDir,
+      storesDir: join(tmpDir, 'stores'),
+    };
+
+    const router = createRouter(ctx);
+    server = createServer(async (req, res) => { await router(req, res); });
+    await new Promise<void>((resolve) => {
+      server.listen(0, () => {
+        const addr = server.address();
+        port = typeof addr === 'object' && addr ? addr.port : 0;
+        resolve();
+      });
+    });
+  });
+
+  after(() => {
+    wss.close();
+    server.close();
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('should inject <base href="/pages/<slug>/"> when serving a bundle index.md', async () => {
+    const res = await fetch(`http://localhost:${port}/pages/sandbox-automation`);
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /<base href="\/pages\/sandbox-automation\/"/, 'index.md render must include base href with bundle URL + trailing slash');
+  });
+
+  it('should inject <base href> matching subdir when serving a nested .md file', async () => {
+    const res = await fetch(`http://localhost:${port}/pages/sandbox-automation/runbooks/foo.md`);
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /<base href="\/pages\/sandbox-automation\/runbooks\/"/, 'nested render must base href against the file dir');
+  });
+
+  it('should still serve sibling files correctly via the per-file route (regression check)', async () => {
+    const res = await fetch(`http://localhost:${port}/pages/sandbox-automation/INSTALLER-DESIGN.md`);
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /Installer design/);
+  });
+});
