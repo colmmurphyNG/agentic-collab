@@ -14,6 +14,11 @@ Host port is operator preference (default `8001`, configurable via `ORCHESTRATOR
 env var or `.env` file) — avoids collisions with common dev servers on 3000/3001.
 Container always listens on 3000 internally. `--port <N>` flag overrides per invocation.
 
+**Pages and data stores** are written under `PAGES_DIR` / `STORES_DIR` (env-configurable;
+fallback to legacy in-volume location next to the DB). Set these via docker-compose to
+bind-mount host directories so published pages and stores survive container rebuilds
+and are inspectable on the host filesystem.
+
 ## Architecture
 
 ```
