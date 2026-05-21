@@ -1910,3 +1910,123 @@ describe('API Routes — /pages/<slug> base href injection (relative-link fix)',
     assert.match(body, /Installer design/);
   });
 });
+
+describe('recoverFailedAgents (HH — refuse to heal when CLI gone but pane alive)', () => {
+  let db: Database;
+  let wss: WebSocketServer;
+  let tmpDir: string;
+  let proxyCalls: ProxyCommand[];
+  /** Set by each test to control proxy responses. */
+  let captureResponse: string;
+  let hasSessionResponse: boolean;
+
+  // Import recoverFailedAgents from the module under test
+  let recoverFailedAgents: (ctx: any, proxyId: string) => Promise<void>;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), 'agentic-hh-')));
+    const mod = await import('./routes.ts');
+    recoverFailedAgents = (mod as any).recoverFailedAgents;
+  });
+
+  after(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    db = new Database(join(tmpDir, `test-${Date.now()}-${Math.random()}.db`));
+    wss = new WebSocketServer();
+    proxyCalls = [];
+    captureResponse = '';
+    hasSessionResponse = true;
+  });
+
+  function makeCtx(): any {
+    const proxyDispatch = async (_proxyId: string, command: ProxyCommand): Promise<ProxyResponse> => {
+      proxyCalls.push(command);
+      if (command.action === 'has_session') return { ok: true, data: hasSessionResponse };
+      if (command.action === 'capture') return { ok: true, data: captureResponse };
+      return { ok: true };
+    };
+    return { db, wss, proxyDispatch, orchestratorHost: 'http://localhost:3000' };
+  }
+
+  function seedFailedAgent(name: string, proxyId: string): void {
+    db.registerProxy(proxyId, 'tok', 'localhost:3100');
+    db.createAgent({ name, engine: 'claude', cwd: '/tmp', proxyId });
+    const a = db.getAgent(name)!;
+    db.updateAgentState(name, 'failed', a.version, {
+      failedAt: new Date().toISOString(),
+      failureReason: 'tmux pane was killed externally',
+    });
+  }
+
+  it('should heal a failed agent when pane shows live Claude TUI', async () => {
+    seedFailedAgent('healthy-tl', 'proxy-x');
+    captureResponse = [
+      '────────────────────────────── tl ──',
+      '❯ ',
+      '──────────────────────────────────────',
+      '  ~/dev  Opus 4.7  ctx: 12%',
+      '  ⏵⏵ bypass permissions on',
+    ].join('\n');
+
+    await recoverFailedAgents(makeCtx(), 'proxy-x');
+
+    const after = db.getAgent('healthy-tl');
+    assert.equal(after?.state, 'active', 'agent should be healed (state=active)');
+    assert.equal(after?.failureReason, null, 'failureReason should clear on heal');
+  });
+
+  it('should REFUSE to heal when pane shows bare zsh prompt (HH bug — today\'s tl incident)', async () => {
+    seedFailedAgent('dead-tl', 'proxy-x');
+    captureResponse = [
+      'zsh: bad pattern: [from:',
+      "colm.murphy@IE-colm dev % [from: dashboard]: 'hi'",
+      'zsh: bad pattern: [from:',
+      'colm.murphy@IE-colm dev %',
+    ].join('\n');
+
+    await recoverFailedAgents(makeCtx(), 'proxy-x');
+
+    const after = db.getAgent('dead-tl');
+    assert.equal(after?.state, 'failed', 'agent must STAY failed when pane has bare shell prompt');
+    assert.match(after?.failureReason ?? '', /tmux pane was killed externally/,
+      'original failure reason should be preserved (we did not heal-then-refail)');
+  });
+
+  it('should skip agents whose tmux session is no longer alive', async () => {
+    seedFailedAgent('vanished', 'proxy-x');
+    hasSessionResponse = false;
+
+    await recoverFailedAgents(makeCtx(), 'proxy-x');
+
+    const after = db.getAgent('vanished');
+    assert.equal(after?.state, 'failed', 'agent stays failed when no session');
+    // capture should NOT have been called since has_session was false
+    assert.ok(!proxyCalls.some(c => c.action === 'capture'),
+      'capture must not be called when has_session returned false');
+  });
+
+  it('should not call proxy at all when no failed agents exist', async () => {
+    db.registerProxy('proxy-x', 'tok', 'localhost:3100');
+    db.createAgent({ name: 'happy', engine: 'claude', cwd: '/tmp', proxyId: 'proxy-x' });
+    // No state change — defaults to void/idle, not failed
+
+    await recoverFailedAgents(makeCtx(), 'proxy-x');
+
+    assert.equal(proxyCalls.length, 0,
+      'no proxy calls when there are no failed agents on this proxy');
+  });
+
+  it('should only process failed agents on the given proxy', async () => {
+    seedFailedAgent('on-x', 'proxy-x');
+    seedFailedAgent('on-y', 'proxy-y');
+    captureResponse = '  ~/dev  Opus 4.7  ctx: 12%\n  ⏵⏵ bypass permissions on';
+
+    await recoverFailedAgents(makeCtx(), 'proxy-x');
+
+    assert.equal(db.getAgent('on-x')?.state, 'active', 'failed agent on proxy-x healed');
+    assert.equal(db.getAgent('on-y')?.state, 'failed', 'failed agent on proxy-y untouched');
+  });
+});

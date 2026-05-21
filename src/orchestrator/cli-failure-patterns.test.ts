@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { isCliFailureLine, stripCliFailureLines, cliFailurePatterns } from './cli-failure-patterns.ts';
+import { isCliFailureLine, stripCliFailureLines, cliFailurePatterns, shellPromptPatterns, paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
 
 describe('cli-failure-patterns', () => {
   describe('isCliFailureLine', () => {
@@ -59,5 +59,58 @@ describe('cli-failure-patterns', () => {
   it('exports a non-empty patterns array', () => {
     assert.ok(cliFailurePatterns.length > 0);
     cliFailurePatterns.forEach((re) => assert.ok(re instanceof RegExp));
+  });
+
+  describe('shellPromptPatterns + paneEndsWithShellPrompt (HH)', () => {
+    it('should match the operator-incident zsh prompt at end of pane', () => {
+      const pane = [
+        'zsh: bad pattern: [from:',
+        "colm.murphy@IE-colm dev % [from: dashboard, reply with collab send dashboard --topic foo]: 'hi'",
+        'zsh: bad pattern: [from:',
+        'colm.murphy@IE-colm dev %',
+      ].join('\n');
+      assert.equal(paneEndsWithShellPrompt(pane), true,
+        'tl-incident shape: pane ending in `user@host path %` must be detected as shell prompt');
+    });
+
+    it('should match bash prompt at end of pane', () => {
+      assert.equal(paneEndsWithShellPrompt('output\nuser@host:~/path$ '), true);
+    });
+
+    it('should match root prompt at end of pane', () => {
+      assert.equal(paneEndsWithShellPrompt('output\nroot@host:~# '), true);
+    });
+
+    it('should match zsh continuation prompt (heredoc trap)', () => {
+      assert.equal(paneEndsWithShellPrompt('output\nquote>'), true);
+      assert.equal(paneEndsWithShellPrompt('output\ndquote>'), true);
+      assert.equal(paneEndsWithShellPrompt('output\ncmdand quote>'), true);
+    });
+
+    it('should not match a live Claude TUI footer', () => {
+      const claudeAlivePane = [
+        '────────────────────────────────────────────────────────────────────────── tl ──',
+        '❯ ',
+        '────────────────────────────────────────────────────────────────────────────────',
+        '  ~/dev  Opus 4.7  ctx: --                                     ◈ max · /effort',
+        '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+      ].join('\n');
+      assert.equal(paneEndsWithShellPrompt(claudeAlivePane), false,
+        'live Claude TUI footer must NOT be detected as shell prompt');
+    });
+
+    it('should return false on empty pane output', () => {
+      assert.equal(paneEndsWithShellPrompt(''), false);
+      assert.equal(paneEndsWithShellPrompt('\n\n\n'), false);
+    });
+
+    it('should ignore trailing blank lines and check last non-empty line', () => {
+      assert.equal(paneEndsWithShellPrompt('user@host ~ %\n\n\n'), true);
+    });
+
+    it('exports shellPromptPatterns as a non-empty regex array', () => {
+      assert.ok(shellPromptPatterns.length > 0);
+      shellPromptPatterns.forEach((re) => assert.ok(re instanceof RegExp));
+    });
   });
 });

@@ -22,7 +22,7 @@ import { sessionName, canSuspend } from '../shared/agent-entity.ts';
 import { getAdapter } from './adapters/index.ts';
 import { reloadAgent, recoverAgent, recycleAgent, type LifecycleContext } from './lifecycle.ts';
 import { resolveEffectiveConfig } from './engine-config-resolver.ts';
-import { cliFailurePatterns } from './cli-failure-patterns.ts';
+import { cliFailurePatterns, shellPromptPatterns } from './cli-failure-patterns.ts';
 
 type CompiledDetection = {
   json: string;
@@ -677,23 +677,11 @@ export class HealthMonitor {
     const hasExitMessage = cliFailurePatterns.some(re => re.test(recentLines));
 
     // Signal 2: Bare shell prompt at the bottom of the pane.
-    // Covers common shell configurations:
-    //   bash:  user@host:~/path$    or  [user@host path]$
-    //   zsh:   user@host ~/path %   or  host%
-    //   fish:  user@host ~/path>
-    //   root:  root@host:~#
-    //   minimal: bash-5.2$ or sh-5.2$
-    //
-    // Also catches zsh continuation prompts that appear when a paste contains
-    // an unmatched quote, heredoc, or paren — the persona onboarding heredoc
-    // can drop the shell into `cmdand quote>` / `dquote>` and never recover.
-    // Without these, wedged agents look idle forever to detectCliExit.
-    const shellPromptPatterns = [
-      /\w+@\w+[:\s].*[$%#>]\s*$/,                                       // user@host:path$ / user@host path% / root@host:~#
-      /^\[?\w+@\w+\s.*\]?[$%#]\s*$/,                                    // [user@host path]$
-      /^(?:ba)?sh[\d.-]*[$#]\s*$/,                                       // bash-5.2$ or sh$
-      /^(?:cmdand\s+quote|quote|dquote|heredoc|cmdsubst|cmdor)>\s*$/i,  // zsh continuation prompts
-    ];
+    // Patterns shared with routes.recoverFailedAgents via
+    // cli-failure-patterns.ts so the same "bare zsh / bash" detection
+    // is used to (a) catch exits during normal polling and (b) refuse
+    // to self-heal an agent whose pane was recreated externally
+    // without restarting the CLI inside it.
     const isShellPrompt = shellPromptPatterns.some(re => re.test(lastLine));
 
     // Need at least one signal
@@ -786,12 +774,8 @@ export class HealthMonitor {
       if (trimmed) { lastLine = trimmed; break; }
     }
 
-    // Shell prompt at bottom means CLI is NOT alive
-    const shellPromptPatterns = [
-      /\w+@\w+[:\s].*[$%#>]\s*$/,
-      /^\[?\w+@\w+\s.*\]?[$%#]\s*$/,
-      /^(?:ba)?sh[\d.-]*[$#]\s*$/,
-    ];
+    // Shell prompt at bottom means CLI is NOT alive — patterns shared with
+    // detectCliExit + routes.recoverFailedAgents via cli-failure-patterns.ts.
     if (shellPromptPatterns.some(re => re.test(lastLine))) {
       this.consecutiveFailures.delete(key);
       return false;
