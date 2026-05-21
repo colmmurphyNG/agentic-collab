@@ -80,6 +80,7 @@ import '/dashboard/assets/message-input.ts';
 import '/dashboard/assets/watch-panel.ts';
 import '/dashboard/assets/reminder-panel.ts';
 import '/dashboard/assets/files-panel.ts';
+import { loadServerPrefs } from '/dashboard/assets/settings.ts';
 import '/dashboard/assets/settings.ts';
 import { agentAction, openCreateAgentModal, setup as setupLifecycle } from '/dashboard/assets/agent-lifecycle.ts';
 import { sendMessage, uploadFile, handleFileUpload, updateSendability, handleQueueUpdate, setup as setupMessageIO } from '/dashboard/assets/message-io.ts';
@@ -262,6 +263,9 @@ import { pushUrlState, restorePendingAgent, setup as setupUrlState } from '/dash
   // Always try connecting first. If the server requires auth and we don't have
   // a token, the WebSocket will close with 401 and we'll show the auth modal.
   connect();
+  // Server-side preferences (item MM) — hydrate localStorage from the DB so
+  // submit-mode / close-keyboard prefs survive port/host/origin changes.
+  loadServerPrefs();
   initAgentListEvents();
   initVoice();
   initCommandPalette();
