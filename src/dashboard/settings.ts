@@ -14,8 +14,36 @@ function getPrefs() {
   catch { return {}; }
 }
 
+// Mirror to localStorage (for synchronous hot-path reads in message-input.ts)
+// AND PUT to server (item MM — so prefs survive origin partitioning when the
+// host port or domain changes). PUT is fire-and-forget; server-side failure
+// falls back to localStorage-only semantics.
 function savePrefs(prefs) {
   localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  fetch('/api/preferences', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(prefs),
+  }).catch(() => { /* server unreachable or unauthed — localStorage still has it */ });
+}
+
+/**
+ * Boot-time hydrate: pull server-side prefs, merge into localStorage so
+ * `getPrefs()` reads always see them. Called from index.html init.
+ * Server keys win over local keys for the same field; local keys not on the
+ * server are preserved (covers the migration window where the operator's
+ * existing localStorage values get pushed up on first save).
+ */
+export async function loadServerPrefs() {
+  try {
+    const res = await fetch('/api/preferences', { headers: authHeaders() });
+    if (!res.ok) return; // server unreachable or unauthed — silent no-op
+    const serverPrefs = await res.json();
+    if (typeof serverPrefs !== 'object' || serverPrefs === null) return;
+    const localPrefs = getPrefs();
+    const merged = { ...localPrefs, ...serverPrefs };
+    localStorage.setItem(PREFS_KEY, JSON.stringify(merged));
+  } catch { /* network error — silent no-op */ }
 }
 
 // Convert engine config record to YAML frontmatter string

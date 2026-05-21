@@ -1690,3 +1690,139 @@ describe('API Routes — /scratch (R: render-only endpoint)', () => {
     }
   });
 });
+
+describe('API Routes — /api/preferences (MM: server-side dashboard prefs)', () => {
+  let server: Server;
+  let db: Database;
+  let wss: WebSocketServer;
+  let port: number;
+  let tmpDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), 'agentic-prefs-routes-')));
+    db = new Database(join(tmpDir, 'test.db'));
+    wss = new WebSocketServer();
+
+    const mockProxyDispatch = async (_proxyId: string, _command: ProxyCommand): Promise<ProxyResponse> => ({ ok: true });
+    const locks = new LockManager(db.rawDb);
+
+    const ctx: RouteContext = {
+      db,
+      wss,
+      locks,
+      proxyDispatch: mockProxyDispatch,
+      getDashboardHtml: () => '<html></html>',
+      orchestratorHost: 'http://localhost:3000',
+      orchestratorSecret: null,
+      messageDispatcher: makeTestDispatcher(db, locks, mockProxyDispatch),
+      usagePoller: { getUsageData: () => ({}), pollNow: async () => {} } as any,
+      voiceEnabled: false,
+      accountStore: new AccountStore({ accountsDir: join(tmpDir, 'accounts'), agentHomesDir: join(tmpDir, 'agent-homes'), skipAutoRegister: true }),
+      telegramDispatcher: makeStubTelegramDispatcher(),
+      pagesDir: join(tmpDir, 'pages'),
+      storesDir: join(tmpDir, 'stores'),
+    };
+
+    const router = createRouter(ctx);
+    server = createServer(async (req, res) => { await router(req, res); });
+    await new Promise<void>((resolve) => {
+      server.listen(0, () => {
+        const addr = server.address();
+        port = typeof addr === 'object' && addr ? addr.port : 0;
+        resolve();
+      });
+    });
+  });
+
+  after(() => {
+    wss.close();
+    server.close();
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    db.rawDb.exec('DELETE FROM preferences');
+  });
+
+  it('should return empty object when no preferences are stored', async () => {
+    const res = await fetch(`http://localhost:${port}/api/preferences`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body, {});
+  });
+
+  it('should round-trip an object body through PUT then GET', async () => {
+    const putRes = await fetch(`http://localhost:${port}/api/preferences`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ submitMode: 'enter', closeKeyboardOnSend: true }),
+    });
+    assert.equal(putRes.status, 200);
+    const putBody = await putRes.json();
+    assert.deepEqual(putBody, { submitMode: 'enter', closeKeyboardOnSend: true });
+
+    const getRes = await fetch(`http://localhost:${port}/api/preferences`);
+    assert.equal(getRes.status, 200);
+    const getBody = await getRes.json();
+    assert.deepEqual(getBody, { submitMode: 'enter', closeKeyboardOnSend: true });
+  });
+
+  it('should merge — PUT preserves keys not in the payload', async () => {
+    await fetch(`http://localhost:${port}/api/preferences`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ submitMode: 'enter', closeKeyboardOnSend: true }),
+    });
+    // PUT with only one key — the other should survive.
+    await fetch(`http://localhost:${port}/api/preferences`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ submitMode: 'cmd-enter' }),
+    });
+    const getRes = await fetch(`http://localhost:${port}/api/preferences`);
+    const body = await getRes.json();
+    assert.deepEqual(body, { submitMode: 'cmd-enter', closeKeyboardOnSend: true });
+  });
+
+  it('should reject non-object PUT bodies', async () => {
+    for (const bad of ['null', '[]', '"string"', '42']) {
+      const res = await fetch(`http://localhost:${port}/api/preferences`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: bad,
+      });
+      assert.equal(res.status, 400, `bad payload ${bad} should 400`);
+    }
+  });
+
+  it('should handle nested object values without flattening', async () => {
+    await fetch(`http://localhost:${port}/api/preferences`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ui: { theme: 'dark', density: 'compact' }, voice: { wake: 'hey-conductor' } }),
+    });
+    const getRes = await fetch(`http://localhost:${port}/api/preferences`);
+    const body = await getRes.json();
+    assert.deepEqual(body, { ui: { theme: 'dark', density: 'compact' }, voice: { wake: 'hey-conductor' } });
+  });
+
+  it('should delete a specific key via DELETE /api/preferences/:key', async () => {
+    await fetch(`http://localhost:${port}/api/preferences`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ submitMode: 'enter', closeKeyboardOnSend: true }),
+    });
+    const delRes = await fetch(`http://localhost:${port}/api/preferences/submitMode`, { method: 'DELETE' });
+    assert.equal(delRes.status, 200);
+
+    const getRes = await fetch(`http://localhost:${port}/api/preferences`);
+    const body = await getRes.json();
+    assert.deepEqual(body, { closeKeyboardOnSend: true });
+  });
+
+  it('should return 404 when deleting a non-existent key', async () => {
+    const res = await fetch(`http://localhost:${port}/api/preferences/nonexistent`, { method: 'DELETE' });
+    assert.equal(res.status, 404);
+  });
+});
