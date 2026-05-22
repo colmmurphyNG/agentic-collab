@@ -51,6 +51,7 @@ export function buildActionsHtml(agent) {
     if (hasHook(agent, 'hookCompact')) html += '<button data-action="compact">Compact</button>';
     if (hasHook(agent, 'hookReload')) html += '<button data-action="reload">Reload</button>';
     html += '<button class="danger" data-action="recycle" title="Write handoff snapshot, kill, spawn fresh with new SESSION_ID (context wiped, persona kept)">Recycle</button>';
+    html += '<button class="secondary" data-action="unwedge" title="Send Esc Esc C-c C-c Enter to break stuck Claude dialogs (rewind, exit-confirm) or zsh continuation prompts. Stateless — no impact on healthy agents.">Unwedge</button>';
     if (hasHook(agent, 'hookExit')) html += '<button data-action="exit">Exit</button>';
     html += `<button class="danger" data-action="kill">Kill</button>`;
     if (agent.tmuxSession) html += `<button class="secondary" data-copy-tmux="tmux attach -t ${esc(agent.tmuxSession)}">Copy tmux</button>`;
