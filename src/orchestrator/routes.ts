@@ -22,7 +22,7 @@ import type { LockManager } from '../shared/lock.ts';
 import { getPersonasDir, parseFrontmatter, createPersonaAndAgent, syncSinglePersona, syncPersonasWithDiff, updateFrontmatterField, resolvePersonaPath, toHostPath } from './persona.ts';
 import {
   spawnAgent, resumeAgent, suspendAgent, destroyAgent,
-  reloadAgent, recoverAgent, recycleAgent, interruptAgent, compactAgent, killAgent,
+  reloadAgent, recoverAgent, recycleAgent, unwedgeAgent, interruptAgent, compactAgent, killAgent,
   executeCustomButton, executeIndicatorAction,
   type LifecycleContext,
 } from './lifecycle.ts';
@@ -1757,6 +1757,19 @@ route('POST', '/api/agents/:name/recycle', async (_req, res, match, ctx) => {
     broadcastAgentUpdate(ctx, name);
     broadcastLifecycleEvent(ctx, name, 'Recycled');
     json(res, 200, result);
+  } catch (err) {
+    json(res, 400, { error: (err as Error).message });
+  }
+});
+
+route('POST', '/api/agents/:name/unwedge', async (_req, res, match, ctx) => {
+  const name = match.pathname.groups['name']!;
+
+  try {
+    const lifecycleCtx = makeLifecycleCtx(ctx);
+    await unwedgeAgent(lifecycleCtx, name);
+    broadcastLifecycleEvent(ctx, name, 'Unwedged');
+    json(res, 200, { ok: true });
   } catch (err) {
     json(res, 400, { error: (err as Error).message });
   }
