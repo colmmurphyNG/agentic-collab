@@ -2030,3 +2030,110 @@ describe('recoverFailedAgents (HH — refuse to heal when CLI gone but pane aliv
     assert.equal(db.getAgent('on-y')?.state, 'failed', 'failed agent on proxy-y untouched');
   });
 });
+
+describe('unwedgeAgent (NN — operator escape hatch for stuck panes)', () => {
+  let db: Database;
+  let wss: WebSocketServer;
+  let tmpDir: string;
+  let proxyCalls: ProxyCommand[];
+  let hasSessionResponse: boolean;
+
+  let unwedgeAgent: (ctx: any, name: string) => Promise<void>;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), 'agentic-nn-')));
+    const mod = await import('./lifecycle.ts');
+    unwedgeAgent = (mod as any).unwedgeAgent;
+  });
+
+  after(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    db = new Database(join(tmpDir, `test-${Date.now()}-${Math.random()}.db`));
+    wss = new WebSocketServer();
+    proxyCalls = [];
+    hasSessionResponse = true;
+  });
+
+  function makeCtx(): any {
+    const proxyDispatch = async (_proxyId: string, command: ProxyCommand): Promise<ProxyResponse> => {
+      proxyCalls.push(command);
+      if (command.action === 'has_session') return { ok: true, data: hasSessionResponse };
+      return { ok: true };
+    };
+    const locks = new LockManager(db.rawDb);
+    return { db, locks, proxyDispatch, orchestratorHost: 'http://localhost:3000' };
+  }
+
+  function seedAgent(name: string): void {
+    db.registerProxy('proxy-x', 'tok', 'localhost:3100');
+    db.createAgent({ name, engine: 'claude', cwd: '/tmp', proxyId: 'proxy-x' });
+  }
+
+  it('should send the canonical 5-keystroke escape sequence to the pane', async () => {
+    seedAgent('stuck');
+
+    await unwedgeAgent(makeCtx(), 'stuck');
+
+    const sendKeysCalls = proxyCalls.filter(c => c.action === 'send_keys');
+    const keys = sendKeysCalls.map((c: any) => c.keys);
+    assert.deepEqual(keys, ['Escape', 'Escape', 'C-c', 'C-c', 'Enter'],
+      'sequence must be exactly Esc Esc C-c C-c Enter — empirically proven against Claude rewind dialog + zsh continuation');
+  });
+
+  it('should target the agent\'s tmux session by name', async () => {
+    seedAgent('stuck');
+
+    await unwedgeAgent(makeCtx(), 'stuck');
+
+    const sendKeysCalls = proxyCalls.filter(c => c.action === 'send_keys');
+    assert.ok(sendKeysCalls.every((c: any) => c.sessionName === 'agent-stuck'),
+      'all keystrokes must target the agent\'s tmux session');
+  });
+
+  it('should refuse when tmux session does not exist (caller should Recover/Recycle)', async () => {
+    seedAgent('vanished');
+    hasSessionResponse = false;
+
+    await assert.rejects(
+      () => unwedgeAgent(makeCtx(), 'vanished'),
+      /not found/,
+      'unwedge must fail fast if pane is gone — sending keystrokes to nothing is misleading',
+    );
+
+    const sendKeysCalls = proxyCalls.filter(c => c.action === 'send_keys');
+    assert.equal(sendKeysCalls.length, 0,
+      'no send_keys calls should fire when the session check failed');
+  });
+
+  it('should not change agent state', async () => {
+    seedAgent('healthy');
+    const before = db.getAgent('healthy')!;
+
+    await unwedgeAgent(makeCtx(), 'healthy');
+
+    const after = db.getAgent('healthy')!;
+    assert.equal(after.state, before.state,
+      'unwedge is stateless — does not flip the agent state, no DB writes other than the event log');
+  });
+
+  it('should throw on unknown agent', async () => {
+    await assert.rejects(
+      () => unwedgeAgent(makeCtx(), 'nonexistent'),
+      /not found/,
+    );
+  });
+
+  it('should log an unwedged event with the keystroke list', async () => {
+    seedAgent('stuck');
+
+    await unwedgeAgent(makeCtx(), 'stuck');
+
+    const events = db.rawDb.prepare("SELECT event, meta FROM events WHERE agent_name='stuck' AND event='unwedged'").all() as Array<{event: string; meta: string}>;
+    assert.equal(events.length, 1, 'one unwedged event logged');
+    const meta = JSON.parse(events[0]!.meta);
+    assert.deepEqual(meta.keys, ['Escape', 'Escape', 'C-c', 'C-c', 'Enter']);
+  });
+});
