@@ -29,6 +29,7 @@ import {
 import { getAdapter } from './adapters/index.ts';
 import { shutdownAgents, restoreAllAgents } from './network.ts';
 import { sessionName } from '../shared/agent-entity.ts';
+import { paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
 import type { MessageDispatcher } from './message-dispatcher.ts';
 import type { UsagePoller } from './usage-poller.ts';
 
@@ -85,9 +86,17 @@ function resolveProxyId(ctx: RouteContext, agent: { proxyId: string | null }, bo
 
 /**
  * Self-heal: when a proxy (re-)registers, recover any failed agents on it
- * whose tmux sessions are still alive.
+ * whose tmux sessions are still alive **and** whose pane shows a live CLI
+ * (not just a bare shell prompt).
+ *
+ * The pane check (item HH) covers the case where the tmux session was
+ * recreated externally (e.g. by a tmux/proxy restart) but the CLI engine
+ * was never spawned inside it — the session "exists" yet only the host
+ * shell is alive. Without the check, this routine would flip the agent
+ * back to `active` and the dashboard would surface a healthy state while
+ * messages get delivered into a bare zsh and discarded.
  */
-async function recoverFailedAgents(ctx: RouteContext, proxyId: string): Promise<void> {
+export async function recoverFailedAgents(ctx: RouteContext, proxyId: string): Promise<void> {
   const agents = ctx.db.listAgents().filter(
     (a) => a.proxyId === proxyId && a.state === 'failed',
   );
@@ -101,23 +110,40 @@ async function recoverFailedAgents(ctx: RouteContext, proxyId: string): Promise<
       sessionName: session,
     });
 
-    if (result.ok && result.data === true) {
-      const current = ctx.db.getAgent(agent.name);
-      if (!current || current.state !== 'failed') continue;
-      ctx.db.updateAgentState(agent.name, 'active', current.version, {
-        lastActivity: new Date().toISOString(),
-        failedAt: null,
-        failureReason: null,
+    if (!(result.ok && result.data === true)) continue;
+
+    // Pane exists. Now verify the CLI is actually alive inside it — not
+    // just a bare zsh/bash prompt left behind by a vanished CLI.
+    const cap = await ctx.proxyDispatch(proxyId, {
+      action: 'capture',
+      sessionName: session,
+      lines: 30,
+    });
+    if (cap.ok && typeof cap.data === 'string' && paneEndsWithShellPrompt(cap.data)) {
+      // Pane exists but CLI is gone — refuse to self-heal. The agent
+      // stays `failed` so the dashboard surfaces the real state and the
+      // operator can decide to Recycle.
+      ctx.db.logEvent(agent.name, 'self_heal_refused', undefined, {
+        reason: 'tmux session alive but CLI not running (bare shell prompt)',
       });
-      ctx.db.logEvent(agent.name, 'self_healed', undefined, {
-        reason: 'Proxy re-registered, tmux session alive',
-      });
-      ctx.wss.broadcast(JSON.stringify({
-        type: 'agent_update',
-        agent: ctx.db.getAgent(agent.name),
-      }));
-      recovered++;
+      continue;
     }
+
+    const current = ctx.db.getAgent(agent.name);
+    if (!current || current.state !== 'failed') continue;
+    ctx.db.updateAgentState(agent.name, 'active', current.version, {
+      lastActivity: new Date().toISOString(),
+      failedAt: null,
+      failureReason: null,
+    });
+    ctx.db.logEvent(agent.name, 'self_healed', undefined, {
+      reason: 'Proxy re-registered, tmux session alive with CLI running',
+    });
+    ctx.wss.broadcast(JSON.stringify({
+      type: 'agent_update',
+      agent: ctx.db.getAgent(agent.name),
+    }));
+    recovered++;
   }
 
   if (recovered > 0) {
