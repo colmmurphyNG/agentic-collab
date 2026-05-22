@@ -1648,6 +1648,58 @@ const RECYCLE_TIMEOUT_MS = parseInt(process.env['RECYCLE_TIMEOUT_MS'] ?? '60000'
  * Foundation for Z (auto-recycle at 92% ctx) — same primitive, different
  * trigger source.
  */
+/**
+ * Unwedge an agent's tmux pane (item NN). Sends a keystroke sequence
+ * proven to escape every wedge state we've observed:
+ *
+ *   Escape Escape  — exit any Claude TUI dialog (rewind, exit-confirm,
+ *                    plan mode, file-permission prompt). One Escape can
+ *                    leave Claude in a sub-dialog; two reliably returns
+ *                    to the main TUI input or exits to shell.
+ *   C-c C-c        — break any zsh continuation prompt (cmdand quote>,
+ *                    dquote>, heredoc>) that has accumulated input
+ *                    after a Claude crash. Also confirms the "Press
+ *                    Ctrl-C again to exit" dialog if Claude prompted.
+ *   Enter          — settle on a fresh zsh prompt.
+ *
+ * Stateless: no DB writes, no lifecycle phase transitions. Safe to
+ * call on healthy agents (Escape against an empty TUI is a no-op; C-c
+ * against an empty zsh prompt is a no-op). Designed as an operator
+ * escape hatch on the dashboard for stuck agents.
+ *
+ * Throws if the proxy reports the tmux session is gone — caller
+ * should Recover or Recycle in that case.
+ */
+export async function unwedgeAgent(
+  ctx: LifecycleContext,
+  name: string,
+): Promise<void> {
+  const agent = ctx.db.getAgent(name);
+  if (!agent) throw new Error(`Agent "${name}" not found`);
+  const proxyId = requireProxy(agent);
+  const tmuxSession = sessionName(agent);
+
+  const sessionCheck = await ctx.proxyDispatch(proxyId, {
+    action: 'has_session',
+    sessionName: tmuxSession,
+  });
+  if (!(sessionCheck.ok && sessionCheck.data === true)) {
+    throw new Error(`tmux session "${tmuxSession}" not found — agent must be Recovered or Recycled instead`);
+  }
+
+  const keys = ['Escape', 'Escape', 'C-c', 'C-c', 'Enter'];
+  for (const key of keys) {
+    await ctx.proxyDispatch(proxyId, {
+      action: 'send_keys',
+      sessionName: tmuxSession,
+      keys: key,
+    });
+    await sleep(100);
+  }
+
+  ctx.db.logEvent(name, 'unwedged', undefined, { keys });
+}
+
 export async function recycleAgent(
   ctx: LifecycleContext,
   name: string,
