@@ -22,10 +22,12 @@ import { pushUrlState } from '/dashboard/assets/url-state.ts';
 // ── Dependencies injected via setup() ──
 let _handleAuthError = () => {};
 let _updateSendability = () => {};
+let _selectAgent = null;
 
-export function setup({ handleAuthError, updateSendability }) {
+export function setup({ handleAuthError, updateSendability, selectAgent }) {
   _handleAuthError = handleAuthError;
   _updateSendability = updateSendability;
+  _selectAgent = selectAgent ?? null;
   setupPersonaEditor({ handleAuthError });
 }
 
@@ -196,32 +198,77 @@ function renderSearchResults(container) {
   container.innerHTML = _searchResults.map(r => {
     const snippet = snippetAround(r.message, _searchQuery);
     const time = new Date(r.createdAt).toLocaleString();
-    return `<div class="search-result" data-msg-id="${r.id}">
-      <div class="search-result-meta"><span class="search-result-agent">${esc(r.agent)}</span><span class="search-result-time">${esc(time)}</span></div>
+    const topicTag = r.topic ? `<span class="search-result-topic">${esc(r.topic)}</span>` : '';
+    return `<div class="search-result" data-msg-id="${r.id}" data-agent="${esc(r.agent)}" data-topic="${esc(r.topic || '')}" title="Click to jump to message in thread context">
+      <div class="search-result-meta"><span class="search-result-agent">${esc(r.agent)}</span>${topicTag}<span class="search-result-time">${esc(time)}</span><button class="search-copy-btn" title="Copy full message text">Copy</button></div>
       <div class="search-result-snippet">${highlightMatch(snippet, _searchQuery)}</div>
-      <div class="search-result-full" style="display:none"><pre class="search-result-text">${esc(r.message)}</pre><button class="search-copy-btn">Copy</button></div>
+      <div class="search-result-full-text" style="display:none">${esc(r.message)}</div>
     </div>`;
   }).join('');
 
-  // Click to expand, copy button
+  // Click anywhere on the result card → jump to the message in its thread context.
+  // The Copy button is the only intra-card affordance that stops propagation.
   container.querySelectorAll('.search-result').forEach(el => {
     el.addEventListener('click', (e) => {
       if (e.target.closest('.search-copy-btn')) return;
-      const full = el.querySelector('.search-result-full');
-      const isOpen = full.style.display !== 'none';
-      // Close all others
-      container.querySelectorAll('.search-result-full').forEach(f => f.style.display = 'none');
-      if (!isOpen) full.style.display = 'block';
+      const msgId = parseInt(el.dataset.msgId, 10);
+      const agent = el.dataset.agent;
+      const topic = el.dataset.topic || '';
+      if (!isNaN(msgId) && agent) jumpToMessage(agent, topic, msgId);
     });
     el.querySelector('.search-copy-btn')?.addEventListener('click', (e) => {
       e.stopPropagation();
-      const text = el.querySelector('.search-result-text').textContent;
+      const text = el.querySelector('.search-result-full-text').textContent;
       const btn = e.target;
       navigator.clipboard.writeText(text).then(() => {
         btn.textContent = 'Copied!';
         setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
       });
     });
+  });
+}
+
+/**
+ * Jump to a specific dashboard message in its thread context. Overrides
+ * the currently-selected agent (if different) and the active topic filter,
+ * then scrolls the message into view with a brief flash highlight so the
+ * operator can locate it. Closes the search overlay.
+ *
+ * Used by the search-result click handler — operator clicks a result and
+ * lands in the conversation around that message, free to read what came
+ * before/after without remembering which agent/topic owns it.
+ */
+function jumpToMessage(agent, topic, msgId) {
+  // Close the search overlay so the thread is visible.
+  _searchOpen = false;
+  _searchQuery = '';
+  _searchResults = [];
+  const input = document.getElementById('threadSearchInput');
+  if (input) input.value = '';
+
+  // Switch to the target agent (no-op if already selected).
+  if (state.selected !== agent) {
+    if (_selectAgent) _selectAgent(agent);
+    else state.selected = agent;
+  }
+
+  // Override topic filter. setActiveTopic + renderThread re-renders the panel.
+  if (topic) setActiveTopic(topic);
+  renderThread();
+
+  // After render, scroll to the message and flash-highlight it.
+  // Defer one frame so the DOM is laid out.
+  requestAnimationFrame(() => {
+    const el = document.querySelector(`[data-msg-id="${msgId}"]`);
+    if (!el) {
+      // Fallback: the message might be out of the current paginated window;
+      // log instead of silently failing so the operator notices.
+      console.warn(`[search] jumpToMessage: msg-id ${msgId} not in DOM after topic switch to "${topic}"`);
+      return;
+    }
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('search-jump-highlight');
+    setTimeout(() => el.classList.remove('search-jump-highlight'), 2200);
   });
 }
 
@@ -232,7 +279,7 @@ function doLocalSearch(query) {
     .filter(m => m.message.toLowerCase().includes(lower))
     .slice(-200)
     .reverse()
-    .map(m => ({ id: m.id, agent: m.agent, message: m.message, createdAt: m.createdAt }));
+    .map(m => ({ id: m.id, agent: m.agent, topic: m.topic, message: m.message, createdAt: m.createdAt }));
 }
 
 async function doGlobalSearch(query) {
@@ -242,7 +289,7 @@ async function doGlobalSearch(query) {
   });
   if (!res.ok) return;
   const data = await res.json();
-  _searchResults = data.map(m => ({ id: m.id, agent: m.agent, message: m.message, createdAt: m.createdAt }));
+  _searchResults = data.map(m => ({ id: m.id, agent: m.agent, topic: m.topic, message: m.message, createdAt: m.createdAt }));
 }
 
 // ── Thread Renderer ──
