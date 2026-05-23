@@ -358,7 +358,19 @@ async function finalizeToActive(
       ctx.db.logEvent(name, interruptedEventName, undefined, { finalState: latest.state });
       return latest;
     }
-    const updated = ctx.db.updateAgentState(name, 'active', latest.version, updateExtra);
+    // Every transition to `active` clears prior failure stigmata. Without
+    // this, an agent that fails then auto-recovers leaves stale `failed_at`
+    // / `failure_reason` fields populated; the dashboard renders the agent
+    // card with a red "Failed" badge based on those fields even though
+    // state has moved to active. Spread updateExtra last so explicit
+    // call-site values win (none currently set these — the spread order is
+    // forward-compatible for an unusual case where a caller wants to
+    // preserve a failure note across a re-spawn).
+    const updated = ctx.db.updateAgentState(name, 'active', latest.version, {
+      failedAt: null,
+      failureReason: null,
+      ...updateExtra,
+    });
     ctx.db.logEvent(name, eventName, undefined, eventMeta);
     return updated;
   });
