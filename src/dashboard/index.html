@@ -115,7 +115,7 @@ import { pushUrlState, restorePendingAgent, setup as setupUrlState } from '/dash
   setupConnection({ renderAgents, renderThread, updatePageTitle, updateAgent, addMessage, handleMessageWithdrawn, handleQueueUpdate, patchAgentCard, onInit: restorePendingAgent });
 
   // Wire thread/persona module dependencies
-  setupThread({ handleAuthError, updateSendability });
+  setupThread({ handleAuthError, updateSendability, selectAgent });
 
   // Wire agent-lifecycle module dependencies
   setupLifecycle({ handleAuthError, selectAgent });

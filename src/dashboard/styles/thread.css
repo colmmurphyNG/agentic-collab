@@ -281,14 +281,35 @@
     border-radius: 4px;
     background: var(--bg);
     border: 1px solid var(--border);
-    cursor: default;
+    cursor: pointer;
     font-size: 12px;
   }
-  .search-result:hover { border-color: var(--accent); }
+  .search-result:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
   .search-result-meta {
     display: flex;
-    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
     margin-bottom: 2px;
+  }
+  .search-result-time {
+    margin-left: auto;
+  }
+  .search-result-topic {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    font-weight: 500;
+    text-transform: lowercase;
+  }
+  /* Flash highlight when a search result jumps to a message in its thread */
+  .search-jump-highlight {
+    animation: search-jump-flash 2.2s ease-out;
+  }
+  @keyframes search-jump-flash {
+    0%   { background: color-mix(in srgb, var(--accent) 50%, transparent); }
+    100% { background: transparent; }
   }
   .search-result-agent {
     font-weight: 600;

@@ -33,6 +33,9 @@ function buildMessageEl(msg, agentName, renderMarkdown) {
     div.className = `msg ${msg.direction === 'to_agent' ? 'to-agent' : 'from-agent'}`;
   }
   if (msg.withdrawn) div.classList.add('withdrawn');
+  // Stable msg-id attribute lets the search-result "jump to context" feature
+  // locate this element after switching agent + topic. See thread.ts:jumpToMessage.
+  if (msg.id != null) div.dataset.msgId = String(msg.id);
   const time = new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const displayMsg = isSystem ? msg.message.replace(/^\[system\]\s*/, '') : msg.message;
   // From → To routing header
