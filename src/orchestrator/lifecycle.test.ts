@@ -108,6 +108,32 @@ describe('Lifecycle', () => {
       const agent = db.getAgent('fail-spawn');
       assert.equal(agent?.state, 'failed');
     });
+
+    it('should clear failed_at + failure_reason stigmata when transitioning to active via spawn', async () => {
+      // Seed an agent in 'failed' state with stigmata populated — simulates
+      // a prior failure that we're now spawning past.
+      db.createAgent({ name: 'stigmata-spawn', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      const a = db.getAgent('stigmata-spawn')!;
+      db.updateAgentState('stigmata-spawn', 'failed', a.version, {
+        failedAt: '2026-05-23T00:00:00Z',
+        failureReason: 'CLI session not found — resume failed',
+      });
+      const before = db.getAgent('stigmata-spawn')!;
+      assert.equal(before.state, 'failed');
+      assert.equal(before.failureReason, 'CLI session not found — resume failed');
+
+      const result = await spawnAgent(ctx, {
+        name: 'stigmata-spawn',
+        engine: 'claude',
+        cwd: '/tmp',
+        proxyId: 'p1',
+      });
+
+      assert.equal(result.state, 'active', 'agent should transition to active');
+      assert.equal(result.failedAt, null, 'failedAt must be cleared on transition to active');
+      assert.equal(result.failureReason, null, 'failureReason must be cleared on transition to active');
+    });
   });
 
   describe('spawnAgent — idempotent session creation (Sammons#5)', () => {
