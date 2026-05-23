@@ -2137,3 +2137,124 @@ describe('unwedgeAgent (NN — operator escape hatch for stuck panes)', () => {
     assert.deepEqual(meta.keys, ['Escape', 'Escape', 'C-c', 'C-c', 'Enter']);
   });
 });
+
+describe('POST /api/dashboard/reply auto-forwards to Telegram when route active', () => {
+  let server: Server;
+  let db: Database;
+  let wss: WebSocketServer;
+  let port: number;
+  let tmpDir: string;
+  let telegramSends: Array<{ botToken: string; chatId: string; text: string }>;
+  let telegramRouting: typeof import('./telegram-routing.ts');
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), 'agentic-tg-fwd-')));
+    db = new Database(join(tmpDir, 'test.db'));
+    wss = new WebSocketServer();
+    telegramSends = [];
+
+    telegramRouting = await import('./telegram-routing.ts');
+
+    const mockProxyDispatch = async (_proxyId: string, _command: ProxyCommand): Promise<ProxyResponse> => ({ ok: true });
+    const locks = new LockManager(db.rawDb);
+
+    const recordingTelegramDispatcher = {
+      send: async (botToken: string, chatId: string, text: string) => {
+        telegramSends.push({ botToken, chatId, text });
+        return true;
+      },
+    } as any;
+
+    const ctx: RouteContext = {
+      db,
+      wss,
+      locks,
+      proxyDispatch: mockProxyDispatch,
+      getDashboardHtml: () => '<html></html>',
+      orchestratorHost: 'http://localhost:3000',
+      orchestratorSecret: null,
+      messageDispatcher: makeTestDispatcher(db, locks, mockProxyDispatch),
+      usagePoller: { getUsageData: () => ({}), pollNow: async () => {} } as any,
+      voiceEnabled: false,
+      accountStore: new AccountStore({ accountsDir: join(tmpDir, 'accounts'), agentHomesDir: join(tmpDir, 'agent-homes'), skipAutoRegister: true }),
+      telegramDispatcher: recordingTelegramDispatcher,
+      pagesDir: join(tmpDir, 'pages'),
+      storesDir: join(tmpDir, 'stores'),
+    };
+
+    const router = createRouter(ctx);
+    server = createServer(async (req, res) => { await router(req, res); });
+    await new Promise<void>((resolve) => {
+      server.listen(0, () => {
+        const addr = server.address();
+        port = typeof addr === 'object' && addr ? addr.port : 0;
+        resolve();
+      });
+    });
+
+    // Seed a telegram destination
+    db.createDestination({ name: 'cmCollab', type: 'telegram', config: { botToken: 'fake-token', chatId: '999', defaultAgent: 'tl' } });
+    db.createAgent({ name: 'tl', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    db.registerProxy('p1', 'tok', 'localhost:3100');
+  });
+
+  after(() => {
+    wss.close();
+    server.close();
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    telegramSends = [];
+    telegramRouting._resetTelegramRoutes();
+  });
+
+  async function dashboardReply(agent: string, message: string, topic = 'telegram'): Promise<{ status: number }> {
+    const res = await fetch(`http://localhost:${port}/api/dashboard/reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent, message, topic }),
+    });
+    return { status: res.status };
+  }
+
+  it('should NOT auto-forward when there is no active Telegram route', async () => {
+    const { status } = await dashboardReply('tl', 'no remote context — should stay dashboard-only');
+    assert.equal(status, 200);
+    // Tiny wait — fire-and-forget could race
+    await new Promise(r => setTimeout(r, 50));
+    assert.equal(telegramSends.length, 0, 'no Telegram send without an active route');
+  });
+
+  it('should auto-forward to Telegram when a route is active for this agent', async () => {
+    telegramRouting.recordTelegramInbound('tl', 'cmCollab', '999');
+    const { status } = await dashboardReply('tl', 'reply that should land on Telegram');
+    assert.equal(status, 200);
+    await new Promise(r => setTimeout(r, 50));
+    assert.equal(telegramSends.length, 1, 'one Telegram send fired');
+    assert.equal(telegramSends[0]?.chatId, '999');
+    assert.match(telegramSends[0]?.text ?? '', /\[tl\] reply that should land on Telegram/);
+  });
+
+  it('should NOT forward when only OTHER agents have routes (per-agent isolation)', async () => {
+    telegramRouting.recordTelegramInbound('sfcc', 'cmCollab', '999');
+    const { status } = await dashboardReply('tl', 'tl reply with sfcc on remote');
+    assert.equal(status, 200);
+    await new Promise(r => setTimeout(r, 50));
+    assert.equal(telegramSends.length, 0, 'tl reply must not leak to sfcc\'s route');
+  });
+
+  it('should not forward when the destination is disabled', async () => {
+    telegramRouting.recordTelegramInbound('tl', 'cmCollab', '999');
+    db.updateDestination('cmCollab', { enabled: false });
+    try {
+      const { status } = await dashboardReply('tl', 'should be blocked');
+      assert.equal(status, 200);
+      await new Promise(r => setTimeout(r, 50));
+      assert.equal(telegramSends.length, 0, 'disabled destinations must not receive auto-forwards');
+    } finally {
+      db.updateDestination('cmCollab', { enabled: true });
+    }
+  });
+});
