@@ -30,6 +30,7 @@ import { getAdapter } from './adapters/index.ts';
 import { shutdownAgents, restoreAllAgents } from './network.ts';
 import { sessionName } from '../shared/agent-entity.ts';
 import { paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
+import { recordTelegramInbound, getActiveTelegramRoute } from './telegram-routing.ts';
 import type { MessageDispatcher } from './message-dispatcher.ts';
 import type { UsagePoller } from './usage-poller.ts';
 
@@ -567,6 +568,27 @@ route('POST', '/api/dashboard/reply', async (req, res, _match, ctx) => {
 
   // Broadcast to dashboard WebSocket
   ctx.wss.broadcast(JSON.stringify({ type: 'message', msg }));
+
+  // Auto-forward to Telegram when the operator is on remote (i.e. an inbound
+  // Telegram message has been delivered to this agent within the TTL window).
+  // Without this, the agent's reply lands on the dashboard only, and an
+  // operator on Telegram sees nothing back. Fire-and-forget — failures are
+  // logged but don't fail the reply. See telegram-routing.ts for design.
+  const route = getActiveTelegramRoute(body.agent);
+  if (route) {
+    const dest = ctx.db.getDestination(route.destName);
+    if (dest && dest.enabled && dest.type === 'telegram') {
+      const botToken = dest.config['botToken'] as string;
+      const text = `[${body.agent}] ${sanitized}`;
+      ctx.telegramDispatcher.send(botToken, route.chatId, text).then((ok) => {
+        if (ok) {
+          console.log(`[telegram-routing] Auto-forwarded ${body.agent} reply to chat ${route.chatId} (dest=${route.destName})`);
+        }
+      }).catch((err) => {
+        console.error(`[telegram-routing] Auto-forward failed for ${body.agent}:`, (err as Error).message);
+      });
+    }
+  }
 
   json(res, 200, { ok: true, msg });
 });
@@ -2716,6 +2738,9 @@ export function routeTelegramMessage(
         topic: 'telegram',
         sourceAgent: `telegram:${dest.name}`,
       });
+      // Record the route so agent → dashboard replies auto-forward back
+      // to this Telegram chat for the TTL window.
+      recordTelegramInbound(name, dest.name, incomingChatId);
       delivered.push(name);
     }
 
@@ -2742,6 +2767,7 @@ export function routeTelegramMessage(
         topic: 'telegram',
         sourceAgent: `telegram:${dest.name}`,
       });
+      recordTelegramInbound(defaultAgent, dest.name, incomingChatId);
       console.log(`[telegram] Routed unprefixed message to default agent: ${defaultAgent}`);
     } else {
       if (defaultAgent) {
