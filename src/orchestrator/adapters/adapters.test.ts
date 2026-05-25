@@ -78,6 +78,7 @@ describe('Engine Adapters', () => {
         task: undefined,
         appendSystemPrompt: undefined,
       });
+      // With CLAUDE_HOME_DIR unset (default in tests), the --add-dir flag is omitted.
       assert.equal(cmd, 'claude');
     });
 
