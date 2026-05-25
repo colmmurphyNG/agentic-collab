@@ -418,6 +418,42 @@ function mcpConfigFlagsFor(mcpConfigPath: string | undefined): string {
 }
 
 /**
+ * Write the composed system prompt to a file the host shell can read, and
+ * return the **host path** for use in claude's `--append-system-prompt-file`
+ * flag. Item N — solves the wedge that happens when long persona bodies
+ * with apostrophes/backticks are inlined into the shell via
+ * `--append-system-prompt $PERSONA_PROMPT`. The wedge mode: tmux send-keys
+ * pastes the multi-KB shell-quoted string into zsh; tmux's send-keys
+ * buffer can split mid-`'\''` escape sequence, leaving zsh stuck in
+ * `cmdand quote>` continuation prompt and the pane unresponsive
+ * (Sammons/agentic-collab#5; captured live on sfcc-2298 vanish 2026-05-25).
+ *
+ * Switching to a file-based path eliminates all shell quoting entirely —
+ * claude reads the file directly, byte-exact. No tmux send-keys buffer
+ * boundary to worry about.
+ *
+ * Writes to `<config-dir>/persona-prompts/<agent>.txt`. The orchestrator
+ * config dir is bind-mounted between container (`/config/agentic-collab`)
+ * and host (`~/.config/agentic-collab`); `toHostPath` translates the
+ * container path to the host equivalent for the template var. File is
+ * overwritten on every spawn/resume/reload/recover/recycle — last-spawn
+ * content wins.
+ */
+function writeComposedPromptFile(agentName: string, systemPrompt: string): string {
+  // In-container: AGENTIC_COLLAB_CONFIG_DIR=/config/agentic-collab (bind-mount
+  // to ~/.config/agentic-collab on host).  In tests / host: fallback to the
+  // host home-dir equivalent so unit tests don't crash with ENOENT trying to
+  // mkdir a container path that doesn't exist on the host filesystem.
+  const baseDir = process.env['AGENTIC_COLLAB_CONFIG_DIR']
+    ?? join(process.env['HOME'] ?? '/tmp', '.config', 'agentic-collab');
+  const dir = join(baseDir, 'persona-prompts');
+  mkdirSync(dir, { recursive: true });
+  const containerPath = join(dir, `${agentName}.txt`);
+  writeFileSync(containerPath, systemPrompt, 'utf-8');
+  return toHostPath(containerPath);
+}
+
+/**
  * Ask the proxy to materialise a per-agent MCP config file on the host.
  * Returns the host path to feed into `claude --mcp-config`, or undefined
  * if the proxy call failed (allowlist couldn't be materialised — skip the
@@ -652,7 +688,7 @@ export async function spawnAgent(
       AGENT_CWD: opts.cwd,
       SESSION_ID: generatedSessionId,
       PERSONA_PROMPT: systemPrompt,
-      PERSONA_PROMPT_FILEPATH: personaFile ?? undefined,
+      PERSONA_PROMPT_FILEPATH: writeComposedPromptFile(opts.name, systemPrompt),
       MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
       capturedVars: phase1.current.capturedVars ?? undefined,
     };
@@ -826,7 +862,7 @@ export async function resumeAgent(
       AGENT_CWD: cwd,
       SESSION_ID: resolvedSessionId ?? undefined,
       PERSONA_PROMPT: systemPrompt,
-      PERSONA_PROMPT_FILEPATH: personaFile ?? undefined,
+      PERSONA_PROMPT_FILEPATH: writeComposedPromptFile(name, systemPrompt),
       MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
       capturedVars: phase1.current.capturedVars ?? undefined,
     };
@@ -1433,7 +1469,7 @@ export async function reloadAgent(
       AGENT_CWD: cwd,
       SESSION_ID: existingSessionId ?? name,
       PERSONA_PROMPT: systemPrompt,
-      PERSONA_PROMPT_FILEPATH: personaFile ?? undefined,
+      PERSONA_PROMPT_FILEPATH: writeComposedPromptFile(name, systemPrompt),
       MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
       capturedVars: postExitAgent?.capturedVars ?? phase1.current.capturedVars ?? undefined,
     };
@@ -1581,7 +1617,7 @@ export async function recoverAgent(
       AGENT_CWD: cwd,
       SESSION_ID: generatedSessionId,
       PERSONA_PROMPT: systemPrompt,
-      PERSONA_PROMPT_FILEPATH: personaFile ?? undefined,
+      PERSONA_PROMPT_FILEPATH: writeComposedPromptFile(name, systemPrompt),
       MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
     };
 
@@ -1791,7 +1827,7 @@ export async function recycleAgent(
       AGENT_CWD: cwd,
       SESSION_ID: generatedSessionId,
       PERSONA_PROMPT: systemPrompt,
-      PERSONA_PROMPT_FILEPATH: personaFile ?? undefined,
+      PERSONA_PROMPT_FILEPATH: writeComposedPromptFile(name, systemPrompt),
       MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
     };
 
