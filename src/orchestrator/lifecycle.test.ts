@@ -295,6 +295,7 @@ describe('Lifecycle', () => {
       assert.ok(paste.text.includes('--effort high'), 'should include --effort');
       assert.ok(paste.text.includes('fix the bug'), 'should include task');
       assert.ok(paste.text.includes('--dangerously-skip-permissions'), 'should include skip-permissions');
+      // --add-dir flag only emitted when CLAUDE_HOME_DIR env var is set (operator opt-in)
     });
 
     it('codex spawn includes --model and positional task', async () => {

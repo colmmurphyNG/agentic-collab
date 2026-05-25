@@ -5,6 +5,14 @@
 import { SPINNER_REGEX, type EngineAdapter, type SpawnOptions, type ResumeOptions, type IdleState, type ContextResult } from './types.ts';
 import { shellQuote } from '../../shared/utils.ts';
 
+/**
+ * Optional path passed to `claude --add-dir` so the spawned agent can read
+ * persistent personas / shared knowledge from a directory outside the cwd.
+ * When unset (empty string), the adapter omits the flag entirely. Operator
+ * configures via the CLAUDE_HOME_DIR env var on the orchestrator container.
+ */
+const CLAUDE_HOME_DIR = process.env['CLAUDE_HOME_DIR'] || '';
+
 export class ClaudeAdapter implements EngineAdapter {
   readonly engine = 'claude';
   readonly supportsResumePrompt = false;
@@ -14,6 +22,10 @@ export class ClaudeAdapter implements EngineAdapter {
 
     if (opts.dangerouslySkipPermissions === true) {
       parts.push('--dangerously-skip-permissions');
+    }
+
+    if (CLAUDE_HOME_DIR) {
+      parts.push('--add-dir', CLAUDE_HOME_DIR);
     }
 
     if (opts.model) {
@@ -59,6 +71,9 @@ export class ClaudeAdapter implements EngineAdapter {
 
     if (opts.mcpConfigPath) {
       parts.push('--mcp-config', shellQuote(opts.mcpConfigPath), '--strict-mcp-config');
+    }
+    if (CLAUDE_HOME_DIR) {
+      parts.push('--add-dir', CLAUDE_HOME_DIR);
     }
 
     if (opts.appendSystemPrompt) {
