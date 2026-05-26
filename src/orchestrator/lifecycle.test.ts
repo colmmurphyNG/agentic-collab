@@ -10,7 +10,7 @@ import { shellQuote } from '../shared/utils.ts';
 import {
   spawnAgent, resumeAgent, suspendAgent, destroyAgent,
   reloadAgent, interruptAgent, compactAgent, killAgent, startWatchdog,
-  executeCustomButton, type LifecycleContext,
+  executeCustomButton, claudeAddDirFlags, type LifecycleContext,
 } from './lifecycle.ts';
 
 describe('Lifecycle', () => {
@@ -2125,5 +2125,72 @@ describe('Lifecycle', () => {
       assert.ok(paste.text.includes('MY_VAR='), 'custom env should be present');
       assert.ok(paste.text.includes("'hello world'"), 'custom env values should be shell-quoted');
     });
+  });
+});
+
+describe('claudeAddDirFlags — CLAUDE_ADD_DIRS env → --add-dir flags', () => {
+  let savedEnv: string | undefined;
+
+  before(() => {
+    savedEnv = process.env['CLAUDE_ADD_DIRS'];
+  });
+
+  after(() => {
+    if (savedEnv === undefined) delete process.env['CLAUDE_ADD_DIRS'];
+    else process.env['CLAUDE_ADD_DIRS'] = savedEnv;
+  });
+
+  beforeEach(() => {
+    delete process.env['CLAUDE_ADD_DIRS'];
+  });
+
+  it('should return empty string when CLAUDE_ADD_DIRS is unset', () => {
+    assert.equal(claudeAddDirFlags(), '');
+  });
+
+  it('should return empty string for empty CLAUDE_ADD_DIRS', () => {
+    process.env['CLAUDE_ADD_DIRS'] = '';
+    assert.equal(claudeAddDirFlags(), '');
+  });
+
+  it('should emit a single --add-dir flag for one path', () => {
+    process.env['CLAUDE_ADD_DIRS'] = '/Users/x/dev/SFCC-commerce-worktrees';
+    assert.equal(claudeAddDirFlags(), `--add-dir '/Users/x/dev/SFCC-commerce-worktrees'`);
+  });
+
+  it('should emit one --add-dir per comma-separated path', () => {
+    process.env['CLAUDE_ADD_DIRS'] = '/Users/x/dev/a,/Users/x/dev/b,/Users/x/dev/c';
+    assert.equal(
+      claudeAddDirFlags(),
+      `--add-dir '/Users/x/dev/a' --add-dir '/Users/x/dev/b' --add-dir '/Users/x/dev/c'`,
+    );
+  });
+
+  it('should trim whitespace around each path', () => {
+    process.env['CLAUDE_ADD_DIRS'] = '  /Users/x/dev/a  ,  /Users/x/dev/b  ';
+    assert.equal(
+      claudeAddDirFlags(),
+      `--add-dir '/Users/x/dev/a' --add-dir '/Users/x/dev/b'`,
+    );
+  });
+
+  it('should skip empty entries from extra commas', () => {
+    process.env['CLAUDE_ADD_DIRS'] = '/Users/x/dev/a,,/Users/x/dev/b,';
+    assert.equal(
+      claudeAddDirFlags(),
+      `--add-dir '/Users/x/dev/a' --add-dir '/Users/x/dev/b'`,
+    );
+  });
+
+  it('should shell-quote paths with spaces correctly', () => {
+    process.env['CLAUDE_ADD_DIRS'] = '/Users/x/dev folder/a';
+    assert.equal(claudeAddDirFlags(), `--add-dir '/Users/x/dev folder/a'`);
+  });
+
+  it('should shell-quote paths with single quotes (defensive)', () => {
+    process.env['CLAUDE_ADD_DIRS'] = "/Users/x/d'ev/a";
+    // shellQuote replaces ' with '\'' → '/Users/x/d'\''ev/a'
+    const result = claudeAddDirFlags();
+    assert.ok(result.includes("'\\''"), 'inner single-quote must be shell-escaped');
   });
 });
