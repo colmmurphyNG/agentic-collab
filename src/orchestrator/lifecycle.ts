@@ -418,6 +418,29 @@ function mcpConfigFlagsFor(mcpConfigPath: string | undefined): string {
 }
 
 /**
+ * Build `--add-dir <path>` flags from the `CLAUDE_ADD_DIRS` env var
+ * (comma-separated absolute paths). Each non-empty entry becomes a
+ * separate `--add-dir` argument, shell-quoted. Returns empty string
+ * when the env var is unset or contains no paths.
+ *
+ * Solves the per-worktree "Trust this directory?" prompt that Claude
+ * Code 2.1.140+ shows whenever an agent's cwd (or a parent worktree
+ * dir) hasn't been seen before. Operator pre-registers the parent
+ * dirs in docker-compose.override.yml; every spawn/resume thereafter
+ * lists them as trusted at session start.
+ */
+export function claudeAddDirFlags(): string {
+  const raw = process.env['CLAUDE_ADD_DIRS'];
+  if (!raw) return '';
+  return raw
+    .split(',')
+    .map(p => p.trim())
+    .filter(p => p.length > 0)
+    .map(p => `--add-dir ${shellQuote(p)}`)
+    .join(' ');
+}
+
+/**
  * Write the composed system prompt to a file the host shell can read, and
  * return the **host path** for use in claude's `--append-system-prompt-file`
  * flag. Item N — solves the wedge that happens when long persona bodies
@@ -716,6 +739,7 @@ export async function spawnAgent(
       PERSONA_PROMPT: systemPrompt,
       PERSONA_PROMPT_FILEPATH: writeComposedPromptFile(opts.name, systemPrompt),
       MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
+      ADD_DIR_FLAGS: claudeAddDirFlags(),
       capturedVars: phase1.current.capturedVars ?? undefined,
     };
     const startResult = resolveHook('start', hookStart, effectiveCurrent, {
@@ -890,6 +914,7 @@ export async function resumeAgent(
       PERSONA_PROMPT: systemPrompt,
       PERSONA_PROMPT_FILEPATH: writeComposedPromptFile(name, systemPrompt),
       MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
+      ADD_DIR_FLAGS: claudeAddDirFlags(),
       capturedVars: phase1.current.capturedVars ?? undefined,
     };
 
@@ -1497,6 +1522,7 @@ export async function reloadAgent(
       PERSONA_PROMPT: systemPrompt,
       PERSONA_PROMPT_FILEPATH: writeComposedPromptFile(name, systemPrompt),
       MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
+      ADD_DIR_FLAGS: claudeAddDirFlags(),
       capturedVars: postExitAgent?.capturedVars ?? phase1.current.capturedVars ?? undefined,
     };
 
@@ -1645,6 +1671,7 @@ export async function recoverAgent(
       PERSONA_PROMPT: systemPrompt,
       PERSONA_PROMPT_FILEPATH: writeComposedPromptFile(name, systemPrompt),
       MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
+      ADD_DIR_FLAGS: claudeAddDirFlags(),
     };
 
     const recoveryTask = [
@@ -1855,6 +1882,7 @@ export async function recycleAgent(
       PERSONA_PROMPT: systemPrompt,
       PERSONA_PROMPT_FILEPATH: writeComposedPromptFile(name, systemPrompt),
       MCP_CONFIG_FLAGS: mcpConfigFlagsFor(mcpConfigPath),
+      ADD_DIR_FLAGS: claudeAddDirFlags(),
     };
 
     const recycleTask = [
