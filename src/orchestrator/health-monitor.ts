@@ -49,6 +49,35 @@ export type HealthMonitorOptions = {
 const DEFAULT_POLL_MS = 30_000;
 const DEFAULT_IDLE_SUSPEND_MS = 5 * 60 * 1000;
 
+/**
+ * Exponential backoff schedule for consecutive auto-recover failures of
+ * the same agent. `failures` is the number of attempts already made (0
+ * means no previous attempts → first attempt is immediate). Returns the
+ * MIN milliseconds that must elapse since the last attempt before the
+ * next is allowed.
+ *
+ * Curve:
+ *   0 attempts: 0ms     (first failure — immediate retry, pre-backoff behaviour)
+ *   1 attempt:  30s
+ *   2 attempts: 2min
+ *   3 attempts: 5min
+ *   4+ attempts: 15min cap
+ *
+ * Designed to absorb genuinely-transient failures (Claude TUI crash on
+ * busy load, MCP-server hiccup) with no delay, while throttling
+ * persistent wedges (bad persona file, missing dependency) so they don't
+ * burn through ~5 spawns/minute without operator intervention.
+ *
+ * Exported for unit testing — the policy itself is the entire surface.
+ */
+export function autoRecoverBackoffMs(failures: number): number {
+  if (failures <= 0) return 0;
+  if (failures === 1) return 30 * 1000;
+  if (failures === 2) return 2 * 60 * 1000;
+  if (failures === 3) return 5 * 60 * 1000;
+  return 15 * 60 * 1000;
+}
+
 export class HealthMonitor {
   private timer: ReturnType<typeof setInterval> | null = null;
   private fastTimer: ReturnType<typeof setInterval> | null = null;
@@ -128,6 +157,11 @@ export class HealthMonitor {
   /** Timestamp when an agent was healed — used to suppress stale exit-message
    *  re-detection during the grace period after healing. */
   private readonly healedAt = new Map<string, number>();
+  /** Per-agent consecutive auto-recover failure tracking — drives exponential
+   *  backoff so a wedged agent (persistent bad config, missing file, etc.)
+   *  doesn't burn through 8 spawn attempts in 2 minutes. Counter increments
+   *  each time maybeAutoRecover fires; resets to 0 on successful recover. */
+  private readonly recoverFailures = new Map<string, { count: number; lastAttemptAt: number }>();
 
   constructor(opts: HealthMonitorOptions) {
     this.db = opts.db;
@@ -905,20 +939,49 @@ export class HealthMonitor {
    * Check if an agent that just failed should be auto-recovered.
    * Reads the engine's detection config for the autoRecover flag.
    * Fires asynchronously — does not block the poll cycle.
+   *
+   * Exponential backoff on consecutive failures: prevents a persistently
+   * wedged agent (bad persona, missing file, broken host config) from
+   * burning through retry attempts in seconds. Without throttling, a
+   * single bad spawn loops with spawnCount climbing ~5 per minute until
+   * the operator intervenes. Schedule below — failure 1 retries
+   * immediately (matches pre-backoff behaviour); failures 2-4 escalate;
+   * failure 5+ caps at 15 minutes so the agent never gets entirely
+   * abandoned. Counter resets on successful recovery.
    */
   private maybeAutoRecover(agent: AgentRecord): void {
     const resolved = this.resolveAgent(agent);
     const detection = this.getDetection(resolved);
     if (!detection?.config.autoRecover) return;
 
-    console.log(`[health] ${agent.name}: autoRecover enabled — scheduling recovery`);
-    this.db.logEvent(agent.name, 'auto_recover_triggered');
+    const now = Date.now();
+    const tracked = this.recoverFailures.get(agent.name) ?? { count: 0, lastAttemptAt: 0 };
+    const minDelayMs = autoRecoverBackoffMs(tracked.count);
+    const sinceLast = now - tracked.lastAttemptAt;
+    if (tracked.count > 0 && sinceLast < minDelayMs) {
+      const remainingMs = minDelayMs - sinceLast;
+      console.log(`[health] ${agent.name}: autoRecover throttled — ${tracked.count} consecutive failures, ${Math.ceil(remainingMs / 1000)}s remaining before next attempt`);
+      this.db.logEvent(agent.name, 'auto_recover_throttled', undefined, {
+        consecutiveFailures: tracked.count,
+        remainingMs,
+      });
+      return;
+    }
+
+    console.log(`[health] ${agent.name}: autoRecover enabled — scheduling recovery (attempt ${tracked.count + 1})`);
+    this.db.logEvent(agent.name, 'auto_recover_triggered', undefined, {
+      consecutiveFailures: tracked.count,
+    });
     this.emitSystemMessage(agent.name, 'Auto-recovering...');
+    this.recoverFailures.set(agent.name, { count: tracked.count + 1, lastAttemptAt: now });
 
     // Fire-and-forget — recovery is a full lifecycle operation
     const lifecycleCtx = this.makeLifecycleCtx();
     recoverAgent(lifecycleCtx, agent.name).then(() => {
       console.log(`[health] ${agent.name}: auto-recovery completed`);
+      // Success — clear the failure counter so the next failure (if any)
+      // gets an immediate retry rather than starting backed-off.
+      this.recoverFailures.delete(agent.name);
       this.onAgentUpdate(agent.name);
     }).catch((err) => {
       console.error(`[health] ${agent.name}: auto-recovery failed:`, err);
