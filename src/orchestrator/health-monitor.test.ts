@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { Database } from './database.ts';
 import { LockManager } from '../shared/lock.ts';
 import type { ProxyCommand, ProxyResponse } from '../shared/types.ts';
-import { HealthMonitor } from './health-monitor.ts';
+import { HealthMonitor, autoRecoverBackoffMs } from './health-monitor.ts';
 import { MessageDispatcher } from './message-dispatcher.ts';
 
 describe('HealthMonitor', () => {
@@ -1098,5 +1098,44 @@ describe('HealthMonitor indicators', () => {
     // Only the good regex should match; bad regex should be skipped
     assert.equal(update!.indicators.length, 1);
     assert.equal((update!.indicators[0] as { badge: string }).badge, 'Hello');
+  });
+});
+
+describe('autoRecoverBackoffMs — exponential backoff curve', () => {
+  it('should return 0 for the first attempt (preserves pre-backoff immediate-retry behaviour)', () => {
+    assert.equal(autoRecoverBackoffMs(0), 0);
+  });
+
+  it('should return 30s after 1 failure', () => {
+    assert.equal(autoRecoverBackoffMs(1), 30 * 1000);
+  });
+
+  it('should return 2min after 2 failures', () => {
+    assert.equal(autoRecoverBackoffMs(2), 2 * 60 * 1000);
+  });
+
+  it('should return 5min after 3 failures', () => {
+    assert.equal(autoRecoverBackoffMs(3), 5 * 60 * 1000);
+  });
+
+  it('should cap at 15min for 4+ consecutive failures', () => {
+    assert.equal(autoRecoverBackoffMs(4), 15 * 60 * 1000);
+    assert.equal(autoRecoverBackoffMs(5), 15 * 60 * 1000);
+    assert.equal(autoRecoverBackoffMs(10), 15 * 60 * 1000);
+    assert.equal(autoRecoverBackoffMs(100), 15 * 60 * 1000);
+  });
+
+  it('should treat negative counts as 0 (defensive — no crash on bad input)', () => {
+    assert.equal(autoRecoverBackoffMs(-1), 0);
+    assert.equal(autoRecoverBackoffMs(-100), 0);
+  });
+
+  it('should be monotonically non-decreasing through the curve', () => {
+    let prev = -1;
+    for (let n = 0; n <= 5; n++) {
+      const cur = autoRecoverBackoffMs(n);
+      assert.ok(cur >= prev, `backoff should not decrease: failures=${n} got ${cur}ms, prev ${prev}ms`);
+      prev = cur;
+    }
   });
 });
