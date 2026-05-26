@@ -64,6 +64,18 @@ export type TemplateVars = {
    * Personas without the placeholder keep current behaviour.
    */
   MCP_CONFIG_FLAGS?: string;
+  /**
+   * Claude `--add-dir <path>` flags pre-built from `CLAUDE_ADD_DIRS` env var
+   * (comma-separated absolute paths). Empty string when unset. Personas
+   * embed `$ADD_DIR_FLAGS` in their start/resume hooks to mark additional
+   * trusted directories at session start — eliminates the Claude Code
+   * "Trust this directory?" prompt that fires when an agent's cwd or
+   * a sibling worktree directory has never been seen before.
+   *
+   * Example: CLAUDE_ADD_DIRS="/Users/x/dev/project-b-worktrees,/Users/x/dev/conductor-worktrees"
+   *   →  --add-dir '/Users/x/dev/project-b-worktrees' --add-dir '/Users/x/dev/conductor-worktrees'
+   */
+  ADD_DIR_FLAGS?: string;
   /** Captured variables from pipeline capture steps (fallback for $VAR interpolation) */
   capturedVars?: Record<string, string>;
 };
