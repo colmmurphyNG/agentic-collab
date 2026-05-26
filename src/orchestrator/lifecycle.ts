@@ -440,17 +440,43 @@ function mcpConfigFlagsFor(mcpConfigPath: string | undefined): string {
  * content wins.
  */
 function writeComposedPromptFile(agentName: string, systemPrompt: string): string {
-  // In-container: AGENTIC_COLLAB_CONFIG_DIR=/config/agentic-collab (bind-mount
-  // to ~/.config/agentic-collab on host).  In tests / host: fallback to the
-  // host home-dir equivalent so unit tests don't crash with ENOENT trying to
-  // mkdir a container path that doesn't exist on the host filesystem.
-  const baseDir = process.env['AGENTIC_COLLAB_CONFIG_DIR']
+  // Two-path setup:
+  //   containerBaseDir — where the orchestrator writes the file (its own POV)
+  //   hostBaseDir      — what the orchestrator emits to the template var, so the
+  //                      host shell can read the file after the bind-mount
+  //                      maps container→host
+  //
+  // In-container: AGENTIC_COLLAB_CONFIG_DIR=/config/agentic-collab (the bind-
+  // mount target; the host side is whatever the host's HOME/.config/agentic-
+  // collab is). We pass HOST_HOME via env so the lifecycle code can construct
+  // the host-side path without guessing.
+  //
+  // Tests / direct host execution: when AGENTIC_COLLAB_CONFIG_DIR is unset,
+  // we're on the host already — container path == host path == ~/.config/
+  // agentic-collab.
+  const containerBaseDir = process.env['AGENTIC_COLLAB_CONFIG_DIR']
     ?? join(process.env['HOME'] ?? '/tmp', '.config', 'agentic-collab');
-  const dir = join(baseDir, 'persona-prompts');
+  const dir = join(containerBaseDir, 'persona-prompts');
   mkdirSync(dir, { recursive: true });
   const containerPath = join(dir, `${agentName}.txt`);
   writeFileSync(containerPath, systemPrompt, 'utf-8');
-  return toHostPath(containerPath);
+
+  // Translate to host path. If running inside the container, HOST_HOME tells
+  // us the operator's host home dir; the path under .config/agentic-collab
+  // maps via the docker-compose bind mount. If running on host (HOST_HOME
+  // unset, or pointing at the same HOME as the process), no translation
+  // needed.
+  const hostHome = process.env['HOST_HOME'];
+  if (hostHome && containerBaseDir.startsWith('/config/agentic-collab')) {
+    return join(
+      hostHome,
+      '.config',
+      'agentic-collab',
+      'persona-prompts',
+      `${agentName}.txt`,
+    );
+  }
+  return containerPath;
 }
 
 /**
