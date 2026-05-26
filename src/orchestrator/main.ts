@@ -26,6 +26,7 @@ import type { ProxyCommand, ProxyResponse, ProxyRegistration } from '../shared/t
 import { getVersion } from '../shared/version.ts';
 import { handleVoiceUpgrade, type VoiceProxyOptions } from './voice-proxy.ts';
 import { DEFAULT_ENGINE_CONFIGS } from './default-engine-configs.ts';
+import { createIndicatorBridgeState, bridgeIndicatorTransitions } from './indicator-bridge.ts';
 
 const PORT = parseInt(process.env['PORT'] ?? '3000', 10);
 const DB_PATH = process.env['DB_PATH'] ?? join(process.env['HOME'] ?? '/data', '.agentic-collab', 'orchestrator.db');
@@ -158,6 +159,10 @@ const messageDispatcher = new MessageDispatcher({
 
 // ── Health Monitor ──
 
+// Indicator-bridge state: tracks which warning/danger indicators are active
+// per agent so we only post system messages on transitions (not every poll).
+const indicatorBridgeState = createIndicatorBridgeState();
+
 const healthMonitor = new HealthMonitor({
   db,
   locks,
@@ -177,6 +182,14 @@ const healthMonitor = new HealthMonitor({
   },
   onIndicatorUpdate: (agentName, indicators) => {
     wss.broadcast(JSON.stringify({ type: 'indicator_update', agentName, indicators }));
+    // Bridge warning/danger indicator transitions to the agent's Messages
+    // thread so blocker state is visible regardless of which tab the
+    // operator is on. Stateless per-agent transition detection; only
+    // posts on first-fire + clear, not on every poll.
+    const newMsgs = bridgeIndicatorTransitions(indicatorBridgeState, agentName, indicators, db);
+    for (const msg of newMsgs) {
+      wss.broadcast(JSON.stringify({ type: 'message', msg }));
+    }
   },
   onIdleDetected: (agentName) => {
     messageDispatcher.tryDeliver(agentName).catch((err) => {
