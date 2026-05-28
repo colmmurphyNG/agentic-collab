@@ -82,8 +82,13 @@ const CLAUDE_DETECTION = {
     '^\\s*(Read|Write|Edit|Bash|Glob|Grep|Agent|WebFetch|WebSearch)\\s',  // tool execution
     '^[\\u280b\\u2819\\u2839\\u2838\\u283c\\u2834\\u2826\\u2827\\u2807\\u280f]',  // braille spinner
     { pattern: '\\u00b7\\s*\\d+ local agents?', lines: 3 },  // sub-agents (status bar only)
-    { pattern: '\\u00b7\\s*\\d+ shells?', lines: 3 },        // background shells (status bar only)
-    { pattern: '\\u00b7\\s*\\d+ background tasks?', lines: 3 },  // background tasks (status bar only)
+    // Background shells and background tasks are deliberately NOT active signals.
+    // Long-lived bg shells (forgotten polls, stuck playwright runs) routinely
+    // outlive the agent's interest in them and were causing permanent
+    // false-active state. The braille spinner above covers the legitimate
+    // "actively-thinking-and-spawning-tools" case; bg-shell counts remain
+    // visible as info indicators (see BACKGROUND_SHELLS_INDICATOR /
+    // BACKGROUND_TASKS_INDICATOR above).
   ],
   contextPattern: '(\\d+)\\s*tokens',
   idleThreshold: 2,
