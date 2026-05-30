@@ -67,3 +67,31 @@ describe('DEFAULT_ENGINE_CONFIGS.claude detection patterns', () => {
     assert.ok(ids.includes('local-agents'), 'local-agents indicator must remain for operator visibility');
   });
 });
+
+describe('CLAUDE_APPROVAL_INDICATOR regex covers all three prompt shapes', () => {
+  const claude = DEFAULT_ENGINE_CONFIGS.find(c => c.name === 'claude');
+  const indicators = JSON.parse(claude!.indicators);
+  const approval = indicators.find((i: { id: string }) => i.id === 'approval');
+  const re = new RegExp(approval.regex);
+
+  it('matches the older Yes / No / Always allow yes-no prompt', () => {
+    assert.match('Yes / No / Always allow', re);
+    assert.match('Yes/No/Always allow', re);
+  });
+
+  it("matches the newer 2.1.142+ 'Do you want to proceed?' confirmation prompt", () => {
+    assert.match('Do you want to proceed?', re);
+    assert.match('  Do you want to proceed?  ', re);
+  });
+
+  it('matches the AskUserQuestion footer (the gap that caused pwa-2391 PHX-2472 to go silent)', () => {
+    assert.match('Enter to select · ↑/↓ to navigate · Esc to cancel', re);
+    assert.match('Enter to select - up/down to navigate - Esc to cancel', re);
+  });
+
+  it('does not falsely match unrelated pane content', () => {
+    assert.doesNotMatch('Hello world', re);
+    assert.doesNotMatch('Reading file /tmp/foo.txt', re);
+    assert.doesNotMatch('Bash command completed', re);
+  });
+});
