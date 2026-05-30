@@ -134,6 +134,45 @@ describe('Lifecycle', () => {
       assert.equal(result.failedAt, null, 'failedAt must be cleared on transition to active');
       assert.equal(result.failureReason, null, 'failureReason must be cleared on transition to active');
     });
+
+    it('should preserve lastFailedAt + lastFailureReason across recovery for operator visibility (HH)', async () => {
+      // Operator pain point: after auto-recovery, the orchestrator clears failedAt
+      // + failureReason on the agent record, so the operator loses all visibility
+      // into WHY the agent died. The lastFailedAt / lastFailureReason columns
+      // mirror those values at failure-transition time and survive the recovery
+      // clear, giving a durable "last known failure cause" view.
+      db.createAgent({ name: 'hh-preserve', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      const a = db.getAgent('hh-preserve')!;
+      // Simulate the orchestrator's failure transition writing BOTH pairs.
+      const failedAt = '2026-05-30T17:38:00Z';
+      const reason = 'Health check failed 3x: capture-pane returned 500';
+      db.updateAgentState('hh-preserve', 'failed', a.version, {
+        failedAt,
+        failureReason: reason,
+        lastFailedAt: failedAt,
+        lastFailureReason: reason,
+      });
+
+      const before = db.getAgent('hh-preserve')!;
+      assert.equal(before.failedAt, failedAt);
+      assert.equal(before.failureReason, reason);
+      assert.equal(before.lastFailedAt, failedAt, 'lastFailedAt mirrors failedAt at failure transition');
+      assert.equal(before.lastFailureReason, reason, 'lastFailureReason mirrors failureReason at failure transition');
+
+      // Now recover via spawn (the path finalizeToActive clears failedAt + failureReason).
+      const result = await spawnAgent(ctx, {
+        name: 'hh-preserve',
+        engine: 'claude',
+        cwd: '/tmp',
+        proxyId: 'p1',
+      });
+
+      assert.equal(result.state, 'active');
+      assert.equal(result.failedAt, null, 'failedAt cleared (existing behaviour)');
+      assert.equal(result.failureReason, null, 'failureReason cleared (existing behaviour)');
+      assert.equal(result.lastFailedAt, failedAt, 'lastFailedAt MUST survive recovery — durable historical record');
+      assert.equal(result.lastFailureReason, reason, 'lastFailureReason MUST survive recovery — durable historical record');
+    });
   });
 
   describe('spawnAgent — idempotent session creation (Sammons#5)', () => {
