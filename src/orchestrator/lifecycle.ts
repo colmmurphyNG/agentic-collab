@@ -616,9 +616,13 @@ export function startWatchdog(
       await ctx.locks.withLock(name, async () => {
         const latest = ctx.db.getAgent(name);
         if (latest && latest.state === intermediateState) {
+          const reason = `${intermediateState} timeout (${timeoutMs / 1000}s)`;
+          const now = new Date().toISOString();
           ctx.db.updateAgentState(name, 'failed', latest.version, {
-            failedAt: new Date().toISOString(),
-            failureReason: `${intermediateState} timeout (${timeoutMs / 1000}s)`,
+            failedAt: now,
+            failureReason: reason,
+            lastFailedAt: now,
+            lastFailureReason: reason,
           });
           ctx.db.logEvent(name, `${intermediateState}_timeout`, undefined, { timeoutMs });
 
@@ -708,9 +712,13 @@ export async function spawnAgent(
       await ctx.locks.withLock(opts.name, async () => {
         const latest = ctx.db.getAgent(opts.name);
         if (latest && latest.state === 'spawning') {
+          const reason = `Failed to create tmux session: ${createResult.error}`;
+          const now = new Date().toISOString();
           ctx.db.updateAgentState(opts.name, 'failed', latest.version, {
-            failedAt: new Date().toISOString(),
-            failureReason: `Failed to create tmux session: ${createResult.error}`,
+            failedAt: now,
+            failureReason: reason,
+            lastFailedAt: now,
+            lastFailureReason: reason,
           });
           ctx.db.logEvent(opts.name, 'spawn_failed', undefined, { reason: createResult.error });
         }
@@ -871,9 +879,13 @@ export async function resumeAgent(
         await ctx.locks.withLock(name, async () => {
           const latest = ctx.db.getAgent(name);
           if (latest && latest.state === 'resuming') {
+            const reason = `Failed to create tmux session: ${createResult.error ?? 'unknown'}`;
+            const now = new Date().toISOString();
             ctx.db.updateAgentState(name, 'failed', latest.version, {
-              failedAt: new Date().toISOString(),
-              failureReason: `Failed to create tmux session: ${createResult.error ?? 'unknown'}`,
+              failedAt: now,
+              failureReason: reason,
+              lastFailedAt: now,
+              lastFailureReason: reason,
             });
             ctx.db.logEvent(name, 'resume_failed', undefined, { reason: createResult.error });
           }

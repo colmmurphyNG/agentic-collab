@@ -505,9 +505,13 @@ export class HealthMonitor {
         // No pane output available (capture failed) — store last known snapshot
         const lastKnown = this.lastPaneSnapshot.get(agent.name) ?? '';
         this.failureSnapshot.set(agent.name, lastKnown);
+        const reason = `Health check failed ${failures}x: ${captureResult.error}`;
+        const now = new Date().toISOString();
         this.db.updateAgentState(agent.name, 'failed', agent.version, {
-          failedAt: new Date().toISOString(),
-          failureReason: `Health check failed ${failures}x: ${captureResult.error}`,
+          failedAt: now,
+          failureReason: reason,
+          lastFailedAt: now,
+          lastFailureReason: reason,
         });
         this.db.logEvent(agent.name, 'health_check_failed', undefined, {
           reason: captureResult.error,
@@ -749,9 +753,12 @@ export class HealthMonitor {
     // currentSessionId OR capturedVars.SESSION_ID is set, so both must be
     // cleared. See scratch/brain/lifecycle-resume-bug.md.
     const isResumeFailure = reason === 'CLI session not found — resume failed';
+    const now = new Date().toISOString();
     this.db.updateAgentState(agent.name, 'failed', agent.version, {
-      failedAt: new Date().toISOString(),
+      failedAt: now,
       failureReason: reason,
+      lastFailedAt: now,
+      lastFailureReason: reason,
       ...(isResumeFailure ? { currentSessionId: null } : {}),
     });
     if (isResumeFailure) {
