@@ -25,9 +25,19 @@ export type DefaultEngineConfig = {
 const UNSAFE_INDICATOR = { id: 'unsafe', regex: '.', badge: 'Unsafe', style: 'danger' };
 const LOW_CONTEXT_INDICATOR = { id: 'low-context', regex: 'Context left until', badge: 'Low Context', style: 'danger' };
 const CONTEXT_LIMIT_INDICATOR = { id: 'context-limit', regex: 'Context limit reached', badge: 'Context Limit', style: 'danger' };
+// Approval-style prompts come in three shapes across Claude Code 2.1.x:
+//   1. Yes / No / Always allow ......... older yes/no permission prompts
+//   2. Do you want to proceed? ......... newer (2.1.142+) confirmation prompts
+//   3. AskUserQuestion UI .............. multi-option numbered prompts, identified
+//                                        by the footer
+//                                        "Enter to select · ↑/↓ to navigate · Esc to cancel"
+// Without shape 3, the indicator-bridge (PR #41) doesn't fire on AskUserQuestion
+// prompts and the question never surfaces to the Messages thread (empirical
+// trigger: pwa-2391 TICKET-NNNN npm-install recovery, 2026-05-30). All three shapes
+// folded into the default regex; per-persona overrides win when present.
 const CLAUDE_APPROVAL_INDICATOR = {
   id: 'approval',
-  regex: '(Yes)\\s*/\\s*(No)\\s*/\\s*(Always allow)',
+  regex: '(Yes)\\s*/\\s*(No)\\s*/\\s*(Always allow)|Do you want to proceed\\?|Enter to select.{1,30}to navigate.{1,30}Esc to cancel',
   badge: 'Needs Approval',
   style: 'warning',
   actions: {
