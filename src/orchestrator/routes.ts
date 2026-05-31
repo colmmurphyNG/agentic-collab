@@ -29,6 +29,7 @@ import {
 import { getAdapter } from './adapters/index.ts';
 import { shutdownAgents, restoreAllAgents } from './network.ts';
 import { UsageAggregator, renderUsageMarkdown } from './usage-aggregator.ts';
+import { DroneAuditAggregator, renderAuditMarkdown } from './drone-audit.ts';
 import { sessionName } from '../shared/agent-entity.ts';
 import { paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
 import { recordTelegramInbound, getActiveTelegramRoute } from './telegram-routing.ts';
@@ -270,6 +271,41 @@ route('GET', '/usage', async (_req, res, _m, ctx) => {
   } catch (e) {
     res.writeHead(500, { 'content-type': 'text/plain' });
     res.end(`Usage report failed: ${(e as Error).message}`);
+  }
+});
+
+// PP-0 drone-offload audit surfaced at /audit (HTML) + /api/drone-audit (JSON).
+// Scans the LL-0 session FTS5 index for repetitive cheap-task patterns and
+// estimates the dollar savings of routing them to a Haiku-running drone
+// persona. Cached in-memory with a 5-minute refresh window.
+
+const droneAuditAggregator = new DroneAuditAggregator();
+
+route('GET', '/api/drone-audit', async (_req, res, _m, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, _req)) return json(res, 401, { error: 'Unauthorized' });
+  try {
+    const report = await droneAuditAggregator.audit();
+    return json(res, 200, report);
+  } catch (e) {
+    return json(res, 500, { error: (e as Error).message });
+  }
+});
+
+route('GET', '/audit', async (_req, res, _m, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, _req)) return json(res, 401, { error: 'Unauthorized' });
+  try {
+    const report = await droneAuditAggregator.audit();
+    const md = renderAuditMarkdown(report);
+    const bodyHtml = renderMarkdown(md);
+    const html = wrapInHtml('Drone audit', bodyHtml, 'audit');
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-cache, no-store, must-revalidate',
+    });
+    res.end(html);
+  } catch (e) {
+    res.writeHead(500, { 'content-type': 'text/plain' });
+    res.end(`Drone audit failed: ${(e as Error).message}`);
   }
 });
 
