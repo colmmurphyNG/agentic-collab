@@ -391,9 +391,12 @@ const staleProxyTimer = setInterval(() => {
     const agents = db.listAgents().filter((a) => a.proxyId === proxy.proxyId);
     for (const agent of agents) {
       if (isRunning(agent)) {
+        const now = new Date().toISOString();
         db.updateAgentState(agent.name, 'failed', agent.version, {
-          failedAt: new Date().toISOString(),
+          failedAt: now,
           failureReason: 'Proxy disconnected',
+          lastFailedAt: now,
+          lastFailureReason: 'Proxy disconnected',
         });
         db.logEvent(agent.name, 'proxy_disconnected', undefined, { proxyId: proxy.proxyId });
       }

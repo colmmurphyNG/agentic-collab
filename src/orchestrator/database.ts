@@ -58,6 +58,8 @@ const SCHEMA = `
     reload_task        TEXT,
     failed_at          TEXT,
     failure_reason     TEXT,
+    last_failed_at     TEXT,
+    last_failure_reason TEXT,
     version            INTEGER NOT NULL DEFAULT 0,
     spawn_count        INTEGER NOT NULL DEFAULT 0,
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
@@ -186,6 +188,18 @@ export class Database {
     // Special: captured_vars is a runtime field, not in the config registry
     if (!agentColNames.has('captured_vars')) {
       this.db.exec('ALTER TABLE agents ADD COLUMN captured_vars TEXT');
+    }
+    // Durable record of the most recent failure cause — failed_at / failure_reason
+    // get cleared on recovery; these survive so the operator can see WHY the
+    // agent last failed even after auto-recovery restored it to active.
+    if (!agentColNames.has('last_failed_at')) {
+      this.db.exec('ALTER TABLE agents ADD COLUMN last_failed_at TEXT');
+      // Backfill from current failure state if any agent is currently failed
+      this.db.exec('UPDATE agents SET last_failed_at = failed_at WHERE failed_at IS NOT NULL');
+    }
+    if (!agentColNames.has('last_failure_reason')) {
+      this.db.exec('ALTER TABLE agents ADD COLUMN last_failure_reason TEXT');
+      this.db.exec('UPDATE agents SET last_failure_reason = failure_reason WHERE failure_reason IS NOT NULL');
     }
 
     // Registry-driven: adds any remaining missing config columns
@@ -386,6 +400,8 @@ export class Database {
     reloadTask: string | null;
     failedAt: string | null;
     failureReason: string | null;
+    lastFailedAt: string | null;
+    lastFailureReason: string | null;
     stateBeforeShutdown: string | null;
     spawnCount: number;
     agentGroup: string | null;
@@ -1158,6 +1174,8 @@ function mapAgentRow(row: Record<string, unknown>): AgentRecord {
     reloadTask: row['reload_task'] as string | null,
     failedAt: row['failed_at'] as string | null,
     failureReason: row['failure_reason'] as string | null,
+    lastFailedAt: row['last_failed_at'] as string | null,
+    lastFailureReason: row['last_failure_reason'] as string | null,
     capturedVars: deserializeCapturedVars(row['captured_vars']),
     version: row['version'] as number,
     spawnCount: row['spawn_count'] as number,
@@ -1319,6 +1337,8 @@ const COLUMN_MAP: Record<string, string> = {
   reloadTask: 'reload_task',
   failedAt: 'failed_at',
   failureReason: 'failure_reason',
+  lastFailedAt: 'last_failed_at',
+  lastFailureReason: 'last_failure_reason',
   stateBeforeShutdown: 'state_before_shutdown',
   spawnCount: 'spawn_count',
   capturedVars: 'captured_vars',
