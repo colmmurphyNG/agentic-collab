@@ -28,6 +28,7 @@ import {
 } from './lifecycle.ts';
 import { getAdapter } from './adapters/index.ts';
 import { shutdownAgents, restoreAllAgents } from './network.ts';
+import { UsageAggregator, renderUsageMarkdown } from './usage-aggregator.ts';
 import { sessionName } from '../shared/agent-entity.ts';
 import { paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
 import { recordTelegramInbound, getActiveTelegramRoute } from './telegram-routing.ts';
@@ -232,6 +233,44 @@ route('GET', '/docs/:page', async (_req, res, match) => {
     'cache-control': 'no-cache, no-store, must-revalidate',
   });
   res.end(html);
+});
+
+// ── Usage report (OO Phase 0/1/2) ──
+//
+// Token-usage aggregation surfaced at /usage (HTML) + /api/usage (JSON).
+// Reads Claude Code session JSONLs from the bind-mounted directory, computes
+// per-agent / per-day token totals + dollar cost via per-model pricing, and
+// renders a markdown report wrapped in the same HTML chrome as /docs/* pages.
+// Cached in-memory with a 5-minute refresh window.
+
+const usageAggregator = new UsageAggregator();
+
+route('GET', '/api/usage', async (_req, res, _m, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, _req)) return json(res, 401, { error: 'Unauthorized' });
+  try {
+    const agg = await usageAggregator.aggregate();
+    return json(res, 200, agg);
+  } catch (e) {
+    return json(res, 500, { error: (e as Error).message });
+  }
+});
+
+route('GET', '/usage', async (_req, res, _m, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, _req)) return json(res, 401, { error: 'Unauthorized' });
+  try {
+    const agg = await usageAggregator.aggregate();
+    const md = renderUsageMarkdown(agg);
+    const bodyHtml = renderMarkdown(md);
+    const html = wrapInHtml('Usage', bodyHtml, 'usage');
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-cache, no-store, must-revalidate',
+    });
+    res.end(html);
+  } catch (e) {
+    res.writeHead(500, { 'content-type': 'text/plain' });
+    res.end(`Usage report failed: ${(e as Error).message}`);
+  }
 });
 
 // ── Agent CRUD ──
