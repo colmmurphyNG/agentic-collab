@@ -82,6 +82,22 @@ export type UsageAggregate = {
   topSessions: SessionRow[];   // outlier-cost sessions (>= $5 single session) plus top-10 overall
   outliers: SessionRow[];      // sessions >= OUTLIER_USD_THRESHOLD
   stale: boolean;              // true if last refresh failed and we're returning prior cache
+  seatQuota: SeatQuotaReport | null; // null when SEAT_QUOTA_TOKENS_PER_MONTH unset
+  costMultiplier: number;      // applied to displayed dollar figures; defaults to 1.0
+};
+
+/** Seat-quota tracking — operator's Anthropic Enterprise tier includes a token
+ *  allowance per seat-per-month. /usage shows what % of that allowance the
+ *  observed token consumption represents, plus a warning flag when consumption
+ *  crosses the alert threshold. Calibrates the cost overlay against real
+ *  Enterprise reality rather than list pricing. */
+export type SeatQuotaReport = {
+  monthlyTokenAllowance: number;
+  tokensConsumedThisWindow: number;
+  percentConsumed: number;     // tokensConsumedThisWindow / monthlyTokenAllowance × 100
+  alertThresholdPct: number;
+  isOverThreshold: boolean;
+  windowDays: number;          // matches UsageAggregate.windowDays for context
 };
 
 
@@ -91,6 +107,21 @@ const TOP_N_SESSIONS = 10;
 
 const DEFAULT_JSONL_DIR = process.env['USAGE_JSONL_DIR'] || '/host-projects';
 const DEFAULT_WINDOW_DAYS = parseInt(process.env['USAGE_WINDOW_DAYS'] || '7', 10);
+// COST_MULTIPLIER — operator-configurable scale for displayed dollar figures.
+// PR #50's list-price overlay is ~100-300× the actual Enterprise contract cost
+// per the 2026-05-31 Netgear chargeback calibration. Default 1.0 (list-price);
+// operator sets ~0.01 (1%) for Enterprise reality, or 0.0 to suppress dollars.
+const COST_MULTIPLIER = parseFloat(process.env['COST_MULTIPLIER'] || '1.0');
+// SEAT_QUOTA_TOKENS_PER_MONTH — operator's Anthropic seat token allowance.
+// Unset → no seat-quota section in /usage report. Set this to your tier's
+// included token allowance (visible in claude.ai usage page after some math
+// from the % displayed there). Used to compute %-of-quota consumed.
+const SEAT_QUOTA_TOKENS_PER_MONTH = process.env['SEAT_QUOTA_TOKENS_PER_MONTH']
+  ? parseInt(process.env['SEAT_QUOTA_TOKENS_PER_MONTH'], 10)
+  : null;
+// SEAT_QUOTA_ALERT_THRESHOLD_PCT — when %-of-quota crosses this, render
+// the seat-quota section in warning style. Default 80%.
+const SEAT_QUOTA_ALERT_THRESHOLD_PCT = parseFloat(process.env['SEAT_QUOTA_ALERT_THRESHOLD_PCT'] || '80');
 
 
 /** Cost = sum across token-types × per-million pricing. */
@@ -318,6 +349,40 @@ export class UsageAggregator {
       totals.costUsd += ab.costUsd;
     }
 
+    // Seat-quota tracking — computed only when SEAT_QUOTA_TOKENS_PER_MONTH is set.
+    //
+    // Semantics: `percentConsumed` is the **monthly-projected** % of allowance
+    // at current burn rate, NOT raw (consumed / monthly_allowance). The
+    // projection extrapolates the observed N-day consumption to 30 days, then
+    // divides by the monthly allowance.
+    //
+    // Why projection: claude.ai's Usage page shows weekly cap % used (e.g.
+    // "50% used, resets Tue 6:00 AM"). A raw (consumed/window) ÷ monthly view
+    // would always under-report relative to claude.ai because the window is
+    // smaller than a month. The projection makes our % directly comparable —
+    // "if this burn rate holds for a full month, you'll use X% of allowance."
+    //
+    // Includes input + output + cache-read against the allowance. Anthropic's
+    // actual seat-quota accounting may weight cache-reads at < full price;
+    // operator self-calibrates SEAT_QUOTA_TOKENS_PER_MONTH against the visible
+    // claude.ai % over 1-2 weeks until our % and theirs converge.
+    let seatQuota: SeatQuotaReport | null = null;
+    if (SEAT_QUOTA_TOKENS_PER_MONTH && SEAT_QUOTA_TOKENS_PER_MONTH > 0) {
+      const consumed = totals.inputTokens + totals.outputTokens + totals.cacheReadTokens;
+      const monthlyProjected = this.windowDays > 0
+        ? (consumed / this.windowDays) * 30
+        : consumed;
+      const percent = (monthlyProjected / SEAT_QUOTA_TOKENS_PER_MONTH) * 100;
+      seatQuota = {
+        monthlyTokenAllowance: SEAT_QUOTA_TOKENS_PER_MONTH,
+        tokensConsumedThisWindow: consumed,
+        percentConsumed: percent,
+        alertThresholdPct: SEAT_QUOTA_ALERT_THRESHOLD_PCT,
+        isOverThreshold: percent >= SEAT_QUOTA_ALERT_THRESHOLD_PCT,
+        windowDays: this.windowDays,
+      };
+    }
+
     return {
       refreshedAt: new Date().toISOString(),
       windowDays: this.windowDays,
@@ -327,6 +392,8 @@ export class UsageAggregator {
       topSessions,
       outliers,
       stale: false,
+      seatQuota,
+      costMultiplier: COST_MULTIPLIER,
     };
   }
 }
@@ -339,7 +406,13 @@ export function renderUsageMarkdown(agg: UsageAggregate): string {
     if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
     return `${n}`;
   };
-  const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
+  // Cost multiplier scales the list-price overlay against Enterprise reality.
+  // Default 1.0 (list-price), operator can set COST_MULTIPLIER=0.01 (or whatever
+  // their actual/list ratio is) to make the displayed dollars directionally
+  // useful instead of wildly inflated. Calibration source: 2026-05-31 Netgear
+  // chargeback showed ~0.3-1% of list price for Enterprise plan.
+  const mult = agg.costMultiplier;
+  const fmtUsd = (n: number) => `$${(n * mult).toFixed(2)}`;
 
   const lines: string[] = [];
   lines.push(`# Token Usage — last ${agg.windowDays} days`);
@@ -352,13 +425,34 @@ export function renderUsageMarkdown(agg: UsageAggregate): string {
     lines.push('');
   }
 
+  // Seat-quota section — only renders when SEAT_QUOTA_TOKENS_PER_MONTH is set
+  if (agg.seatQuota) {
+    const sq = agg.seatQuota;
+    const label = sq.isOverThreshold ? '## 🔴 Seat quota — OVER threshold' : '## Seat quota';
+    lines.push(label);
+    lines.push('');
+    lines.push(`- **Allowance:** ${fmtTokens(sq.monthlyTokenAllowance)} tokens/month (from \`SEAT_QUOTA_TOKENS_PER_MONTH\`)`);
+    lines.push(`- **Consumed in last ${sq.windowDays}d:** ${fmtTokens(sq.tokensConsumedThisWindow)} tokens`);
+    lines.push(`- **Monthly burn-rate projection:** ${sq.percentConsumed.toFixed(1)}% of allowance at current pace`);
+    lines.push(`- **Alert threshold:** ${sq.alertThresholdPct.toFixed(0)}%`);
+    if (sq.isOverThreshold) {
+      lines.push('');
+      lines.push(`> ⚠️ **Over quota threshold.** At your last-${sq.windowDays}-day burn rate, monthly consumption projects to ${sq.percentConsumed.toFixed(1)}% of the seat allowance. Investigate the per-agent breakdown below for outlier sessions, or recalibrate \`SEAT_QUOTA_TOKENS_PER_MONTH\` if you think this is a false alarm (compare against claude.ai's Usage page %).`);
+    }
+    lines.push('');
+  }
+
   // Headline totals
   lines.push('## Totals');
   lines.push('');
   lines.push(`- **Input:** ${fmtTokens(agg.totals.inputTokens)} tokens`);
   lines.push(`- **Output:** ${fmtTokens(agg.totals.outputTokens)} tokens`);
   lines.push(`- **Cache read:** ${fmtTokens(agg.totals.cacheReadTokens)} tokens`);
-  lines.push(`- **Estimated cost:** **${fmtUsd(agg.totals.costUsd)}**`);
+  if (mult === 1.0) {
+    lines.push(`- **Estimated cost (list price):** **${fmtUsd(agg.totals.costUsd)}** — note: this is Anthropic public list pricing; Enterprise contracts typically pay ~1% of this`);
+  } else {
+    lines.push(`- **Estimated cost (× ${mult.toFixed(2)} multiplier):** **${fmtUsd(agg.totals.costUsd)}**`);
+  }
   lines.push(`- **Sessions:** ${agg.totals.sessions}`);
   lines.push('');
 
