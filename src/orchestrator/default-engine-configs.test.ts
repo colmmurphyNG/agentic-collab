@@ -103,6 +103,15 @@ describe('CLAUDE_ACTIVITY_INDICATOR catches the spinner-line activity context (N
   it('is style=info so it does not trigger the indicator-bridge Messages spam', () => {
     assert.equal(activity.style, 'info');
   });
+
+  it('has lines:10 constraint so stale scrollback spinner text does not falsely persist', () => {
+    // Without the lines constraint, the indicator regex evaluates against the
+    // full pane snapshot. Stale spinner-line text stays in scrollback for hours
+    // after an agent goes idle, producing false-persistent badges on idle cards
+    // (observed 2026-05-31). lines: 10 confines evaluation to the footer area
+    // where the live spinner renders.
+    assert.equal(activity.lines, 10);
+  });
 });
 
 describe('CLAUDE_QUEUED_INPUT_INDICATOR catches stacked-inbound state (NN)', () => {
@@ -124,6 +133,10 @@ describe('CLAUDE_QUEUED_INPUT_INDICATOR catches stacked-inbound state (NN)', () 
 
   it('is style=warning so it bridges to the Messages thread for operator visibility', () => {
     assert.equal(qi.style, 'warning');
+  });
+
+  it('has lines:10 constraint so historical queued-input footers do not falsely persist', () => {
+    assert.equal(qi.lines, 10);
   });
 });
 

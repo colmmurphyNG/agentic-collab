@@ -1099,6 +1099,62 @@ describe('HealthMonitor indicators', () => {
     assert.equal(update!.indicators.length, 1);
     assert.equal((update!.indicators[0] as { badge: string }).badge, 'Hello');
   });
+
+  it('honors indicator `lines: N` constraint — stale scrollback content does not match', async () => {
+    // Stale spinner-line text from past activity sits 50 lines above the
+    // current footer. A `lines: 10` constraint should evaluate only the bottom
+    // 10 lines, so the spinner indicator must NOT fire on this idle agent.
+    const indicatorDefs = JSON.stringify([
+      { id: 'activity', regex: 'busy', badge: 'Busy', style: 'info', lines: 10 },
+    ]);
+    db.createAgent({ name: 'lines-test', engine: 'claude', cwd: '/tmp', proxyId: 'p1', indicators: indicatorDefs });
+    const a = db.getAgent('lines-test')!;
+    db.updateAgentState('lines-test', 'active', a.version, {
+      tmuxSession: 'agent-lines-test',
+      proxyId: 'p1',
+    });
+
+    // 50 lines of "busy" scrollback + 10 lines of idle footer at the bottom
+    const scrollback = Array.from({ length: 50 }, (_, i) => `busy line ${i}`).join('\n');
+    const footer = Array.from({ length: 10 }, () => 'idle prompt').join('\n');
+    captureOutput = `${scrollback}\n${footer}`;
+    const monitor = makeMonitorWithIndicators();
+    await monitor.pollAll();
+
+    // onIndicatorUpdate only fires on transitions; zero → zero on first poll
+    // (the lines-constrained regex correctly matches nothing) produces no
+    // callback. Assert via getActiveIndicators() instead — direct query of
+    // the evaluated state.
+    const live = monitor.getActiveIndicators('lines-test');
+    assert.equal(
+      live.length,
+      0,
+      'lines:10 must confine the regex to the last 10 lines — stale "busy" scrollback must not fire',
+    );
+  });
+
+  it('honors indicator `lines: N` constraint — current footer DOES match', async () => {
+    const indicatorDefs = JSON.stringify([
+      { id: 'activity', regex: 'busy', badge: 'Busy', style: 'info', lines: 10 },
+    ]);
+    db.createAgent({ name: 'lines-test-2', engine: 'claude', cwd: '/tmp', proxyId: 'p1', indicators: indicatorDefs });
+    const a = db.getAgent('lines-test-2')!;
+    db.updateAgentState('lines-test-2', 'active', a.version, {
+      tmuxSession: 'agent-lines-test-2',
+      proxyId: 'p1',
+    });
+
+    // Idle scrollback + "busy" in the live footer area
+    const scrollback = Array.from({ length: 50 }, (_, i) => `idle line ${i}`).join('\n');
+    captureOutput = `${scrollback}\n✻ busy doing work\nfooter line`;
+    const monitor = makeMonitorWithIndicators();
+    await monitor.pollAll();
+
+    const update = indicatorUpdates.find(u => u.agentName === 'lines-test-2');
+    assert.ok(update, 'should have update for lines-test-2');
+    assert.equal(update!.indicators.length, 1, 'live footer match should fire the indicator');
+    assert.equal((update!.indicators[0] as { badge: string }).badge, 'Busy');
+  });
 });
 
 describe('autoRecoverBackoffMs — exponential backoff curve', () => {

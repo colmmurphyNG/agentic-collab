@@ -99,20 +99,32 @@ const CLAUDE_ACTIVITY_INDICATOR = {
   // Group 1 captures the verb (Watching / Brewed / Cogitated / etc.); group 2
   // captures the time component (e.g. "13s", "10m 20s", "1m 33s"). The glyph
   // anchor + line-start prevents prose false-positives.
+  //
+  // lines: 10 constrains evaluation to the last 10 lines of the pane snapshot.
+  // Stale spinner-line text persists in scrollback for hours after an agent
+  // goes idle; without this constraint, the activity badge stays falsely
+  // active on idle agent cards. The live spinner renders in the footer area
+  // (last ~5–8 lines), so 10 gives a safe margin without admitting scrollback.
   regex: '(?:^|\\n)\\s*[\\u2736\\u2733\\u273b\\u2722]\\s+(\\w+)[^\\n]{0,120}?(\\d+[ms](?:\\s+\\d+[ms])?)',
   badge: '$1 $2',
   style: 'info',
+  lines: 10,
 };
 
 // Queued-input indicator — fires when claude has stacked operator inbounds in
 // the textarea behind a long-running tool call. Distinguishes "no response
 // because dead" from "no response because busy + queue backed up". warning
 // style → bridges to Messages thread (PR #41) so operator gets a heads-up.
+//
+// lines: 10 same rationale — only fire when the "Press up to edit queued"
+// footer is currently visible at the bottom of the pane, not when it appears
+// in scrollback after the inbounds got processed.
 const CLAUDE_QUEUED_INPUT_INDICATOR = {
   id: 'queued-input',
   regex: '(?:^|\\n)\\s*\\u276f Press up to edit queued messages',
   badge: 'Queued input',
   style: 'warning',
+  lines: 10,
 };
 
 // Detection configs per engine — regex patterns for idle/active state detection
