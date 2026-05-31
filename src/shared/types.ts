@@ -71,6 +71,13 @@ export type IndicatorDefinition = {
   badge: string;
   style: 'warning' | 'danger' | 'info';
   actions?: Record<string, IndicatorAction>;
+  /** Constrain regex evaluation to the last N lines of the pane snapshot.
+   *  Without this, stale spinner-line text (etc.) persisting in scrollback
+   *  matches indefinitely even after the agent goes idle, producing
+   *  false-persistent badges. Use ~5–10 lines for spinner/footer-area
+   *  indicators; omit (full-snapshot eval) for indicators that should
+   *  match anywhere in the pane (e.g. "Not logged in"). */
+  lines?: number;
 };
 
 export type ActiveIndicator = {
