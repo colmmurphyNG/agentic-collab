@@ -568,6 +568,7 @@ function parseIndicators(
       let badge = '';
       let style: 'warning' | 'danger' | 'info' = 'info';
       let actions: Record<string, PipelineStep[]> | undefined;
+      let linesConstraint: number | undefined;
 
       while (i < lines.length) {
         const propLine = lines[i]!;
@@ -595,6 +596,12 @@ function parseIndicators(
             style = propVal;
           }
           i++;
+        } else if (propKey === 'lines') {
+          // Optional `lines: N` constraint — confines regex evaluation to the
+          // last N lines of the pane snapshot. See IndicatorDefinition.lines.
+          const parsed = parseInt(propVal, 10);
+          if (!isNaN(parsed) && parsed > 0) linesConstraint = parsed;
+          i++;
         } else if (propKey === 'actions' && propVal === '') {
           // Parse named action keys → pipeline step arrays (delegates to shared primitive)
           const actionIndent = propIndent + 2;
@@ -607,7 +614,14 @@ function parseIndicators(
       }
 
       if (regex && badge) {
-        indicators.push({ id: indicatorName, regex, badge, style, ...(actions ? { actions } : {}) });
+        indicators.push({
+          id: indicatorName,
+          regex,
+          badge,
+          style,
+          ...(actions ? { actions } : {}),
+          ...(linesConstraint !== undefined ? { lines: linesConstraint } : {}),
+        });
       }
     } else {
       break;

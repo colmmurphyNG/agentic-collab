@@ -1402,6 +1402,38 @@ Persona body
       assert.equal(fm.indicators[0]!.actions, undefined);
     });
 
+    it('parses optional `lines: N` constraint on indicators (NN follow-up)', () => {
+      // Without the parser supporting `lines`, the field gets silently dropped
+      // and the indicator regex evaluates against the full pane (stale
+      // scrollback false-persistence). Empirical trigger 2026-05-31 — the NN
+      // indicators YAML had `lines: 10` but the parser ignored it.
+      const raw = `---
+engine: claude
+cwd: /tmp
+indicators:
+  activity:
+    regex: '\\\\u2736 Watching'
+    badge: 'Watching'
+    style: info
+    lines: 10
+  full-scope:
+    regex: 'Not logged in'
+    badge: 'Logged Out'
+    style: danger
+---
+Persona body
+`;
+      const { frontmatter } = parseFrontmatter(raw);
+      const fm = frontmatter as { indicators?: Array<{ id: string; lines?: number }> };
+      assert.ok(fm.indicators, 'indicators should be parsed');
+      const activity = fm.indicators.find(i => i.id === 'activity');
+      const fullScope = fm.indicators.find(i => i.id === 'full-scope');
+      assert.ok(activity, 'activity indicator parsed');
+      assert.equal(activity!.lines, 10, '`lines: 10` must flow through to the parsed indicator');
+      assert.ok(fullScope, 'full-scope indicator parsed');
+      assert.equal(fullScope!.lines, undefined, 'omitted `lines` must remain undefined (full-snapshot evaluation)');
+    });
+
     it('syncs indicators to database', () => {
       const personasDir = mkdtempSync(join(tmpdir(), 'persona-indicators-'));
       const dbPath = join(personasDir, 'test.db');
