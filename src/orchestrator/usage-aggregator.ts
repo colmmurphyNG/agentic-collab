@@ -335,8 +335,8 @@ export class UsageAggregator {
 /** Format the aggregate as a markdown report for the /usage HTML endpoint. */
 export function renderUsageMarkdown(agg: UsageAggregate): string {
   const fmtTokens = (n: number) => {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+    if (n >= 1_000_000) return `${Math.round(n / 1_000_000)}M`;
+    if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
     return `${n}`;
   };
   const fmtUsd = (n: number) => `$${n.toFixed(2)}`;
