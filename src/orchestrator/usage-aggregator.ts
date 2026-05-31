@@ -349,15 +349,30 @@ export class UsageAggregator {
       totals.costUsd += ab.costUsd;
     }
 
-    // Seat-quota tracking — computed only when SEAT_QUOTA_TOKENS_PER_MONTH is set
+    // Seat-quota tracking — computed only when SEAT_QUOTA_TOKENS_PER_MONTH is set.
+    //
+    // Semantics: `percentConsumed` is the **monthly-projected** % of allowance
+    // at current burn rate, NOT raw (consumed / monthly_allowance). The
+    // projection extrapolates the observed N-day consumption to 30 days, then
+    // divides by the monthly allowance.
+    //
+    // Why projection: claude.ai's Usage page shows weekly cap % used (e.g.
+    // "50% used, resets Tue 6:00 AM"). A raw (consumed/window) ÷ monthly view
+    // would always under-report relative to claude.ai because the window is
+    // smaller than a month. The projection makes our % directly comparable —
+    // "if this burn rate holds for a full month, you'll use X% of allowance."
+    //
+    // Includes input + output + cache-read against the allowance. Anthropic's
+    // actual seat-quota accounting may weight cache-reads at < full price;
+    // operator self-calibrates SEAT_QUOTA_TOKENS_PER_MONTH against the visible
+    // claude.ai % over 1-2 weeks until our % and theirs converge.
     let seatQuota: SeatQuotaReport | null = null;
     if (SEAT_QUOTA_TOKENS_PER_MONTH && SEAT_QUOTA_TOKENS_PER_MONTH > 0) {
-      // Include input + output + cache-read against the seat allowance — the
-      // seat-quota model bundles all token-types into the included allowance.
-      // (Anthropic's actual seat-quota accounting may weight cache-reads less;
-      // operator can recalibrate by adjusting SEAT_QUOTA_TOKENS_PER_MONTH.)
       const consumed = totals.inputTokens + totals.outputTokens + totals.cacheReadTokens;
-      const percent = (consumed / SEAT_QUOTA_TOKENS_PER_MONTH) * 100;
+      const monthlyProjected = this.windowDays > 0
+        ? (consumed / this.windowDays) * 30
+        : consumed;
+      const percent = (monthlyProjected / SEAT_QUOTA_TOKENS_PER_MONTH) * 100;
       seatQuota = {
         monthlyTokenAllowance: SEAT_QUOTA_TOKENS_PER_MONTH,
         tokensConsumedThisWindow: consumed,
@@ -417,11 +432,12 @@ export function renderUsageMarkdown(agg: UsageAggregate): string {
     lines.push(label);
     lines.push('');
     lines.push(`- **Allowance:** ${fmtTokens(sq.monthlyTokenAllowance)} tokens/month (from \`SEAT_QUOTA_TOKENS_PER_MONTH\`)`);
-    lines.push(`- **Consumed in last ${sq.windowDays}d:** ${fmtTokens(sq.tokensConsumedThisWindow)} tokens (${sq.percentConsumed.toFixed(1)}%)`);
+    lines.push(`- **Consumed in last ${sq.windowDays}d:** ${fmtTokens(sq.tokensConsumedThisWindow)} tokens`);
+    lines.push(`- **Monthly burn-rate projection:** ${sq.percentConsumed.toFixed(1)}% of allowance at current pace`);
     lines.push(`- **Alert threshold:** ${sq.alertThresholdPct.toFixed(0)}%`);
     if (sq.isOverThreshold) {
       lines.push('');
-      lines.push(`> ⚠️ **Over quota threshold.** Token consumption in the last ${sq.windowDays} days is at ${sq.percentConsumed.toFixed(1)}% of the monthly allowance. Investigate the per-agent breakdown below for outlier sessions.`);
+      lines.push(`> ⚠️ **Over quota threshold.** At your last-${sq.windowDays}-day burn rate, monthly consumption projects to ${sq.percentConsumed.toFixed(1)}% of the seat allowance. Investigate the per-agent breakdown below for outlier sessions, or recalibrate \`SEAT_QUOTA_TOKENS_PER_MONTH\` if you think this is a false alarm (compare against claude.ai's Usage page %).`);
     }
     lines.push('');
   }
