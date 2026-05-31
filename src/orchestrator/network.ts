@@ -76,9 +76,12 @@ export async function restoreAllAgents(ctx: LifecycleContext): Promise<number> {
       const hasSession = await checkTmuxSession(ctx, agent);
       if (!hasSession) {
         // Mark as failed first, then queue for restore
+        const now = new Date().toISOString();
         ctx.db.updateAgentState(agent.name, 'failed', agent.version, {
-          failedAt: new Date().toISOString(),
+          failedAt: now,
           failureReason: 'Crash recovery: tmux session missing',
+          lastFailedAt: now,
+          lastFailureReason: 'Crash recovery: tmux session missing',
         });
         ctx.db.logEvent(agent.name, 'crash_detected', undefined, {
           previousState: agent.state,
