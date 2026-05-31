@@ -162,6 +162,8 @@ describe('renderUsageMarkdown', () => {
       topSessions: [],
       outliers: [],
       stale: false,
+      seatQuota: null,
+      costMultiplier: 1.0,
     };
     const md = renderUsageMarkdown(agg);
     assert.match(md, /# Token Usage/);
@@ -183,8 +185,117 @@ describe('renderUsageMarkdown', () => {
       topSessions: [],
       outliers: [],
       stale: true,
+      seatQuota: null,
+      costMultiplier: 1.0,
     };
     const md = renderUsageMarkdown(stale);
     assert.match(md, /Stale/i);
+  });
+
+  it('applies costMultiplier to displayed dollar figures (OO seat-quota reframe)', () => {
+    const agg = {
+      refreshedAt: '2026-05-31T17:00:00.000Z',
+      windowDays: 7,
+      totals: { inputTokens: 1_000_000, outputTokens: 500_000, cacheReadTokens: 100_000, costUsd: 1000, sessions: 5 },
+      byDay: [],
+      byAgent: [],
+      topSessions: [],
+      outliers: [],
+      stale: false,
+      seatQuota: null,
+      costMultiplier: 0.01,  // Enterprise-calibrated 1% of list
+    };
+    const md = renderUsageMarkdown(agg);
+    // 1000 × 0.01 = $10.00 displayed
+    assert.match(md, /\$10\.00/, 'cost should be scaled by multiplier');
+    assert.match(md, /× 0\.01 multiplier/, 'header should declare the multiplier');
+    assert.doesNotMatch(md, /\$1000\.00/, 'unscaled cost should not appear');
+  });
+
+  it('renders seat-quota section with WARNING badge when over threshold', () => {
+    const agg = {
+      refreshedAt: '2026-05-31T17:00:00.000Z',
+      windowDays: 7,
+      totals: { inputTokens: 80_000_000, outputTokens: 0, cacheReadTokens: 0, costUsd: 0, sessions: 1 },
+      byDay: [],
+      byAgent: [],
+      topSessions: [],
+      outliers: [],
+      stale: false,
+      seatQuota: {
+        monthlyTokenAllowance: 100_000_000,  // 100M
+        tokensConsumedThisWindow: 80_000_000,  // 80M = 80% consumed
+        percentConsumed: 80,
+        alertThresholdPct: 80,
+        isOverThreshold: true,
+        windowDays: 7,
+      },
+      costMultiplier: 1.0,
+    };
+    const md = renderUsageMarkdown(agg);
+    assert.match(md, /🔴 Seat quota — OVER threshold/, 'over-threshold should render warning section header');
+    assert.match(md, /80\.0%/, 'should show percent consumed');
+    assert.match(md, /Over quota threshold/i, 'should include warning text');
+  });
+
+  it('renders seat-quota section without warning when under threshold', () => {
+    const agg = {
+      refreshedAt: '2026-05-31T17:00:00.000Z',
+      windowDays: 7,
+      totals: { inputTokens: 25_000_000, outputTokens: 0, cacheReadTokens: 0, costUsd: 0, sessions: 1 },
+      byDay: [],
+      byAgent: [],
+      topSessions: [],
+      outliers: [],
+      stale: false,
+      seatQuota: {
+        monthlyTokenAllowance: 100_000_000,
+        tokensConsumedThisWindow: 25_000_000,
+        percentConsumed: 25,
+        alertThresholdPct: 80,
+        isOverThreshold: false,
+        windowDays: 7,
+      },
+      costMultiplier: 1.0,
+    };
+    const md = renderUsageMarkdown(agg);
+    assert.match(md, /## Seat quota$/m, 'under-threshold should render plain section header without 🔴');
+    assert.doesNotMatch(md, /OVER threshold/i, 'no over-threshold warning');
+    assert.match(md, /25\.0%/);
+  });
+
+  it('omits seat-quota section entirely when seatQuota is null', () => {
+    const agg = {
+      refreshedAt: '2026-05-31T17:00:00.000Z',
+      windowDays: 7,
+      totals: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0, costUsd: 0, sessions: 1 },
+      byDay: [],
+      byAgent: [],
+      topSessions: [],
+      outliers: [],
+      stale: false,
+      seatQuota: null,
+      costMultiplier: 1.0,
+    };
+    const md = renderUsageMarkdown(agg);
+    assert.doesNotMatch(md, /Seat quota/);
+  });
+
+  it('declares list-price caveat when costMultiplier is 1.0 (default)', () => {
+    const agg = {
+      refreshedAt: '2026-05-31T17:00:00.000Z',
+      windowDays: 7,
+      totals: { inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0, costUsd: 1, sessions: 1 },
+      byDay: [],
+      byAgent: [],
+      topSessions: [],
+      outliers: [],
+      stale: false,
+      seatQuota: null,
+      costMultiplier: 1.0,
+    };
+    const md = renderUsageMarkdown(agg);
+    assert.match(md, /list price/i, 'should warn that dollars are list pricing');
+    assert.match(md, /Enterprise/i, 'should mention Enterprise reality');
   });
 });
