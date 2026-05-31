@@ -68,6 +68,78 @@ describe('DEFAULT_ENGINE_CONFIGS.claude detection patterns', () => {
   });
 });
 
+describe('CLAUDE_ACTIVITY_INDICATOR catches the spinner-line activity context (NN)', () => {
+  const claude = DEFAULT_ENGINE_CONFIGS.find(c => c.name === 'claude');
+  const indicators = JSON.parse(claude!.indicators);
+  const activity = indicators.find((i: { id: string }) => i.id === 'activity');
+  const re = new RegExp(activity.regex);
+
+  it('matches the Watching X for N… (Ys) spinner shape', () => {
+    const sample = '✶ Watching PHX-2472 PR #1395 Sonar fix + CI… (10m 20s · ↓ 9.0k tokens)';
+    const m = sample.match(re);
+    assert.ok(m, 'should match the Watching spinner line');
+    assert.equal(m![1], 'Watching');
+    assert.match(m![2], /10m\s+20s/);
+  });
+
+  it('matches the past-tense Brewed/Baked/Cogitated/Crunched shapes', () => {
+    assert.match('✻ Brewed for 13s · 2 shells, 1 monitor still running', re);
+    assert.match('✻ Baked for 3s · 2 shells still running', re);
+    assert.match('✻ Cogitated for 3s · 1 shell still running', re);
+    assert.match('✻ Crunched for 1m 33s · 2 shells still running', re);
+  });
+
+  it('matches the ongoing Nucleating/Warping/Improvising shapes', () => {
+    assert.match('✢ Warping… (13s · ↓ 555 tokens)', re);
+    assert.match('✶ Improvising… (1m 33s · ↓ 3.3k tokens · thought for 4s)', re);
+  });
+
+  it('does not falsely match prose mentions of the spinner verbs', () => {
+    assert.doesNotMatch('We are watching PHX-2472 closely.', re);
+    assert.doesNotMatch('I brewed coffee for 13 seconds before commit.', re);
+    assert.doesNotMatch('The cogitated decision was made on 2026-05-30.', re);
+  });
+
+  it('is style=info so it does not trigger the indicator-bridge Messages spam', () => {
+    assert.equal(activity.style, 'info');
+  });
+
+  it('has lines:10 constraint so stale scrollback spinner text does not falsely persist', () => {
+    // Without the lines constraint, the indicator regex evaluates against the
+    // full pane snapshot. Stale spinner-line text stays in scrollback for hours
+    // after an agent goes idle, producing false-persistent badges on idle cards
+    // (observed 2026-05-31). lines: 10 confines evaluation to the footer area
+    // where the live spinner renders.
+    assert.equal(activity.lines, 10);
+  });
+});
+
+describe('CLAUDE_QUEUED_INPUT_INDICATOR catches stacked-inbound state (NN)', () => {
+  const claude = DEFAULT_ENGINE_CONFIGS.find(c => c.name === 'claude');
+  const indicators = JSON.parse(claude!.indicators);
+  const qi = indicators.find((i: { id: string }) => i.id === 'queued-input');
+  const re = new RegExp(qi.regex);
+
+  it('matches the queued-messages footer that appears when inbounds stack behind a busy task', () => {
+    assert.match('❯ Press up to edit queued messages', re);
+    assert.match('  ❯ Press up to edit queued messages', re);
+    assert.match('text above\n❯ Press up to edit queued messages\nmore below', re);
+  });
+
+  it('does not falsely match prose mentions', () => {
+    assert.doesNotMatch('Operator may need to edit queued messages later.', re);
+    assert.doesNotMatch('"❯ Press up to edit queued messages" — explaining the footer', re);
+  });
+
+  it('is style=warning so it bridges to the Messages thread for operator visibility', () => {
+    assert.equal(qi.style, 'warning');
+  });
+
+  it('has lines:10 constraint so historical queued-input footers do not falsely persist', () => {
+    assert.equal(qi.lines, 10);
+  });
+});
+
 describe('CLAUDE_APPROVAL_INDICATOR regex covers all three prompt shapes', () => {
   const claude = DEFAULT_ENGINE_CONFIGS.find(c => c.name === 'claude');
   const indicators = JSON.parse(claude!.indicators);

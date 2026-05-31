@@ -1044,10 +1044,18 @@ export class HealthMonitor {
     if (!compiled) return;
 
     const stripped = HealthMonitor.stripAnsi(paneOutput);
+    const allLines = stripped.split('\n');
     const active: ActiveIndicator[] = [];
 
     for (const { def, re } of compiled.entries) {
-      const match = re.exec(stripped);
+      // Indicators with a `lines: N` constraint evaluate only against the last
+      // N lines of the pane — prevents stale-scrollback false-persistence
+      // (spinner-line text staying matched after agent goes idle). Without
+      // the constraint, regex matches against the full pane snapshot.
+      const haystack = def.lines && def.lines < allLines.length
+        ? allLines.slice(-def.lines).join('\n')
+        : stripped;
+      const match = re.exec(haystack);
       if (match) {
         // Interpolate $N capture group references in actions and badge
         const interpolated = def.actions ? interpolateIndicatorActions(def.actions, match) : undefined;
