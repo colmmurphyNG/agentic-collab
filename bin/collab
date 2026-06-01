@@ -589,6 +589,114 @@ cmd('reminder', 'reminder <sub> [args...]', 'Manage reminders (add|list|done|can
   }
 });
 
+cmd('job', 'job <sub> [args...]', 'Manage recurring cron jobs (add|list|pause|resume|edit|delete)', async (args) => {
+  const sub = args[0];
+  const sargs = args.slice(1);
+
+  if (sub === 'add') {
+    // collab job add <agent> "<prompt>" --cron "<expr>" [--no-skip-active]
+    const JOB_ADD_FLAGS = new Set(['--cron', '--no-skip-active', '--from']);
+    let cronExpr = null;
+    let skipIfActive = true;
+    let from = null;
+    const positional = [];
+    let endOfOptions = false;
+    for (let i = 0; i < sargs.length; i++) {
+      if (!endOfOptions && sargs[i] === '--') { endOfOptions = true; continue; }
+      if (endOfOptions) { positional.push(sargs[i]); continue; }
+      if (sargs[i] === '--cron' && sargs[i + 1]) { cronExpr = sargs[++i]; }
+      else if (sargs[i] === '--no-skip-active') { skipIfActive = false; }
+      else if (sargs[i] === '--from' && sargs[i + 1]) { from = sargs[++i]; }
+      else {
+        rejectUnknownFlag(sargs[i], JOB_ADD_FLAGS, 'job add');
+        positional.push(sargs[i]);
+      }
+    }
+    const targetAgent = positional[0];
+    const prompt = positional.slice(1).join(' ');
+    if (!targetAgent || !prompt || !cronExpr) {
+      console.error('usage: collab job add <agent> "<prompt>" --cron "<expr>" [--no-skip-active] [--from <name>]');
+      console.error('  example: collab job add tl "PR-status sweep" --cron "0 */5 * * *"');
+      process.exit(1);
+    }
+    const createdBy = from || agentName();
+    const job = await api('POST', '/api/jobs', { agentName: targetAgent, prompt, cronExpr, skipIfActive, createdBy });
+    console.log(`created job #${job.id} for ${targetAgent} (cron '${cronExpr}', next fire ${job.nextFireAt})`);
+  }
+  else if (sub === 'list') {
+    // collab job list [--agent <name>]
+    const JOB_LIST_FLAGS = new Set(['--agent']);
+    let agent = null;
+    for (let i = 0; i < sargs.length; i++) {
+      if (sargs[i] === '--agent' && sargs[i + 1]) { agent = sargs[++i]; }
+      else { rejectUnknownFlag(sargs[i], JOB_LIST_FLAGS, 'job list'); }
+    }
+    const query = agent ? `?agent=${encodeURIComponent(agent)}` : '';
+    const jobs = await api('GET', `/api/jobs${query}`);
+    if (jobs.length === 0) { console.log('No jobs'); return; }
+    const maxId = Math.max(...jobs.map(j => j.id.toString().length), 2);
+    const maxAgent = Math.max(...jobs.map(j => j.agentName.length), 5);
+    const maxCron = Math.max(...jobs.map(j => j.cronExpr.length), 11);
+    const maxPrompt = Math.min(Math.max(...jobs.map(j => j.prompt.length), 6), 50);
+    const header = `${'ID'.padStart(maxId)}  ${'AGENT'.padEnd(maxAgent)}  ${'CRON'.padEnd(maxCron)}  ${'STATUS'.padEnd(8)}  ${'NEXT FIRE'.padEnd(20)}  PROMPT`;
+    console.log(header);
+    console.log('-'.repeat(header.length));
+    for (const j of jobs) {
+      const idStr = j.id.toString().padStart(maxId);
+      const agentStr = j.agentName.padEnd(maxAgent);
+      const cronStr = j.cronExpr.padEnd(maxCron);
+      const statusStr = j.status.padEnd(8);
+      const next = (j.nextFireAt || '').padEnd(20);
+      const prompt = j.prompt.length > maxPrompt ? j.prompt.slice(0, maxPrompt - 1) + '…' : j.prompt;
+      console.log(`${idStr}  ${agentStr}  ${cronStr}  ${statusStr}  ${next}  ${prompt}`);
+    }
+  }
+  else if (sub === 'pause') {
+    // collab job pause <id>
+    const id = parseInt(sargs[0], 10);
+    if (isNaN(id)) { console.error('usage: collab job pause <id>'); process.exit(1); }
+    await api('PATCH', `/api/jobs/${id}`, { status: 'paused' });
+    console.log(`job #${id} paused`);
+  }
+  else if (sub === 'resume') {
+    // collab job resume <id>
+    const id = parseInt(sargs[0], 10);
+    if (isNaN(id)) { console.error('usage: collab job resume <id>'); process.exit(1); }
+    const job = await api('PATCH', `/api/jobs/${id}`, { status: 'active' });
+    console.log(`job #${id} resumed (next fire ${job.nextFireAt})`);
+  }
+  else if (sub === 'edit') {
+    // collab job edit <id> [--cron "<expr>"] [--prompt "<text>"]
+    const JOB_EDIT_FLAGS = new Set(['--cron', '--prompt']);
+    const id = parseInt(sargs[0], 10);
+    if (isNaN(id)) { console.error('usage: collab job edit <id> [--cron "<expr>"] [--prompt "<text>"]'); process.exit(1); }
+    const patch = {};
+    for (let i = 1; i < sargs.length; i++) {
+      if (sargs[i] === '--cron' && sargs[i + 1]) { patch.cronExpr = sargs[++i]; }
+      else if (sargs[i] === '--prompt' && sargs[i + 1]) { patch.prompt = sargs[++i]; }
+      else { rejectUnknownFlag(sargs[i], JOB_EDIT_FLAGS, 'job edit'); }
+    }
+    if (Object.keys(patch).length === 0) {
+      console.error('usage: collab job edit <id> [--cron "<expr>"] [--prompt "<text>"]');
+      process.exit(1);
+    }
+    const job = await api('PATCH', `/api/jobs/${id}`, patch);
+    console.log(`job #${id} updated (cron '${job.cronExpr}', next fire ${job.nextFireAt})`);
+  }
+  else if (sub === 'delete') {
+    // collab job delete <id>
+    const id = parseInt(sargs[0], 10);
+    if (isNaN(id)) { console.error('usage: collab job delete <id>'); process.exit(1); }
+    await api('DELETE', `/api/jobs/${id}`);
+    console.log(`job #${id} deleted`);
+  }
+  else {
+    console.error(`unknown subcommand: ${sub}`);
+    console.error('usage: collab job {add|list|pause|resume|edit|delete}');
+    process.exit(1);
+  }
+});
+
 // ── Pages ──
 
 const templatesDir = join(new URL('.', import.meta.url).pathname, '..', 'src', 'templates');

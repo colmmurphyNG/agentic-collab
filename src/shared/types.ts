@@ -267,6 +267,29 @@ export type Reminder = {
   createdAt: string;
 };
 
+// ── Jobs (JJ) ──
+// Recurring cron-scheduled prompts fired at agents as if inbound messages.
+// Distinct from Reminders: fire-and-continue (no manual completion).
+
+export type JobStatus = 'active' | 'paused';
+
+export type Job = {
+  id: number;
+  agentName: string;
+  createdBy: string | null;
+  prompt: string;
+  /** 5-field cron expression — minute hour DOM month DOW. See src/shared/cron.ts for supported syntax. */
+  cronExpr: string;
+  /** When true (default), skip firing if the target agent is in `active` state at tick time. */
+  skipIfActive: boolean;
+  status: JobStatus;
+  /** ISO timestamp of last successful fire, or null if never fired yet. */
+  lastFiredAt: string | null;
+  /** ISO timestamp of the next scheduled fire, recomputed on each fire and on pause/resume. */
+  nextFireAt: string;
+  createdAt: string;
+};
+
 // ── Proxy Registration ──
 
 export type ProxyRegistration = {
