@@ -43,14 +43,104 @@ describe('parseCron — field validation', () => {
     assert.throws(() => parseCron('* * * * 7'), /value 7 out of range/);
   });
 
-  it('should reject unsupported syntax with a clear error', () => {
-    assert.throws(() => parseCron('1,3,5 * * * *'), /only literals, '\*', and '\*​?\/N' are supported/);
-    assert.throws(() => parseCron('1-5 * * * *'), /only literals/);
-    assert.throws(() => parseCron('MON * * * *'), /only literals/);
+  it('should reject genuinely unsupported syntax with a clear error', () => {
+    // Named day/month — not implemented in v1.1
+    assert.throws(() => parseCron('MON * * * *'), /supported syntax/);
+    // Garbage tokens
+    assert.throws(() => parseCron('!@# * * * *'), /supported syntax/);
   });
 
   it('should reject a zero or negative step', () => {
     assert.throws(() => parseCron('*/0 * * * *'), /must be a positive integer/);
+  });
+});
+
+
+describe('parseCron — JJ-1.1 range + list extensions', () => {
+  it('should accept a m-n range', () => {
+    const c = parseCron('* * * * 1-5');
+    assert.deepEqual(c.dayOfWeek.allowed, [1, 2, 3, 4, 5]);
+    assert.equal(c.dayOfWeek.wildcard, false);
+  });
+
+  it('should accept a m-n range that covers the full field as wildcard', () => {
+    const c = parseCron('* * * * 0-6');
+    assert.deepEqual(c.dayOfWeek.allowed, [0, 1, 2, 3, 4, 5, 6]);
+    assert.equal(c.dayOfWeek.wildcard, true);
+  });
+
+  it('should accept a comma-separated list of literals', () => {
+    const c = parseCron('1,3,5 * * * *');
+    assert.deepEqual(c.minute.allowed, [1, 3, 5]);
+    assert.equal(c.minute.wildcard, false);
+  });
+
+  it('should accept a comma-separated list of ranges', () => {
+    const c = parseCron('* * * * 1-3,5');
+    assert.deepEqual(c.dayOfWeek.allowed, [1, 2, 3, 5]);
+  });
+
+  it('should accept a m-n/k range with step', () => {
+    const c = parseCron('* 0-12/3 * * *');
+    assert.deepEqual(c.hour.allowed, [0, 3, 6, 9, 12]);
+  });
+
+  it('should dedupe overlapping list terms', () => {
+    const c = parseCron('1,1,2,2,3-5,4 * * * *');
+    assert.deepEqual(c.minute.allowed, [1, 2, 3, 4, 5]);
+  });
+
+  it('should reject out-of-range ranges', () => {
+    assert.throws(() => parseCron('* * * * 0-7'), /out of range/);
+    assert.throws(() => parseCron('60-65 * * * *'), /out of range/);
+  });
+
+  it('should reject reversed ranges (lo > hi)', () => {
+    assert.throws(() => parseCron('* * * * 5-1'), /lo > hi/);
+  });
+
+  it('should reject empty list terms', () => {
+    assert.throws(() => parseCron('1,,3 * * * *'), /empty list term/);
+  });
+
+  it('should reject zero-step ranges', () => {
+    assert.throws(() => parseCron('* 0-12/0 * * *'), /step.*positive integer/);
+  });
+});
+
+
+describe('nextFireAt — JJ-1.1 weekday range (tl prev-sweep case)', () => {
+  it('should fire Mon-Fri at 07:55 UTC for `55 7 * * 1-5`', () => {
+    const cron = parseCron('55 7 * * 1-5');
+    // 2026-06-01 is a Monday → next fire is Mon 07:55
+    const monMorning = nextFireAt(cron, new Date(Date.UTC(2026, 5, 1, 0, 0, 0)));
+    assert.equal(monMorning.toISOString(), '2026-06-01T07:55:00.000Z');
+
+    const tuMorning = nextFireAt(cron, monMorning);
+    assert.equal(tuMorning.toISOString(), '2026-06-02T07:55:00.000Z');
+
+    // After Friday's fire, next should skip Sat/Sun and land on Mon
+    const friMorning = nextFireAt(cron, new Date(Date.UTC(2026, 5, 5, 8, 0, 0)));
+    assert.equal(friMorning.toISOString(), '2026-06-08T07:55:00.000Z');
+  });
+
+  it('should fire Mon-Fri at 13:05 UTC for `5 13 * * 1-5`', () => {
+    const cron = parseCron('5 13 * * 1-5');
+    const monAfternoon = nextFireAt(cron, new Date(Date.UTC(2026, 5, 1, 0, 0, 0)));
+    assert.equal(monAfternoon.toISOString(), '2026-06-01T13:05:00.000Z');
+  });
+
+  it('should fire each value in a comma-list on subsequent calls', () => {
+    const cron = parseCron('0 9,13,17 * * *');  // 3 fires per day
+    const t0 = new Date(Date.UTC(2026, 5, 1, 0, 0, 0));
+    const t1 = nextFireAt(cron, t0);
+    assert.equal(t1.toISOString(), '2026-06-01T09:00:00.000Z');
+    const t2 = nextFireAt(cron, t1);
+    assert.equal(t2.toISOString(), '2026-06-01T13:00:00.000Z');
+    const t3 = nextFireAt(cron, t2);
+    assert.equal(t3.toISOString(), '2026-06-01T17:00:00.000Z');
+    const t4 = nextFireAt(cron, t3);
+    assert.equal(t4.toISOString(), '2026-06-02T09:00:00.000Z');
   });
 });
 

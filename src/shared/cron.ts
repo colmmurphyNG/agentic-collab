@@ -5,10 +5,12 @@
  *   - Literal numbers: `5` means 'at minute 5'
  *   - Wildcard: `*` means 'any value in the field's range'
  *   - Step values: `*​/N` means 'every Nth value starting from 0'
+ *   - Ranges: `m-n` means 'every value from m to n inclusive'
+ *   - Lists: `a,b,c` means 'each listed value' — list members may themselves
+ *     be literals or ranges (e.g. `1-3,5,8-10`)
+ *   - Range with step: `m-n/k` means 'every kth value from m to n'
  *
  * NOT supported (intentional, for v1):
- *   - Lists (`1,3,5`)
- *   - Ranges (`1-5`)
  *   - Named days/months (`MON`, `JAN`)
  *   - Seconds (Quartz-style 6-field cron)
  *   - DST handling — all calculations operate on UTC; jobs that need
@@ -51,6 +53,61 @@ const FIELD_RANGES = [
 ] as const;
 
 
+/**
+ * Parse one comma-list term — either a literal, a range (`m-n`), or a
+ * range with step (`m-n/k`). Returns the set of integers it expands to.
+ * Used internally by parseField via the comma split.
+ */
+function parseFieldTerm(term: string, min: number, max: number, fieldName: string): number[] {
+  // m-n/k — range with step
+  const rangeStepMatch = term.match(/^(\d+)-(\d+)\/(\d+)$/);
+  if (rangeStepMatch) {
+    const lo = parseInt(rangeStepMatch[1]!, 10);
+    const hi = parseInt(rangeStepMatch[2]!, 10);
+    const step = parseInt(rangeStepMatch[3]!, 10);
+    if (!Number.isFinite(step) || step <= 0) {
+      throw new Error(`invalid cron field '${fieldName}': step in '${term}' must be a positive integer`);
+    }
+    if (lo < min || lo > max || hi < min || hi > max) {
+      throw new Error(`invalid cron field '${fieldName}': range '${term}' out of range [${min},${max}]`);
+    }
+    if (lo > hi) {
+      throw new Error(`invalid cron field '${fieldName}': range '${term}' has lo > hi`);
+    }
+    const out: number[] = [];
+    for (let i = lo; i <= hi; i += step) out.push(i);
+    return out;
+  }
+
+  // m-n — range
+  const rangeMatch = term.match(/^(\d+)-(\d+)$/);
+  if (rangeMatch) {
+    const lo = parseInt(rangeMatch[1]!, 10);
+    const hi = parseInt(rangeMatch[2]!, 10);
+    if (lo < min || lo > max || hi < min || hi > max) {
+      throw new Error(`invalid cron field '${fieldName}': range '${term}' out of range [${min},${max}]`);
+    }
+    if (lo > hi) {
+      throw new Error(`invalid cron field '${fieldName}': range '${term}' has lo > hi`);
+    }
+    const out: number[] = [];
+    for (let i = lo; i <= hi; i++) out.push(i);
+    return out;
+  }
+
+  // literal
+  if (/^\d+$/.test(term)) {
+    const value = parseInt(term, 10);
+    if (value < min || value > max) {
+      throw new Error(`invalid cron field '${fieldName}': value ${value} out of range [${min},${max}]`);
+    }
+    return [value];
+  }
+
+  throw new Error(`invalid cron field '${fieldName}': term '${term}' — supported syntax: literal, m-n, m-n/k`);
+}
+
+
 function parseField(spec: string, min: number, max: number, fieldName: string): CronFieldSpec {
   spec = spec.trim();
   if (spec === '') {
@@ -74,15 +131,27 @@ function parseField(spec: string, min: number, max: number, fieldName: string): 
     return { allowed, wildcard: step === 1 };
   }
 
-  if (/^\d+$/.test(spec)) {
-    const value = parseInt(spec, 10);
-    if (value < min || value > max) {
-      throw new Error(`invalid cron field '${fieldName}': value ${value} out of range [${min},${max}]`);
+  // Comma-separated list — each term may be a literal, range, or range with step.
+  // The single-term case (no comma) falls through this path naturally.
+  if (/^[\d,\-/]+$/.test(spec)) {
+    const terms = spec.split(',');
+    const seen = new Set<number>();
+    for (const term of terms) {
+      const trimmed = term.trim();
+      if (trimmed === '') {
+        throw new Error(`invalid cron field '${fieldName}': empty list term in '${spec}'`);
+      }
+      for (const value of parseFieldTerm(trimmed, min, max, fieldName)) {
+        seen.add(value);
+      }
     }
-    return { allowed: [value], wildcard: false };
+    const allowed = [...seen].sort((a, b) => a - b);
+    // wildcard=true only when allowed set covers the full [min,max] range
+    const wildcard = allowed.length === (max - min + 1) && allowed[0] === min && allowed[allowed.length - 1] === max;
+    return { allowed, wildcard };
   }
 
-  throw new Error(`invalid cron field '${fieldName}': '${spec}' — only literals, '*', and '*​/N' are supported`);
+  throw new Error(`invalid cron field '${fieldName}': '${spec}' — supported syntax: literal, *, */N, m-n, m-n/k, comma-separated lists thereof`);
 }
 
 
