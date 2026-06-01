@@ -16,6 +16,7 @@ import { HealthMonitor } from './health-monitor.ts';
 import { MessageDispatcher } from './message-dispatcher.ts';
 import { UsagePoller } from './usage-poller.ts';
 import { ReminderDispatcher } from './reminder-dispatcher.ts';
+import { JobDispatcher } from './job-dispatcher.ts';
 import { shutdownAgents, restoreAllAgents } from './network.ts';
 import type { LifecycleContext } from './lifecycle.ts';
 import { syncPersonasToDb, syncPersonasWithDiff, getPersonasDir } from './persona.ts';
@@ -225,6 +226,19 @@ const reminderDispatcher = new ReminderDispatcher({
   },
 });
 
+// ── Job Dispatcher (JJ — recurring cron-scheduled prompts) ──
+
+const jobDispatcher = new JobDispatcher({
+  db,
+  messageDispatcher,
+  onQueueUpdate: (message) => {
+    wss.broadcast(JSON.stringify({ type: 'queue_update', message }));
+  },
+  onDashboardMessage: (msg) => {
+    wss.broadcast(JSON.stringify({ type: 'message', msg }));
+  },
+});
+
 const lifecycleCtx: LifecycleContext = {
   db,
   locks,
@@ -414,6 +428,7 @@ async function shutdown(): Promise<void> {
   messageDispatcher.stop();
   usagePoller.stop();
   reminderDispatcher.stop();
+  jobDispatcher.stop();
   await usagePoller.cleanup().catch(err =>
     console.error('[orchestrator] Usage session cleanup error:', err));
 
@@ -493,10 +508,11 @@ server.listen(PORT, '0.0.0.0', async () => {
     console.log(`[persona-watch] Polling ${personasDir} every 5s for changes`);
   }
 
-  // Start health monitor + usage poller + reminder dispatcher
+  // Start health monitor + usage poller + reminder dispatcher + job dispatcher
   healthMonitor.start();
   usagePoller.start();
   reminderDispatcher.start();
+  jobDispatcher.start();
 
   // Start Telegram polling for enabled destinations
   const telegramDests = db.listDestinations().filter(d => d.type === 'telegram' && d.enabled);

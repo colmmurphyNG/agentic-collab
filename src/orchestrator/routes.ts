@@ -17,6 +17,7 @@ import type { WebSocketServer } from '../shared/websocket-server.ts';
 import type { AgentState, DashboardMessage, DestinationRecord, EngineType, PendingMessage, ProxyCommand, ProxyResponse, ProxyRegistration } from '../shared/types.ts';
 import type { TelegramDispatcher } from './telegram.ts';
 import { sanitizeMessage, generateMessageId } from '../shared/sanitize.ts';
+import { parseCron, nextFireAt as cronNextFireAt } from '../shared/cron.ts';
 import { getVersion, versionsMatch } from '../shared/version.ts';
 import type { LockManager } from '../shared/lock.ts';
 import { getPersonasDir, parseFrontmatter, createPersonaAndAgent, syncSinglePersona, syncPersonasWithDiff, updateFrontmatterField, resolvePersonaPath, toHostPath } from './persona.ts';
@@ -2349,6 +2350,132 @@ route('POST', '/api/reminders/swap', async (req, res, _match, ctx) => {
   if (!ok) return json(res, 400, { error: 'Swap failed — reminders must exist and belong to same agent' });
 
   broadcastReminderUpdate(ctx);
+  json(res, 200, { ok: true });
+});
+
+// ── Jobs (JJ — recurring cron-scheduled prompts) ──
+
+function broadcastJobUpdate(ctx: RouteContext): void {
+  const jobs = ctx.db.listJobs();
+  ctx.wss.broadcast(JSON.stringify({ type: 'job_update', jobs }));
+}
+
+route('POST', '/api/jobs', async (req, res, _match, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  const body = await readJson<{
+    agentName?: string;
+    createdBy?: string;
+    prompt?: string;
+    cronExpr?: string;
+    skipIfActive?: boolean;
+  }>(req);
+
+  if (!body.agentName || typeof body.agentName !== 'string') {
+    return json(res, 400, { error: 'agentName required' });
+  }
+  if (!body.prompt || typeof body.prompt !== 'string') {
+    return json(res, 400, { error: 'prompt required' });
+  }
+  if (!body.cronExpr || typeof body.cronExpr !== 'string') {
+    return json(res, 400, { error: 'cronExpr required' });
+  }
+
+  // Validate cron + compute next fire BEFORE insert so we never persist a bad cron.
+  let nextIso: string;
+  try {
+    parseCron(body.cronExpr);
+    nextIso = cronNextFireAt(body.cronExpr, new Date()).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  } catch (e) {
+    return json(res, 400, { error: `Invalid cronExpr: ${(e as Error).message}` });
+  }
+
+  // Verify the target agent exists
+  if (!ctx.db.getAgent(body.agentName)) {
+    return json(res, 400, { error: `Agent '${body.agentName}' does not exist` });
+  }
+
+  const job = ctx.db.createJob({
+    agentName: body.agentName,
+    createdBy: body.createdBy ?? undefined,
+    prompt: body.prompt,
+    cronExpr: body.cronExpr,
+    nextFireAt: nextIso,
+    skipIfActive: body.skipIfActive !== false,
+  });
+
+  broadcastJobUpdate(ctx);
+  json(res, 201, job);
+});
+
+route('GET', '/api/jobs', async (req, res, _match, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  const url = new URL(req.url ?? '', 'http://localhost');
+  const agent = url.searchParams.get('agent') ?? undefined;
+  const jobs = ctx.db.listJobs(agent);
+  json(res, 200, jobs);
+});
+
+route('PATCH', '/api/jobs/:id', async (req, res, match, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  const id = parseInt(match.pathname.groups['id']!, 10);
+  if (isNaN(id)) return json(res, 400, { error: 'Invalid job ID' });
+
+  const existing = ctx.db.getJob(id);
+  if (!existing) return json(res, 404, { error: 'Job not found' });
+
+  const body = await readJson<{
+    status?: 'active' | 'paused';
+    cronExpr?: string;
+    prompt?: string;
+  }>(req);
+
+  // status change (pause/resume) — recompute next_fire_at on resume
+  if (body.status && body.status !== existing.status) {
+    if (body.status !== 'active' && body.status !== 'paused') {
+      return json(res, 400, { error: 'status must be active or paused' });
+    }
+    ctx.db.updateJobStatus(id, body.status);
+    if (body.status === 'active') {
+      try {
+        const nextIso = cronNextFireAt(existing.cronExpr, new Date()).toISOString().replace(/\.\d{3}Z$/, 'Z');
+        ctx.db.updateJobSchedule(id, { nextFireAt: nextIso });
+      } catch (e) {
+        return json(res, 400, { error: `Cannot resume — invalid cron: ${(e as Error).message}` });
+      }
+    }
+  }
+
+  // cron / prompt change — validate then update
+  const updates: { cronExpr?: string; prompt?: string; nextFireAt?: string } = {};
+  if (body.cronExpr !== undefined && body.cronExpr !== existing.cronExpr) {
+    try {
+      const nextIso = cronNextFireAt(body.cronExpr, new Date()).toISOString().replace(/\.\d{3}Z$/, 'Z');
+      updates.cronExpr = body.cronExpr;
+      updates.nextFireAt = nextIso;
+    } catch (e) {
+      return json(res, 400, { error: `Invalid cronExpr: ${(e as Error).message}` });
+    }
+  }
+  if (body.prompt !== undefined) {
+    updates.prompt = body.prompt;
+  }
+  if (Object.keys(updates).length > 0) {
+    ctx.db.updateJobSchedule(id, updates);
+  }
+
+  broadcastJobUpdate(ctx);
+  json(res, 200, ctx.db.getJob(id));
+});
+
+route('DELETE', '/api/jobs/:id', async (req, res, match, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  const id = parseInt(match.pathname.groups['id']!, 10);
+  if (isNaN(id)) return json(res, 400, { error: 'Invalid job ID' });
+
+  const ok = ctx.db.deleteJob(id);
+  if (!ok) return json(res, 404, { error: 'Job not found' });
+
+  broadcastJobUpdate(ctx);
   json(res, 200, { ok: true });
 });
 
