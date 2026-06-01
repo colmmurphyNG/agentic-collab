@@ -196,7 +196,7 @@ describe('JobDispatcher', () => {
   it('validateCron should not throw on a good cron and should throw on a bad one', () => {
     const dispatcher = new JobDispatcher({ db, messageDispatcher: mockMessageDispatcher() });
     assert.doesNotThrow(() => dispatcher.validateCron('0 */5 * * *'));
-    assert.throws(() => dispatcher.validateCron('not a cron 1 2'), /only literals/);
+    assert.throws(() => dispatcher.validateCron('not a cron 1 2'), /supported syntax/);
     assert.throws(() => dispatcher.validateCron('* * * *'), /5 space-separated fields/);
   });
 
