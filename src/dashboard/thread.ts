@@ -302,6 +302,7 @@ export function renderThread() {
   const messages = document.getElementById('threadMessages');
   const personaPanel = document.getElementById('personaPanel');
   const reminderPanel = document.getElementById('reminderPanel');
+  const jobsPanel = document.getElementById('jobsPanel');
   const watchPanel = document.getElementById('watchPanel');
   const input = document.getElementById('threadInput');
 
@@ -314,6 +315,7 @@ export function renderThread() {
     messages.innerHTML = '<div class="thread-empty">Select an agent to view messages</div>';
     personaPanel.style.display = 'none';
     reminderPanel.style.display = 'none';
+    jobsPanel.style.display = 'none';
     watchPanel.style.display = 'none';
     input.style.display = 'none';
     document.getElementById('topicBreadcrumbs').style.display = 'none';
@@ -331,6 +333,7 @@ export function renderThread() {
     <button class="${state.threadView === 'messages' ? 'active' : ''}" data-tab="messages">Messages</button>
     <button class="${state.threadView === 'watch' ? 'active' : ''}" data-tab="watch">Watch</button>
     <button class="${state.threadView === 'reminders' ? 'active' : ''}" data-tab="reminders">Reminders</button>
+    <button class="${state.threadView === 'jobs' ? 'active' : ''}" data-tab="jobs">Jobs</button>
     <button class="${state.threadView === 'files' ? 'active' : ''}" data-tab="files">Pages</button>
     <button class="${state.threadView === 'persona' ? 'active' : ''}" data-tab="persona">Persona</button>
   </div>`;
@@ -431,6 +434,7 @@ export function renderThread() {
   messages.style.display = view === 'messages' ? 'flex' : 'none';
   personaPanel.style.display = view === 'persona' ? 'block' : 'none';
   reminderPanel.style.display = view === 'reminders' ? 'flex' : 'none';
+  jobsPanel.style.display = view === 'jobs' ? 'flex' : 'none';
   watchPanel.style.display = view === 'watch' ? 'flex' : 'none';
   filesPanel.style.display = view === 'files' ? 'flex' : 'none';
   input.style.display = view === 'messages' ? 'flex' : 'none';
@@ -448,6 +452,11 @@ export function renderThread() {
 
   if (view === 'reminders') {
     document.getElementById('reminderPanel').load(state.selected);
+    return;
+  }
+
+  if (view === 'jobs') {
+    document.getElementById('jobsPanel').load(state.selected);
     return;
   }
 
