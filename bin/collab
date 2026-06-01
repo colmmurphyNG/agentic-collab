@@ -136,6 +136,32 @@ function formatReplyContext(message, inReplyTo) {
   return inReplyTo ? `In reply to: ${inReplyTo}\n\n${message}` : message;
 }
 
+/**
+ * Reject any --long-flag that isn't in the known set, OR allow it through
+ * once `--` (POSIX end-of-options) has been seen.
+ *
+ * Returns:
+ *   - `true`  → caller should keep this arg as positional (after `--`)
+ *   - `false` → caller should keep this arg as positional (non-flag token)
+ *   - never returns when the arg is a rejected unknown flag — exits process
+ *
+ * The shape is awkward because the call site already has its own "treat as
+ * positional" fall-through; this lets the helper veto without changing the
+ * surrounding control flow.
+ */
+function rejectUnknownFlag(arg, known, ctx) {
+  if (arg && arg.startsWith('--') && arg.length > 2) {
+    if (!known.has(arg)) {
+      const sorted = [...known].sort().join(', ');
+      console.error(`error: unknown flag '${arg}' in '${ctx}'. Valid flags: ${sorted}.`);
+      console.error(`hint: if '${arg}' is meant to be part of the message body, put '--' before it (POSIX end-of-options) — e.g. 'collab ${ctx} ... -- ${arg} <rest>'.`);
+      process.exit(2);
+    }
+  }
+}
+
+const SEND_KNOWN_FLAGS = new Set(['--topic', '--in-reply-to', '--notify', '--reply-reminder']);
+
 function parseSendArgs(args, implicitTarget = null) {
   let topic = null;
   let replyReminder = null;
@@ -144,8 +170,11 @@ function parseSendArgs(args, implicitTarget = null) {
   const target = implicitTarget ?? args[0];
   const positional = [];
   const startIdx = implicitTarget ? 0 : 1;
+  let endOfOptions = false;
 
   for (let i = startIdx; i < args.length; i++) {
+    if (!endOfOptions && args[i] === '--') { endOfOptions = true; continue; }
+    if (endOfOptions) { positional.push(args[i]); continue; }
     if (args[i] === '--topic' && args[i + 1]) { topic = args[++i]; }
     else if (args[i] === '--in-reply-to' && args[i + 1]) { inReplyTo = args[++i]; }
     else if (args[i] === '--notify') {
@@ -158,7 +187,10 @@ function parseSendArgs(args, implicitTarget = null) {
       if (next && !next.startsWith('-')) { replyReminder = parseInt(args[++i], 10); }
       else { replyReminder = 30; }
     }
-    else { positional.push(args[i]); }
+    else {
+      rejectUnknownFlag(args[i], SEND_KNOWN_FLAGS, 'send');
+      positional.push(args[i]);
+    }
   }
 
   return {
@@ -458,12 +490,19 @@ cmd('reminder', 'reminder <sub> [args...]', 'Manage reminders (add|list|done|can
 
   if (sub === 'add') {
     // collab reminder add <agent> "<prompt>" --cadence 10m [--from <name>]
+    const REMINDER_ADD_FLAGS = new Set(['--cadence', '--from']);
     let cadence = null, from = null;
     const positional = [];
+    let endOfOptions = false;
     for (let i = 0; i < sargs.length; i++) {
+      if (!endOfOptions && sargs[i] === '--') { endOfOptions = true; continue; }
+      if (endOfOptions) { positional.push(sargs[i]); continue; }
       if (sargs[i] === '--cadence' && sargs[i + 1]) { cadence = sargs[++i]; }
       else if (sargs[i] === '--from' && sargs[i + 1]) { from = sargs[++i]; }
-      else { positional.push(sargs[i]); }
+      else {
+        rejectUnknownFlag(sargs[i], REMINDER_ADD_FLAGS, 'reminder add');
+        positional.push(sargs[i]);
+      }
     }
     const targetAgent = positional[0];
     const prompt = positional.slice(1).join(' ');
@@ -581,12 +620,19 @@ cmd('publish', 'collab publish <slug> <dir> [--template <name> --store <store> -
   let title = null;
 
   // Parse flags and positional args
+  const PUBLISH_FLAGS = new Set(['--template', '--store', '--title']);
   const positional = [];
+  let endOfOptions = false;
   for (let i = 0; i < args.length; i++) {
+    if (!endOfOptions && args[i] === '--') { endOfOptions = true; continue; }
+    if (endOfOptions) { positional.push(args[i]); continue; }
     if (args[i] === '--template' && args[i + 1]) { template = args[++i]; }
     else if (args[i] === '--store' && args[i + 1]) { store = args[++i]; }
     else if (args[i] === '--title' && args[i + 1]) { title = args[++i]; }
-    else { positional.push(args[i]); }
+    else {
+      rejectUnknownFlag(args[i], PUBLISH_FLAGS, 'publish');
+      positional.push(args[i]);
+    }
   }
 
   slug = positional[0];
