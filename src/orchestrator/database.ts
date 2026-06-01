@@ -18,6 +18,8 @@ import type {
   ProxyRegistration,
   Reminder,
   ReminderStatus,
+  Job,
+  JobStatus,
   PageRecord,
   DataStoreRecord,
   DestinationRecord,
@@ -270,6 +272,22 @@ export class Database {
     if (!reminderColumns.some((c) => c['name'] === 'skip_if_active')) {
       this.db.exec('ALTER TABLE reminders ADD COLUMN skip_if_active INTEGER NOT NULL DEFAULT 0');
     }
+
+    // Create jobs table (JJ — recurring cron-scheduled prompts; fire-and-continue, no manual completion)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name TEXT NOT NULL,
+        created_by TEXT,
+        prompt TEXT NOT NULL,
+        cron_expr TEXT NOT NULL,
+        skip_if_active INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'active',
+        last_fired_at TEXT,
+        next_fire_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      )
+    `);
 
     // Add indicators and detection columns to engine_configs if not present
     const ecColumns = this.db.prepare('PRAGMA table_info(engine_configs)').all() as Array<Record<string, unknown>>;
@@ -900,6 +918,76 @@ export class Database {
     return rows.map(mapReminderRow);
   }
 
+  // ── Jobs (JJ — recurring cron-scheduled prompts) ──
+
+  createJob(opts: {
+    agentName: string;
+    createdBy?: string;
+    prompt: string;
+    cronExpr: string;
+    nextFireAt: string;
+    skipIfActive?: boolean;
+  }): Job {
+    const skipIfActive = opts.skipIfActive === false ? 0 : 1;
+    this.db.prepare(`
+      INSERT INTO jobs (agent_name, created_by, prompt, cron_expr, next_fire_at, skip_if_active, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'active')
+    `).run(opts.agentName, opts.createdBy ?? null, opts.prompt, opts.cronExpr, opts.nextFireAt, skipIfActive);
+    const row = this.db.prepare('SELECT * FROM jobs WHERE id = last_insert_rowid()').get() as Record<string, unknown>;
+    return mapJobRow(row);
+  }
+
+  listJobs(agentName?: string): Job[] {
+    const rows = agentName
+      ? this.db.prepare('SELECT * FROM jobs WHERE agent_name = ? ORDER BY id ASC').all(agentName)
+      : this.db.prepare('SELECT * FROM jobs ORDER BY agent_name ASC, id ASC').all();
+    return (rows as Array<Record<string, unknown>>).map(mapJobRow);
+  }
+
+  getJob(id: number): Job | undefined {
+    const row = this.db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return mapJobRow(row);
+  }
+
+  updateJobStatus(id: number, status: JobStatus): Job | undefined {
+    this.db.prepare('UPDATE jobs SET status = ? WHERE id = ?').run(status, id);
+    return this.getJob(id);
+  }
+
+  updateJobFire(id: number, nextFireAt: string): void {
+    this.db.prepare(
+      "UPDATE jobs SET last_fired_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), next_fire_at = ? WHERE id = ?"
+    ).run(nextFireAt, id);
+  }
+
+  updateJobSchedule(id: number, opts: { cronExpr?: string; nextFireAt?: string; prompt?: string }): Job | undefined {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    if (opts.cronExpr !== undefined) { sets.push('cron_expr = ?'); params.push(opts.cronExpr); }
+    if (opts.nextFireAt !== undefined) { sets.push('next_fire_at = ?'); params.push(opts.nextFireAt); }
+    if (opts.prompt !== undefined) { sets.push('prompt = ?'); params.push(opts.prompt); }
+    if (sets.length === 0) return this.getJob(id);
+    params.push(id);
+    this.db.prepare(`UPDATE jobs SET ${sets.join(', ')} WHERE id = ?`).run(...params as never[]);
+    return this.getJob(id);
+  }
+
+  deleteJob(id: number): boolean {
+    const result = this.db.prepare('DELETE FROM jobs WHERE id = ?').run(id);
+    return (result.changes ?? 0) > 0;
+  }
+
+  listDueJobs(): Job[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM jobs
+      WHERE status = 'active'
+        AND next_fire_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+      ORDER BY next_fire_at ASC
+    `).all() as Array<Record<string, unknown>>;
+    return rows.map(mapJobRow);
+  }
+
   // ── Engine Configs ──
 
   createEngineConfig(opts: {
@@ -1238,6 +1326,21 @@ function mapReminderRow(row: Record<string, unknown>): Reminder {
     status: row['status'] as ReminderStatus,
     lastDeliveredAt: row['last_delivered_at'] as string | null,
     completedAt: row['completed_at'] as string | null,
+    createdAt: row['created_at'] as string,
+  };
+}
+
+function mapJobRow(row: Record<string, unknown>): Job {
+  return {
+    id: row['id'] as number,
+    agentName: row['agent_name'] as string,
+    createdBy: row['created_by'] as string | null,
+    prompt: row['prompt'] as string,
+    cronExpr: row['cron_expr'] as string,
+    skipIfActive: (row['skip_if_active'] as number) === 1,
+    status: row['status'] as JobStatus,
+    lastFiredAt: row['last_fired_at'] as string | null,
+    nextFireAt: row['next_fire_at'] as string,
     createdAt: row['created_at'] as string,
   };
 }
