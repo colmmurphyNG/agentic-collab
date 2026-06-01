@@ -237,6 +237,12 @@ export function connect() {
           if (rp && rp.load && state.selected) rp.load(state.selected);
         }
         break;
+      case 'job_update':
+        if (state.threadView === 'jobs') {
+          const jp = document.getElementById('jobsPanel');
+          if (jp && jp.load && state.selected) jp.load(state.selected);
+        }
+        break;
       case 'notification':
         if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
           const title = data.agent ? `[${data.agent}]` : 'Agentic Collab';
