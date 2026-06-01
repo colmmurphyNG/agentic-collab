@@ -961,6 +961,7 @@ describe('API Routes — Destinations', () => {
       telegramDispatcher: makeStubTelegramDispatcher(),
       pagesDir: join(tmpDir, 'pages'),
       storesDir: join(tmpDir, 'stores'),
+      filesDir: join(tmpDir, 'files'),
     };
 
     const router = createRouter(ctx);
@@ -1103,6 +1104,7 @@ describe('routeTelegramMessage — inbound routing', () => {
       telegramDispatcher: makeStubTelegramDispatcher(),
       pagesDir: join(tmpDir, 'pages'),
       storesDir: join(tmpDir, 'stores'),
+      filesDir: join(tmpDir, 'files'),
     };
   });
 
@@ -1193,6 +1195,7 @@ describe('API Routes — Pages archive', () => {
       telegramDispatcher: makeStubTelegramDispatcher(),
       pagesDir: join(tmpDir, 'pages'),
       storesDir: join(tmpDir, 'stores'),
+      filesDir: join(tmpDir, 'files'),
     };
 
     const router = createRouter(ctx);
@@ -1372,6 +1375,7 @@ describe('API Routes — /api/notify (H1: delivery receipts)', () => {
       } as unknown as TelegramDispatcher,
       pagesDir: join(tmpDir, 'pages'),
       storesDir: join(tmpDir, 'stores'),
+      filesDir: join(tmpDir, 'files'),
     };
 
     const router = createRouter(ctx);
@@ -1523,6 +1527,7 @@ describe('API Routes — /scratch (R: render-only endpoint)', () => {
       telegramDispatcher: makeStubTelegramDispatcher(),
       pagesDir: join(tmpDir, 'pages'),
       storesDir: join(tmpDir, 'stores'),
+      filesDir: join(tmpDir, 'files'),
     } as RouteContext;
 
     const router = createRouter(ctx);
@@ -1721,6 +1726,7 @@ describe('API Routes — /api/preferences (MM: server-side dashboard prefs)', ()
       telegramDispatcher: makeStubTelegramDispatcher(),
       pagesDir: join(tmpDir, 'pages'),
       storesDir: join(tmpDir, 'stores'),
+      filesDir: join(tmpDir, 'files'),
     };
 
     const router = createRouter(ctx);
@@ -1869,6 +1875,7 @@ describe('API Routes — /pages/<slug> base href injection (relative-link fix)',
       telegramDispatcher: makeStubTelegramDispatcher(),
       pagesDir,
       storesDir: join(tmpDir, 'stores'),
+      filesDir: join(tmpDir, 'files'),
     };
 
     const router = createRouter(ctx);
@@ -2180,6 +2187,7 @@ describe('POST /api/dashboard/reply auto-forwards to Telegram when route active'
       telegramDispatcher: recordingTelegramDispatcher,
       pagesDir: join(tmpDir, 'pages'),
       storesDir: join(tmpDir, 'stores'),
+      filesDir: join(tmpDir, 'files'),
     };
 
     const router = createRouter(ctx);
