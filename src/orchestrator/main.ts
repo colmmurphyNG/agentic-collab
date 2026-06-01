@@ -53,8 +53,6 @@ const FILES_DIR = process.env['FILES_DIR'] && process.env['FILES_DIR']!.length >
 mkdirSync(FILES_DIR, { recursive: true });
 mkdirSync(PAGES_DIR, { recursive: true });
 mkdirSync(STORES_DIR, { recursive: true });
-const FILES_DIR = join(dirname(DB_PATH), 'files');
-mkdirSync(FILES_DIR, { recursive: true });
 
 const db = new Database(DB_PATH);
 const wss = new WebSocketServer();
