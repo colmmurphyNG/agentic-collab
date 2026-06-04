@@ -27,6 +27,9 @@ services:
       - PERSONAS_HOST_DIR=${PERSONAS_HOST_DIR:-}
       - ORCHESTRATOR_HOST=${ORCHESTRATOR_HOST:-http://localhost:${ORCHESTRATOR_HOST_PORT:-8001}}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      # Claude Code --add-dir path for shared persistent personas / knowledge.
+      # When unset, no --add-dir flag is passed (engine adapter skips it).
+      - CLAUDE_HOME_DIR=${CLAUDE_HOME_DIR:-}
     labels:
       io.agentic-collab.role: orchestrator
     restart: unless-stopped
