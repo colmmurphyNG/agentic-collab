@@ -11,6 +11,7 @@ import type {
   EngineConfigRecord,
   EngineType,
   EventRecord,
+  FileRecord,
   LaunchEnv,
   MessageDirection,
   PendingMessage,
@@ -152,6 +153,18 @@ const SCHEMA = `
     value          TEXT NOT NULL,
     updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
   );
+
+  -- Files (orchestrator-native file registry — upstream Sammons RFC file-upload-v2).
+  -- Stores metadata for uploaded files; actual file content lives on disk at path.
+  CREATE TABLE IF NOT EXISTS files (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    size         INTEGER NOT NULL,
+    mime         TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    expires_at   TEXT
+  );
 `;
 
 export class Database {
@@ -228,6 +241,12 @@ export class Database {
     }
     if (!dmColNamesForAgents.has('target_agent')) {
       this.db.exec('ALTER TABLE dashboard_messages ADD COLUMN target_agent TEXT');
+    }
+
+    // Add file_ids column to dashboard_messages (JSON array of file IDs)
+    const dmColsForFiles = this.db.prepare('PRAGMA table_info(dashboard_messages)').all() as Array<Record<string, unknown>>;
+    if (!dmColsForFiles.some((c) => c['name'] === 'file_ids')) {
+      this.db.exec('ALTER TABLE dashboard_messages ADD COLUMN file_ids TEXT');
     }
 
     // Add version column to proxies
@@ -515,11 +534,12 @@ export class Database {
 
   // ── Dashboard Messages ──
 
-  addDashboardMessage(agent: string, direction: MessageDirection, message: string, opts?: { topic?: string; sourceAgent?: string; targetAgent?: string }): DashboardMessage {
+  addDashboardMessage(agent: string, direction: MessageDirection, message: string, opts?: { topic?: string; sourceAgent?: string; targetAgent?: string; fileIds?: string[] }): DashboardMessage {
+    const fileIdsJson = opts?.fileIds && opts.fileIds.length > 0 ? JSON.stringify(opts.fileIds) : null;
     this.db.prepare(`
-      INSERT INTO dashboard_messages (agent, direction, topic, message, source_agent, target_agent)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(agent, direction, opts?.topic ?? null, message, opts?.sourceAgent ?? null, opts?.targetAgent ?? null);
+      INSERT INTO dashboard_messages (agent, direction, topic, message, source_agent, target_agent, file_ids)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(agent, direction, opts?.topic ?? null, message, opts?.sourceAgent ?? null, opts?.targetAgent ?? null, fileIdsJson);
 
     const row = this.db.prepare(
       'SELECT * FROM dashboard_messages WHERE id = last_insert_rowid()'
@@ -1238,6 +1258,50 @@ export class Database {
     const result = this.db.prepare('DELETE FROM destinations WHERE name = ?').run(name);
     return result.changes > 0;
   }
+
+  // ── Files (orchestrator-native file registry — upstream Sammons file-upload-v2) ──
+
+  /**
+   * Add a file to the registry. The file content is stored on disk at `path`;
+   * the registry only tracks metadata. Returns the created FileRecord.
+   */
+  addFile(opts: {
+    id: string;
+    name: string;
+    size: number;
+    mime: string;
+    path: string;
+    expiresAt?: string | null;
+  }): FileRecord {
+    this.db.prepare(`
+      INSERT INTO files (id, name, size, mime, path, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      opts.id,
+      opts.name,
+      opts.size,
+      opts.mime,
+      opts.path,
+      opts.expiresAt ?? null,
+    );
+    return this.getFile(opts.id)!;
+  }
+
+  getFile(id: string): FileRecord | null {
+    const row = this.db.prepare('SELECT * FROM files WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return mapFileRow(row);
+  }
+
+  listFiles(): FileRecord[] {
+    const rows = this.db.prepare('SELECT * FROM files ORDER BY created_at DESC').all() as Array<Record<string, unknown>>;
+    return rows.map(mapFileRow);
+  }
+
+  deleteFile(id: string): boolean {
+    const result = this.db.prepare('DELETE FROM files WHERE id = ?').run(id);
+    return result.changes > 0;
+  }
 }
 
 // ── Row Mappers ──
@@ -1283,6 +1347,14 @@ function mapEventRow(row: Record<string, unknown>): EventRecord {
 }
 
 function mapDashboardMessageRow(row: Record<string, unknown>): DashboardMessage {
+  let fileIds: string[] | null = null;
+  const rawFileIds = row['file_ids'];
+  if (typeof rawFileIds === 'string' && rawFileIds.length > 0) {
+    try {
+      const parsed = JSON.parse(rawFileIds);
+      if (Array.isArray(parsed)) fileIds = parsed;
+    } catch { /* ignore */ }
+  }
   return {
     id: row['id'] as number,
     agent: row['agent'] as string,
@@ -1295,6 +1367,7 @@ function mapDashboardMessageRow(row: Record<string, unknown>): DashboardMessage 
     deliveryStatus: (row['delivery_status'] as string | null) ?? null,
     withdrawn: (row['withdrawn'] as number) === 1,
     createdAt: row['created_at'] as string,
+    fileIds,
   };
 }
 
@@ -1427,6 +1500,19 @@ function mapDestinationRow(row: Record<string, unknown>): DestinationRecord {
     updatedAt: row['updated_at'] as string,
   };
 }
+
+function mapFileRow(row: Record<string, unknown>): FileRecord {
+  return {
+    id: row['id'] as string,
+    name: row['name'] as string,
+    size: row['size'] as number,
+    mime: row['mime'] as string,
+    path: row['path'] as string,
+    createdAt: row['created_at'] as string,
+    expiresAt: (row['expires_at'] as string | null) ?? null,
+  };
+}
+
 
 /** camelCase → snake_case for updateAgentState extra fields. */
 const COLUMN_MAP: Record<string, string> = {

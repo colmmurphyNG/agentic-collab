@@ -40,13 +40,17 @@ if (!ORCHESTRATOR_SECRET) {
   console.log(`[orchestrator] Auth enabled (secret from ${process.env['ORCHESTRATOR_SECRET'] ? 'env' : getSecretPath()})`);
 }
 
-// Ensure DB + pages + stores directories exist.
+// Ensure DB + pages + stores + files directories exist.
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const { pagesDir: PAGES_DIR, storesDir: STORES_DIR } = resolveDataDirs({
   envPagesDir: process.env['PAGES_DIR'],
   envStoresDir: process.env['STORES_DIR'],
   dbPath: DB_PATH,
 });
+const FILES_DIR = process.env['FILES_DIR'] && process.env['FILES_DIR']!.length > 0
+  ? process.env['FILES_DIR']!
+  : join(dirname(DB_PATH), 'files');
+mkdirSync(FILES_DIR, { recursive: true });
 mkdirSync(PAGES_DIR, { recursive: true });
 mkdirSync(STORES_DIR, { recursive: true });
 
@@ -279,6 +283,7 @@ const routeCtx: RouteContext = {
   accountStore,
   pagesDir: PAGES_DIR,
   storesDir: STORES_DIR,
+  filesDir: FILES_DIR,
   telegramDispatcher,
 };
 
