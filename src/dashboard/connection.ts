@@ -222,9 +222,19 @@ export function connect() {
         state.pages = data.pages || [];
         { const sp = document.getElementById('settingsPanel');
           if (sp && sp.style.display !== 'none' && sp.render) sp.render(); }
+        if (state.threadView === 'files') {
+          const fp = document.getElementById('filesPanel');
+          if (fp && fp.load && state.selected) fp.load(state.selected);
+        }
         break;
       case 'stores_update':
         state.stores = data.stores || [];
+        { const sp = document.getElementById('settingsPanel');
+          if (sp && sp.style.display !== 'none' && sp.render) sp.render(); }
+        if (state.threadView === 'files') {
+          const fp = document.getElementById('filesPanel');
+          if (fp && fp.load && state.selected) fp.load(state.selected);
+        }
         break;
       case 'destinations_update':
         state.destinations = data.destinations || [];
