@@ -775,10 +775,56 @@ function optionalScalarEquals<T>(a: T | null | undefined, b: T | null | undefine
 }
 
 /**
+ * Merge indicator definitions from `_default.md` with a per-persona block.
+ *
+ * Defaults flow through by id; persona-specific indicators with the same id
+ * OVERRIDE the default; persona-specific ids not in defaults extend the set.
+ *
+ * Returns `undefined` only when both sources are empty/missing so the
+ * frontmatter `indicators` field stays unset in that case (preserves
+ * pre-merge behaviour for personas that didn't opt in to defaults).
+ */
+function mergeIndicatorsWithDefault(
+  defaults: IndicatorDefinition[] | undefined,
+  persona: IndicatorDefinition[] | undefined,
+): IndicatorDefinition[] | undefined {
+  const hasDefaults = Array.isArray(defaults) && defaults.length > 0;
+  const hasPersona = Array.isArray(persona) && persona.length > 0;
+  if (!hasDefaults && !hasPersona) return undefined;
+  if (!hasDefaults) return persona;
+  if (!hasPersona) return defaults;
+
+  const byId = new Map<string, IndicatorDefinition>();
+  for (const def of defaults!) byId.set(def.id, def);
+  for (const ind of persona!) byId.set(ind.id, ind); // persona wins on id-collision
+  return Array.from(byId.values());
+}
+
+/**
  * Scan the personas directory and return all parsed persona files.
+ *
+ * If `_default.md` exists in the same directory and declares an `indicators`
+ * frontmatter block, those indicators are merged into every non-opted-out
+ * persona via `mergeIndicatorsWithDefault`. The `inherit_default: false`
+ * frontmatter flag — already honoured for body inheritance in `loadPersona` —
+ * also opts the persona out of indicator inheritance here.
  */
 export function scanPersonas(personasDir?: string): ParsedPersona[] {
   const dir = personasDir ?? getPersonasDir();
+
+  // Load _default.md indicators once. Tolerant: missing file, empty
+  // frontmatter, or no `indicators` key all collapse to `undefined` and the
+  // merge becomes a no-op for every persona.
+  let defaultIndicators: IndicatorDefinition[] | undefined;
+  try {
+    const raw = readFileSync(join(dir, DEFAULT_PERSONA_FILENAME), 'utf-8');
+    const { frontmatter } = parseFrontmatter(raw);
+    const inds = (frontmatter as PersonaFrontmatter).indicators;
+    if (Array.isArray(inds)) defaultIndicators = inds;
+  } catch {
+    // No _default.md frontmatter — indicator inheritance is disabled.
+  }
+
   try {
     const files = readdirSync(dir).filter(f => f.endsWith('.md') && !f.startsWith('_')).sort();
     const results: ParsedPersona[] = [];
@@ -786,9 +832,20 @@ export function scanPersonas(personasDir?: string): ParsedPersona[] {
       try {
         const raw = readFileSync(join(dir, file), 'utf-8');
         const { frontmatter, body } = parseFrontmatter(raw);
+        const fm = frontmatter as PersonaFrontmatter;
+
+        // Inherit default indicators unless the persona opts out via the
+        // same flag that controls body inheritance.
+        const inheritFlag = (frontmatter as Record<string, unknown>)['inherit_default'];
+        const optsOut = inheritFlag === false || inheritFlag === 'false';
+        if (!optsOut) {
+          const merged = mergeIndicatorsWithDefault(defaultIndicators, fm.indicators);
+          if (merged !== undefined) fm.indicators = merged;
+        }
+
         results.push({
           name: file.replace(/\.md$/, ''),
-          frontmatter: frontmatter as PersonaFrontmatter,
+          frontmatter: fm,
           body,
         });
       } catch {
