@@ -33,7 +33,7 @@ import { UsageAggregator, renderUsageMarkdown } from './usage-aggregator.ts';
 import { DroneAuditAggregator, renderAuditMarkdown } from './drone-audit.ts';
 import { sessionName } from '../shared/agent-entity.ts';
 import { paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
-import { recordTelegramInbound, getActiveTelegramRoute } from './telegram-routing.ts';
+import { recordTelegramInbound, getActiveTelegramRoute, maybeAutoClearOnCommPref, isCommPrefDirective } from './telegram-routing.ts';
 import type { MessageDispatcher } from './message-dispatcher.ts';
 import type { UsagePoller } from './usage-poller.ts';
 
@@ -513,6 +513,12 @@ route('POST', '/api/dashboard/send', async (req, res, _match, ctx) => {
   const sanitized = sanitizeMessage(body.message);
   const topicStr = body.topic;
   const fileIds = Array.isArray(body.fileIds) ? body.fileIds.filter((id: unknown) => typeof id === 'string') : undefined;
+
+  // Auto-clear Telegram routes if the operator is signalling they're at
+  // the dashboard now (or otherwise telling agents to stop notifying).
+  // Pairs with _default.md §12 — silent compliance gets replaced by
+  // immediate state cleanup.
+  maybeAutoClearOnCommPref(sanitized, 'dashboard send');
 
   const envelope = buildReplyEnvelope('dashboard', topicStr, sanitized);
   const { msg, pending } = enqueueAndDeliver(ctx, {
@@ -3146,6 +3152,16 @@ export function routeTelegramMessage(
   const botToken = dest.config['botToken'] as string;
   console.log(`[telegram] Inbound from chat ${incomingChatId}: ${text.slice(0, 100)}`);
 
+  // Comm-preference auto-clear: if this Telegram inbound is the operator
+  // signalling "I'm at the dashboard now / stop notify", clear any active
+  // routes AND skip creating a new route from THIS message. Without the
+  // skip, the operator's "stop notify" Telegram would itself re-arm the
+  // 30-min TTL. See telegram-routing.ts isCommPrefDirective.
+  const commPrefMatched = isCommPrefDirective(text);
+  if (commPrefMatched) {
+    maybeAutoClearOnCommPref(text, `Telegram inbound from ${dest.name}`);
+  }
+
   // Parse @agent-name prefixes — supports multiple: @agent1 @agent2 message
   const tagPattern = /^((?:@[a-zA-Z0-9_-]+\s+)+)([\s\S]+)$/;
   const tagMatch = text.match(tagPattern);
@@ -3179,8 +3195,12 @@ export function routeTelegramMessage(
         sourceAgent: `telegram:${dest.name}`,
       });
       // Record the route so agent → dashboard replies auto-forward back
-      // to this Telegram chat for the TTL window.
-      recordTelegramInbound(name, dest.name, incomingChatId);
+      // to this Telegram chat for the TTL window. SKIPPED when the
+      // operator's inbound is a comm-preference directive — otherwise
+      // a "stop notify" Telegram itself would re-arm the TTL.
+      if (!commPrefMatched) {
+        recordTelegramInbound(name, dest.name, incomingChatId);
+      }
       delivered.push(name);
     }
 
@@ -3207,7 +3227,9 @@ export function routeTelegramMessage(
         topic: 'telegram',
         sourceAgent: `telegram:${dest.name}`,
       });
-      recordTelegramInbound(defaultAgent, dest.name, incomingChatId);
+      if (!commPrefMatched) {
+        recordTelegramInbound(defaultAgent, dest.name, incomingChatId);
+      }
       console.log(`[telegram] Routed unprefixed message to default agent: ${defaultAgent}`);
     } else {
       if (defaultAgent) {
