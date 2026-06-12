@@ -8,7 +8,7 @@ import { request as httpRequest } from 'node:http';
 import { pipeline } from 'node:stream/promises';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, rmSync, statSync, createWriteStream, createReadStream, realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { renderMarkdown, wrapInHtml, DOC_PAGES } from '../docs/render.ts';
 import { hostname } from 'node:os';
@@ -1282,6 +1282,40 @@ function formatRelativeAge(mtimeMs: number, nowMs: number = Date.now()): string 
   return `${mo} mo ago`;
 }
 
+// Persona attribution heuristic for /scratch view:
+//   1. Filename starts with `handoff_<persona>_<date>` → that persona
+//   2. First path segment under scratch/ is a known persona → that persona
+//   3. Worktree-name pattern `<persona>-NNNN` (e.g. `pwa-2391`) → base persona
+//   4. Fall back to the project's primary-persona convention
+//   5. Otherwise `unattributed`
+const KNOWN_PERSONAS = ['brain', 'tl', 'pwa', 'sfcc', 'sfcc-2298', 'qa', 'dd', 'algo', 'prev', 'tridion-expert', 'drone', 'codex-drone', 'codex-prev', 'cs'];
+const PROJECT_PRIMARY_PERSONA: Record<string, string> = {
+  'conductor': 'brain',
+  'project-a': 'pwa',
+  'project-b': 'sfcc',
+  'datadog': 'dd',
+  'project-c': 'qa',
+};
+
+function attributePersona(relPath: string, project: string): string {
+  // Handoff filename: handoff_<persona>_<timestamp>.md (persona may contain hyphens like pwa-2391)
+  const handoffMatch = /^handoff[-_]([a-zA-Z0-9-]+?)[-_]\d{8}/.exec(basename(relPath));
+  if (handoffMatch) {
+    const candidate = handoffMatch[1]!.toLowerCase();
+    // Strip worktree suffix (e.g. pwa-2391 → pwa) if base name is a known persona
+    const base = candidate.replace(/-\d+$/, '');
+    if (KNOWN_PERSONAS.includes(candidate)) return candidate;
+    if (KNOWN_PERSONAS.includes(base)) return base;
+  }
+  // First path segment matches a known persona
+  const firstSeg = relPath.split('/')[0]?.toLowerCase() ?? '';
+  if (KNOWN_PERSONAS.includes(firstSeg)) return firstSeg;
+  const firstSegBase = firstSeg.replace(/-\d+$/, '');
+  if (KNOWN_PERSONAS.includes(firstSegBase)) return firstSegBase;
+  // Project-primary fallback
+  return PROJECT_PRIMARY_PERSONA[project] ?? 'unattributed';
+}
+
 route('GET', '/scratch', async (req, res, _match, ctx) => {
   if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
 
@@ -1292,21 +1326,56 @@ route('GET', '/scratch', async (req, res, _match, ctx) => {
     return;
   }
 
-  const lines: string[] = ['# Scratch files', ''];
-  for (const [project, projectRoot] of [...roots.entries()].sort()) {
+  // Gather all files across all projects with persona attribution.
+  type Entry = { project: string; relPath: string; size: number; mtimeMs: number; persona: string };
+  const all: Entry[] = [];
+  for (const [project, projectRoot] of roots.entries()) {
     const scratchRoot = join(projectRoot, 'scratch');
-    const files = listMarkdownRecursive(scratchRoot).sort((a, b) => b.mtimeMs - a.mtimeMs);
-    lines.push(`## ${project} (${files.length} file${files.length === 1 ? '' : 's'})`);
+    for (const f of listMarkdownRecursive(scratchRoot)) {
+      all.push({ project, ...f, persona: attributePersona(f.relPath, project) });
+    }
+  }
+  all.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  const lines: string[] = ['# Scratch files', ''];
+  lines.push(`_Total: ${all.length} files across ${roots.size} projects. Updated ${all[0] ? formatRelativeAge(all[0].mtimeMs) : 'never'}._`);
+  lines.push('');
+
+  // ── Latest 10 ──
+  lines.push('## Latest 10');
+  lines.push('');
+  if (all.length === 0) {
+    lines.push('_No markdown files yet._');
+  } else {
+    for (const f of all.slice(0, 10)) {
+      lines.push(`- [${f.project}/${f.relPath}](/scratch/${f.project}/${f.relPath}) — **${f.persona}**, ${formatBytes(f.size)}, ${formatRelativeAge(f.mtimeMs)}`);
+    }
+  }
+  lines.push('');
+
+  // ── Grouped by persona ──
+  lines.push('## By persona');
+  lines.push('');
+  const byPersona = new Map<string, Entry[]>();
+  for (const f of all) {
+    if (!byPersona.has(f.persona)) byPersona.set(f.persona, []);
+    byPersona.get(f.persona)!.push(f);
+  }
+  // Sort personas by total file count desc, with 'unattributed' last
+  const personaOrder = [...byPersona.entries()].sort((a, b) => {
+    if (a[0] === 'unattributed') return 1;
+    if (b[0] === 'unattributed') return -1;
+    return b[1].length - a[1].length;
+  });
+  for (const [persona, files] of personaOrder) {
+    lines.push(`### ${persona} (${files.length} file${files.length === 1 ? '' : 's'})`);
     lines.push('');
-    if (files.length === 0) {
-      lines.push('_No markdown files under `scratch/`._');
-    } else {
-      for (const f of files) {
-        lines.push(`- [${f.relPath}](/scratch/${project}/${f.relPath}) — ${formatBytes(f.size)}, ${formatRelativeAge(f.mtimeMs)}`);
-      }
+    for (const f of files) {
+      lines.push(`- [${f.project}/${f.relPath}](/scratch/${f.project}/${f.relPath}) — ${formatBytes(f.size)}, ${formatRelativeAge(f.mtimeMs)}`);
     }
     lines.push('');
   }
+
   const html = wrapMarkdownPage('Scratch', renderMarkdown(lines.join('\n')));
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(html);
