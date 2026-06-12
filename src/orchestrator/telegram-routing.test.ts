@@ -6,6 +6,8 @@ import {
   clearTelegramRoute,
   listTelegramRoutes,
   _resetTelegramRoutes,
+  isCommPrefDirective,
+  maybeAutoClearOnCommPref,
 } from './telegram-routing.ts';
 
 describe('telegram-routing (auto-forward state map)', () => {
@@ -94,5 +96,70 @@ describe('telegram-routing (auto-forward state map)', () => {
     const live = listTelegramRoutes(t0);
     assert.equal(live.length, 1);
     assert.equal(live[0]?.agentName, 'active');
+  });
+
+  describe('isCommPrefDirective', () => {
+    it('should match notify-off directives', () => {
+      assert.ok(isCommPrefDirective('turn off --notify, Im at dashboard'));
+      assert.ok(isCommPrefDirective('stop --notify please'));
+      assert.ok(isCommPrefDirective('no notify on this thread'));
+      assert.ok(isCommPrefDirective('stop notifying me'));
+      assert.ok(isCommPrefDirective('disable notify'));
+    });
+
+    it('should match "at dashboard" directives', () => {
+      assert.ok(isCommPrefDirective("I'm at the dashboard now"));
+      assert.ok(isCommPrefDirective('I am at dashboard'));
+      assert.ok(isCommPrefDirective('Im at the dashboard'));
+      assert.ok(isCommPrefDirective('back at dashboard'));
+      assert.ok(isCommPrefDirective('Im back at the dashboard'));
+    });
+
+    it('should match complaint forms', () => {
+      assert.ok(isCommPrefDirective('still notifying me despite repeated asks'));
+      assert.ok(isCommPrefDirective('dashboard-quiet please'));
+    });
+
+    it('should NOT false-positive on benign notify mentions', () => {
+      assert.ok(!isCommPrefDirective('we should notify the team'));
+      assert.ok(!isCommPrefDirective('add a notify when CI fails'));
+      assert.ok(!isCommPrefDirective('check the dashboard for status'));
+      assert.ok(!isCommPrefDirective('hello'));
+      assert.ok(!isCommPrefDirective(''));
+    });
+  });
+
+  describe('maybeAutoClearOnCommPref', () => {
+    // These tests use real Date.now() because maybeAutoClearOnCommPref +
+    // listTelegramRoutes (inside it) read wall-clock time internally;
+    // passing past timestamps to recordTelegramInbound would create
+    // already-expired routes that filter out before the clear sees them.
+    it('should clear all routes when text matches', () => {
+      recordTelegramInbound('tl', 'cmCollab', '1');
+      recordTelegramInbound('pwa', 'cmCollab', '1');
+      assert.equal(listTelegramRoutes().length, 2);
+      const cleared = maybeAutoClearOnCommPref('turn off --notify, Im at dashboard', 'test');
+      assert.equal(cleared, 2);
+      assert.equal(listTelegramRoutes().length, 0);
+    });
+
+    it('should be no-op when text does not match', () => {
+      recordTelegramInbound('tl', 'cmCollab', '1');
+      const cleared = maybeAutoClearOnCommPref('please review PR #1234', 'test');
+      assert.equal(cleared, 0);
+      assert.equal(listTelegramRoutes().length, 1);
+    });
+
+    it('should be no-op on empty input', () => {
+      recordTelegramInbound('tl', 'cmCollab', '1');
+      assert.equal(maybeAutoClearOnCommPref('', 'test'), 0);
+      assert.equal(listTelegramRoutes().length, 1);
+    });
+
+    it('should be idempotent (second call returns 0)', () => {
+      recordTelegramInbound('tl', 'cmCollab', '1');
+      assert.equal(maybeAutoClearOnCommPref("I'm at the dashboard now", 'test'), 1);
+      assert.equal(maybeAutoClearOnCommPref("I'm at the dashboard now", 'test'), 0);
+    });
   });
 });
