@@ -293,6 +293,133 @@ describe('Persona', () => {
       const personas = scanPersonas('/nonexistent/dir');
       assert.deepEqual(personas, []);
     });
+
+    describe('indicator inheritance from _default.md', () => {
+      const DEFAULT_FM = `---
+indicators:
+  approval:
+    regex: 'YESNO_DEFAULT'
+    badge: Needs Approval
+    style: warning
+  logged-out:
+    regex: 'NOT_LOGGED_IN_DEFAULT'
+    badge: Logged Out
+    style: danger
+---
+
+Default body.`;
+
+      it('should inherit all _default indicators when persona declares none', () => {
+        const scanDir = mkdtempSync(join(tmpdir(), 'persona-scan-inherit-'));
+        writeFileSync(join(scanDir, '_default.md'), DEFAULT_FM);
+        writeFileSync(join(scanDir, 'plain.md'), '---\nengine: claude\ncwd: /tmp\n---\nBody.');
+        const personas = scanPersonas(scanDir);
+        const plain = personas.find(p => p.name === 'plain')!;
+        assert.equal(plain.frontmatter.indicators?.length, 2);
+        const ids = plain.frontmatter.indicators!.map(i => i.id).sort();
+        assert.deepEqual(ids, ['approval', 'logged-out']);
+        rmSync(scanDir, { recursive: true, force: true });
+      });
+
+      it('should override default indicator by id when persona redeclares it', () => {
+        const scanDir = mkdtempSync(join(tmpdir(), 'persona-scan-override-'));
+        writeFileSync(join(scanDir, '_default.md'), DEFAULT_FM);
+        const personaFm = `---
+engine: claude
+cwd: /tmp
+indicators:
+  logged-out:
+    regex: 'PERSONA_LOGGED_OUT_WINS'
+    badge: Custom Logout
+    style: danger
+---
+Body.`;
+        writeFileSync(join(scanDir, 'overrider.md'), personaFm);
+        const personas = scanPersonas(scanDir);
+        const o = personas.find(p => p.name === 'overrider')!;
+        const loggedOut = o.frontmatter.indicators!.find(i => i.id === 'logged-out')!;
+        assert.equal(loggedOut.regex, 'PERSONA_LOGGED_OUT_WINS');
+        // approval still inherited from defaults
+        const approval = o.frontmatter.indicators!.find(i => i.id === 'approval');
+        assert.ok(approval, 'unrelated default indicators still inherited');
+        assert.equal(approval!.regex, 'YESNO_DEFAULT');
+        rmSync(scanDir, { recursive: true, force: true });
+      });
+
+      it('should extend defaults with persona-specific indicators not in default set', () => {
+        const scanDir = mkdtempSync(join(tmpdir(), 'persona-scan-extend-'));
+        writeFileSync(join(scanDir, '_default.md'), DEFAULT_FM);
+        const personaFm = `---
+engine: claude
+cwd: /tmp
+indicators:
+  custom-thing:
+    regex: 'PERSONA_ONLY'
+    badge: Custom
+    style: info
+---
+Body.`;
+        writeFileSync(join(scanDir, 'extender.md'), personaFm);
+        const personas = scanPersonas(scanDir);
+        const e = personas.find(p => p.name === 'extender')!;
+        const ids = e.frontmatter.indicators!.map(i => i.id).sort();
+        assert.deepEqual(ids, ['approval', 'custom-thing', 'logged-out']);
+        rmSync(scanDir, { recursive: true, force: true });
+      });
+
+      it('should skip merge when persona sets inherit_default: false', () => {
+        const scanDir = mkdtempSync(join(tmpdir(), 'persona-scan-optout-'));
+        writeFileSync(join(scanDir, '_default.md'), DEFAULT_FM);
+        const personaFm = `---
+engine: claude
+cwd: /tmp
+inherit_default: false
+indicators:
+  only-mine:
+    regex: 'OPTED_OUT'
+    badge: Only Mine
+    style: info
+---
+Body.`;
+        writeFileSync(join(scanDir, 'optout.md'), personaFm);
+        const personas = scanPersonas(scanDir);
+        const o = personas.find(p => p.name === 'optout')!;
+        const ids = o.frontmatter.indicators!.map(i => i.id);
+        assert.deepEqual(ids, ['only-mine'], 'opt-out gives only persona indicators, no defaults');
+        rmSync(scanDir, { recursive: true, force: true });
+      });
+
+      it('should leave indicators undefined when both default and persona declare none', () => {
+        const scanDir = mkdtempSync(join(tmpdir(), 'persona-scan-empty-'));
+        // _default.md with frontmatter but NO indicators block
+        writeFileSync(join(scanDir, '_default.md'), '---\nicon: 🌐\n---\nDefault body.');
+        writeFileSync(join(scanDir, 'plain.md'), '---\nengine: claude\ncwd: /tmp\n---\nBody.');
+        const personas = scanPersonas(scanDir);
+        const p = personas.find(x => x.name === 'plain')!;
+        assert.equal(p.frontmatter.indicators, undefined);
+        rmSync(scanDir, { recursive: true, force: true });
+      });
+
+      it('should be no-op when _default.md is absent', () => {
+        const scanDir = mkdtempSync(join(tmpdir(), 'persona-scan-no-default-'));
+        const personaFm = `---
+engine: claude
+cwd: /tmp
+indicators:
+  only-mine:
+    regex: 'STAYS'
+    badge: Only Mine
+    style: info
+---
+Body.`;
+        writeFileSync(join(scanDir, 'lone.md'), personaFm);
+        const personas = scanPersonas(scanDir);
+        const o = personas.find(p => p.name === 'lone')!;
+        const ids = o.frontmatter.indicators!.map(i => i.id);
+        assert.deepEqual(ids, ['only-mine']);
+        rmSync(scanDir, { recursive: true, force: true });
+      });
+    });
   });
 
   describe('syncPersonasToDb', () => {
