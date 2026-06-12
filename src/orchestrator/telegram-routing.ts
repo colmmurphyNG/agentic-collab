@@ -118,3 +118,49 @@ export function listTelegramRoutes(now: number = Date.now()): TelegramRouteEntry
 export function _resetTelegramRoutes(): void {
   routes.clear();
 }
+
+/**
+ * Pattern-match the operator's message for a comms-preference directive that
+ * indicates the operator wants to STOP receiving Telegram auto-forwards.
+ *
+ * Matched signals (case-insensitive):
+ *   - "turn off --notify" / "stop notify" / "no notify" / "stop notifying"
+ *   - "I'm at the dashboard" / "I am at the dashboard" / "back at dashboard"
+ *   - "still notifying me" (complaint form)
+ *   - "dashboard-quiet" / "dashboard quiet"
+ *
+ * Used by /api/dashboard/send + routeTelegramMessage to AUTO-CLEAR the
+ * Telegram routes when one of these is detected, pairing _default.md §12
+ * (explicit ack on comm-preference directives) with enforcement-side
+ * action. Avoids the 2026-06-12 incident where every Telegram complaint
+ * refreshed the TTL and extended the noise window.
+ *
+ * False-positive guard: bare "notify" without "stop/turn off/no/still"
+ * prefix does NOT match — e.g. "we should notify the team" stays inactive.
+ */
+const COMM_PREF_DIRECTIVE_PATTERNS: RegExp[] = [
+  /\b(turn[- ]off|stop|no|disable)\s+(?:the\s+)?(--?notify|notify|notifying|notification)/i,
+  /\bstop\s+notifying\b/i,
+  /\b(i'?m|i\s+am)\s+(at|back\s+at|back\s+on)\s+(?:the\s+)?dashboard\b/i,
+  /\bback\s+(at|on)\s+(?:the\s+)?dashboard\b/i,
+  /\bstill\s+notifying\s+me\b/i,
+  /\bdashboard[- ]quiet\b/i,
+];
+
+export function isCommPrefDirective(text: string): boolean {
+  if (!text) return false;
+  return COMM_PREF_DIRECTIVE_PATTERNS.some((re) => re.test(text));
+}
+
+/**
+ * Auto-clear handler: detect a comm-preference directive in the operator's
+ * message and clear all routes if matched. Returns the number of routes
+ * cleared (0 if no match). Logs to console on match.
+ */
+export function maybeAutoClearOnCommPref(text: string, source: string): number {
+  if (!isCommPrefDirective(text)) return 0;
+  const before = listTelegramRoutes().length;
+  routes.clear();
+  console.log(`[telegram-routing] auto-cleared ${before} routes (comm-pref directive detected in ${source})`);
+  return before;
+}
