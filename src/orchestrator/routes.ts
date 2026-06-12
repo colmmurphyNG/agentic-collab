@@ -33,7 +33,7 @@ import { UsageAggregator, renderUsageMarkdown } from './usage-aggregator.ts';
 import { DroneAuditAggregator, renderAuditMarkdown } from './drone-audit.ts';
 import { sessionName } from '../shared/agent-entity.ts';
 import { paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
-import { recordTelegramInbound, getActiveTelegramRoute, maybeAutoClearOnCommPref, isCommPrefDirective } from './telegram-routing.ts';
+import { recordTelegramInbound, getActiveTelegramRoute, maybeAutoClearOnCommPref, isCommPrefDirective, clearTelegramRoute, listTelegramRoutes, _resetTelegramRoutes } from './telegram-routing.ts';
 import type { MessageDispatcher } from './message-dispatcher.ts';
 import type { UsagePoller } from './usage-poller.ts';
 
@@ -2749,6 +2749,40 @@ route('DELETE', '/api/accounts/:name', async (_req, res, match, ctx) => {
   const removed = ctx.accountStore.remove(name);
   if (!removed) return json(res, 404, { error: 'Account not found' });
   json(res, 200, { ok: true, deleted: name });
+});
+
+// ── Telegram routes admin ──
+//
+// Telegram auto-forward (PR #37) records ephemeral routes in an in-memory map
+// when the operator sends a Telegram inbound. Each route auto-expires after
+// TELEGRAM_ROUTE_TTL_MS (default 30 min). These admin endpoints let the
+// operator inspect active routes and clear them manually — useful when
+// they've moved from Telegram back to the dashboard but the 30-min TTL is
+// still firing auto-forwards on agent replies. Cause-of-existence:
+// 2026-06-12 incident where every Telegram complaint refreshed the TTL,
+// extending the noise loop indefinitely.
+//
+//   GET    /api/telegram/routes          — list active routes
+//   DELETE /api/telegram/routes          — clear all routes (operator at dashboard)
+//   DELETE /api/telegram/routes/:agent   — clear one agent's route
+
+route('GET', '/api/telegram/routes', async (req, res, _match, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  json(res, 200, { routes: listTelegramRoutes() });
+});
+
+route('DELETE', '/api/telegram/routes', async (req, res, _match, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  const before = listTelegramRoutes().length;
+  _resetTelegramRoutes();
+  json(res, 200, { cleared: before });
+});
+
+route('DELETE', '/api/telegram/routes/:agent', async (req, res, match, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  const agent = match.pathname.groups['agent']!;
+  const cleared = clearTelegramRoute(agent);
+  json(res, 200, { cleared, agent });
 });
 
 // ── Notify ──
