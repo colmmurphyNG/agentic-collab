@@ -1288,13 +1288,14 @@ function formatRelativeAge(mtimeMs: number, nowMs: number = Date.now()): string 
 //   3. Worktree-name pattern `<persona>-NNNN` (e.g. `pwa-2391`) → base persona
 //   4. Fall back to the project's primary-persona convention
 //   5. Otherwise `unattributed`
-const KNOWN_PERSONAS = ['brain', 'tl', 'pwa', 'sfcc', 'sfcc-2298', 'qa', 'dd', 'algo', 'prev', 'tridion-expert', 'drone', 'codex-drone', 'codex-prev', 'cs'];
+const KNOWN_PERSONAS = ['brain', 'tl', 'pwa', 'sfcc', 'sfcc-2298', 'qa', 'dd', 'algo', 'prev', 'tridion-expert', 'drone', 'codex-drone', 'codex-prev', 'cs', 'ben'];
 const PROJECT_PRIMARY_PERSONA: Record<string, string> = {
   'conductor': 'brain',
   'SFCC-webapp': 'pwa',
   'SFCC-commerce': 'sfcc',
   'datadog': 'dd',
   'SFCC-Test-Suite': 'qa',
+  'enterprise-ai-platform': 'ben',
 };
 
 function attributePersona(relPath: string, project: string): string {
