@@ -276,6 +276,147 @@ route('GET', '/usage', async (_req, res, _m, ctx) => {
   }
 });
 
+// LiteLLM spend telemetry (Phase 1 of /pages/brain-litellm-pilot). Two routes:
+//   - /api/llm-spend (JSON) — per-agent spend totals + cost-table staleness
+//   - /llm-spend (HTML)     — sortable table view rendered for the dashboard
+// Both query the litellm-proxy /spend/keys endpoint using LITELLM_MASTER_KEY.
+// 60-second in-process cache prevents thrashing the proxy DB.
+
+type LlmSpendKeyRow = {
+  api_key: string;
+  key_alias: string | null;
+  spend: number;
+  metadata?: { agent?: string; provisioned_by?: string } | null;
+  created_at?: string;
+  last_used_at?: string | null;
+};
+
+type LlmSpendSnapshot = {
+  generatedAt: string;
+  proxyImage: string;
+  costTableSnapshotDate: string | null;
+  costTableAgeDays: number | null;
+  totalSpend: number;
+  byAgent: Array<{ agent: string; keyAlias: string; spend: number; lastUsedAt: string | null }>;
+};
+
+let _llmSpendCache: { at: number; data: LlmSpendSnapshot } | null = null;
+const LLM_SPEND_CACHE_MS = 60_000;
+
+async function fetchLlmSpend(): Promise<LlmSpendSnapshot> {
+  const cached = _llmSpendCache;
+  if (cached && Date.now() - cached.at < LLM_SPEND_CACHE_MS) return cached.data;
+
+  const proxyUrl = process.env['LITELLM_PROXY_URL'] ?? 'http://litellm-proxy:8080';
+  const masterKey = process.env['LITELLM_MASTER_KEY'] ?? '';
+  if (!masterKey) {
+    throw new Error('LITELLM_MASTER_KEY not set; cannot query litellm-proxy /spend/keys');
+  }
+
+  // Use Node fetch (Node 24 has it native).
+  const resp = await fetch(`${proxyUrl}/spend/keys`, {
+    headers: { Authorization: `Bearer ${masterKey}` },
+  });
+  if (!resp.ok) {
+    throw new Error(`litellm /spend/keys returned ${resp.status} ${resp.statusText}`);
+  }
+  const rows = (await resp.json()) as LlmSpendKeyRow[];
+
+  const byAgent: LlmSpendSnapshot['byAgent'] = rows
+    .map((r) => ({
+      agent: r.metadata?.agent ?? r.key_alias ?? r.api_key.slice(0, 16),
+      keyAlias: r.key_alias ?? r.api_key.slice(0, 16),
+      spend: typeof r.spend === 'number' ? r.spend : 0,
+      lastUsedAt: r.last_used_at ?? null,
+    }))
+    .sort((a, b) => b.spend - a.spend);
+
+  const totalSpend = byAgent.reduce((sum, a) => sum + a.spend, 0);
+
+  // Cost-table-staleness signal (R3 mitigation). Image SHA / version is hard-
+  // pinned in docker-compose.yml — we surface that string here. The snapshot
+  // date is best-effort: parsed from the LITELLM_IMAGE_SNAPSHOT_DATE env if the
+  // operator has set it (recommended on each image bump); otherwise null.
+  const proxyImage = process.env['LITELLM_IMAGE_TAG'] ?? 'ghcr.io/berriai/litellm:v1.89.1-stable';
+  const snapshotDate = process.env['LITELLM_IMAGE_SNAPSHOT_DATE'] ?? null;
+  const ageDays = snapshotDate
+    ? Math.floor((Date.now() - new Date(snapshotDate).getTime()) / 86_400_000)
+    : null;
+
+  const data: LlmSpendSnapshot = {
+    generatedAt: new Date().toISOString(),
+    proxyImage,
+    costTableSnapshotDate: snapshotDate,
+    costTableAgeDays: ageDays,
+    totalSpend,
+    byAgent,
+  };
+  _llmSpendCache = { at: Date.now(), data };
+  return data;
+}
+
+function renderLlmSpendMarkdown(s: LlmSpendSnapshot): string {
+  const lines: string[] = [];
+  lines.push('# LiteLLM spend — per-agent attribution');
+  lines.push('');
+  lines.push(`_Generated ${s.generatedAt}._`);
+  lines.push('');
+  lines.push('## Proxy + cost-table');
+  lines.push('');
+  lines.push(`- **Image**: \`${s.proxyImage}\``);
+  if (s.costTableSnapshotDate) {
+    const badge = (s.costTableAgeDays ?? 0) > 60 ? ' ⚠️ STALE — bump image' : '';
+    lines.push(`- **Cost-table snapshot**: ${s.costTableSnapshotDate} (${s.costTableAgeDays} days old)${badge}`);
+  } else {
+    lines.push(`- **Cost-table snapshot**: unknown — set \`LITELLM_IMAGE_SNAPSHOT_DATE\` in env on next image bump`);
+  }
+  lines.push('');
+  lines.push(`## Total spend: $${s.totalSpend.toFixed(4)}`);
+  lines.push('');
+  lines.push('## By agent');
+  lines.push('');
+  if (s.byAgent.length === 0) {
+    lines.push('_No spend recorded yet — proxy is up but no calls have routed through it._');
+  } else {
+    lines.push('| Agent | Spend | Last used | Virtual key |');
+    lines.push('|---|--:|---|---|');
+    for (const a of s.byAgent) {
+      const lastUsed = a.lastUsedAt ?? '_never_';
+      lines.push(`| **${a.agent}** | $${a.spend.toFixed(4)} | ${lastUsed} | \`${a.keyAlias}\` |`);
+    }
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+route('GET', '/api/llm-spend', async (req, res, _m, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  try {
+    const data = await fetchLlmSpend();
+    return json(res, 200, data);
+  } catch (e) {
+    return json(res, 500, { error: (e as Error).message });
+  }
+});
+
+route('GET', '/llm-spend', async (req, res, _m, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  try {
+    const data = await fetchLlmSpend();
+    const md = renderLlmSpendMarkdown(data);
+    const bodyHtml = renderMarkdown(md);
+    const html = wrapInHtml('LiteLLM Spend', bodyHtml, 'llm-spend');
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-cache, no-store, must-revalidate',
+    });
+    res.end(html);
+  } catch (e) {
+    res.writeHead(500, { 'content-type': 'text/plain' });
+    res.end(`LiteLLM spend report failed: ${(e as Error).message}`);
+  }
+});
+
 // PP-0 drone-offload audit surfaced at /audit (HTML) + /api/drone-audit (JSON).
 // Scans the LL-0 session FTS5 index for repetitive cheap-task patterns and
 // estimates the dollar savings of routing them to a Haiku-running drone

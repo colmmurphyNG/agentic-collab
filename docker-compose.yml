@@ -30,9 +30,57 @@ services:
       # Claude Code --add-dir path for shared persistent personas / knowledge.
       # When unset, no --add-dir flag is passed (engine adapter skips it).
       - CLAUDE_HOME_DIR=${CLAUDE_HOME_DIR:-}
+      # LiteLLM proxy gate — Phase 1 of /pages/brain-litellm-pilot. When 'true',
+      # lifecycle.ts injects ANTHROPIC_BASE_URL + per-agent virtual key on
+      # claude-engine spawns where a key is present in litellm-keys.json.
+      # Default false → orchestrator behaves identically to pre-PR. Both this
+      # AND the `--profile litellm` compose flag must be on for Phase 1 active.
+      - LITELLM_PROXY_ENABLED=${LITELLM_PROXY_ENABLED:-false}
+      # Override the per-agent ANTHROPIC_BASE_URL injection target (defaults
+      # to the compose-network service name). Useful for pointing at an
+      # out-of-cluster LiteLLM instance during testing.
+      - LITELLM_PROXY_URL=${LITELLM_PROXY_URL:-http://litellm-proxy:8080}
     labels:
       io.agentic-collab.role: orchestrator
     restart: unless-stopped
 
+  # LiteLLM proxy — Phase 1 LLM gateway for per-agent cost attribution.
+  # Opt-in via `--profile litellm` on docker-compose up (so forks that don't
+  # use it don't start the container). The orchestrator's LITELLM_PROXY_ENABLED
+  # env additionally gates whether agents are wired through the proxy on spawn —
+  # both flags must be on for Phase 1 to be active.
+  # Brain backlog: extend to multi-vendor (OpenAI / Azure / Bedrock) in Phase 2.
+  litellm-proxy:
+    # SHA-pinned (via version tag) per R3 mitigation in
+    # /pages/brain-litellm-pilot-risks-addendum — bumping needs to be a
+    # deliberate action, not unattended pull. Bump cadence: monthly cron check
+    # surfaces a brain backlog item when Anthropic pricing-table entries change.
+    image: ghcr.io/berriai/litellm:v1.89.1-stable
+    profiles: ["litellm"]
+    ports:
+      # Host port (default 4000) — orchestrator + agents reach this via
+      # http://litellm-proxy:8080 over the compose network; the host
+      # publish is for operator probing only.
+      - "${LITELLM_HOST_PORT:-4000}:8080"
+    environment:
+      # Upstream Anthropic credential. Workspace-scoped completion key
+      # (sk-ant-api03-...) from the operator's Anthropic Console. Phase 1
+      # source: workspace-sandbox workspace.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Master key for /key/generate + /spend/* admin endpoints. Operator-
+      # provisioned at first-run, persisted to ~/.config/agentic-collab/.env
+      # as LITELLM_MASTER_KEY. Without this, the proxy boots in unauthenticated
+      # mode and any client can call /key/generate.
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-}
+      - DATABASE_URL=sqlite:////data/litellm.db
+    volumes:
+      - ./litellm-config.yaml:/app/config.yaml:ro
+      - litellm-data:/data
+    command: ["--config", "/app/config.yaml", "--port", "8080"]
+    labels:
+      io.agentic-collab.role: litellm-proxy
+    restart: unless-stopped
+
 volumes:
   orchestrator-data:
+  litellm-data:

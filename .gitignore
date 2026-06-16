@@ -11,3 +11,4 @@ src/test/ui/snapshots/
 *.log
 .build-version
 .build-image-sha
+litellm-keys.json

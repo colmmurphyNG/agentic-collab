@@ -62,8 +62,41 @@ function prependExports(cmd: string, entries: Array<[string, string]>): string {
   return `export ${assignments} && ${cmd}`;
 }
 
-/** Wrap a launch command with base exports plus persona-defined launch env. */
-function withLaunchEnv(agent: AgentRecord, cmd: string, personaFile: string, accountHome?: string): string {
+/**
+ * Load the per-agent LiteLLM virtual-key map from
+ * `$AGENTIC_COLLAB_CONFIG_DIR/litellm-keys.json` (default /config/agentic-collab).
+ * Returns an empty object if the file is missing or unparseable — that is a
+ * normal/expected state when LiteLLM is not in use.
+ *
+ * Cached per orchestrator process. Re-read by recycling the orchestrator (or
+ * adding the file to a watch list if we ever need hot-reload — not needed for
+ * Phase 1; key rotation is a planned-event flow).
+ */
+let _litellmKeysCache: Record<string, string> | null = null;
+function loadLitellmKeys(): Record<string, string> {
+  if (_litellmKeysCache !== null) return _litellmKeysCache;
+  const configDir = process.env['AGENTIC_COLLAB_CONFIG_DIR'] ?? '/config/agentic-collab';
+  const path = join(configDir, 'litellm-keys.json');
+  if (!existsSync(path)) { _litellmKeysCache = {}; return _litellmKeysCache; }
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+    const out: Record<string, string> = {};
+    for (const [agent, key] of Object.entries(parsed)) {
+      if (typeof key === 'string' && key.length > 0) out[agent] = key;
+    }
+    _litellmKeysCache = out;
+    return out;
+  } catch (err) {
+    console.warn(`[lifecycle] failed to parse ${path}: ${(err as Error).message}`);
+    _litellmKeysCache = {};
+    return _litellmKeysCache;
+  }
+}
+
+/** Wrap a launch command with base exports plus persona-defined launch env.
+ *  Exported for test access only — production callers use it via the wrapping
+ *  helpers below. */
+export function withLaunchEnv(agent: AgentRecord, cmd: string, personaFile: string, accountHome?: string): string {
   const baseEntries: Array<[string, string]> = [
     ['COLLAB_AGENT', agent.name],
     ['COLLAB_PERSONA_FILE', personaFile],
@@ -72,11 +105,31 @@ function withLaunchEnv(agent: AgentRecord, cmd: string, personaFile: string, acc
   if (accountHome) {
     baseEntries.push(['HOME', accountHome]);
   }
+  // LiteLLM proxy injection (Phase 1, /pages/brain-litellm-pilot). Two-gate
+  // opt-in: LITELLM_PROXY_ENABLED=true AND the agent has a provisioned virtual
+  // key in litellm-keys.json. Both must hold or we pass through to direct
+  // upstream (SSO or per-agent ANTHROPIC_API_KEY from launchEnv). Currently
+  // claude-engine only — codex personas use OpenAI not Anthropic.
+  if (process.env['LITELLM_PROXY_ENABLED'] === 'true' && agent.engine === 'claude') {
+    const virtualKey = loadLitellmKeys()[agent.name];
+    if (virtualKey) {
+      const proxyUrl = process.env['LITELLM_PROXY_URL'] ?? 'http://litellm-proxy:8080';
+      baseEntries.push(['ANTHROPIC_BASE_URL', proxyUrl]);
+      baseEntries.push(['ANTHROPIC_API_KEY', virtualKey]);
+    }
+  }
   const reservedKeys = new Set(baseEntries.map(([key]) => key));
   const launchEntries = Object.entries(agent.launchEnv ?? {})
     .filter(([key]) => !reservedKeys.has(key));
   return prependExports(cmd, [...baseEntries, ...launchEntries]);
 }
+
+/**
+ * Test-only: reset the cached LiteLLM keys map so a unit test can flip the
+ * keys-file contents and re-read without recycling the process. Not exported
+ * via the public surface; tests reach in via direct module import.
+ */
+export function _resetLitellmKeysCacheForTesting(): void { _litellmKeysCache = null; }
 
 /** Wrap the first shell step in a pipeline with agent env vars (same as withLaunchEnv for paste mode). */
 function wrapFirstShellStep(steps: PipelineStep[], agent: AgentRecord, personaFile: string, accountHome?: string): PipelineStep[] {
