@@ -283,18 +283,37 @@ export class DroneAuditAggregator {
   }
 
   /** Slug → agent name heuristic. The LL-0 events table doesn't carry agent
-   *  name directly; project_slug encodes the cwd which often maps to an agent. */
+   *  name directly; project_slug encodes the cwd which often maps to an agent.
+   *
+   *  Mapping rules are operator-configured via env (per-fork persona/project
+   *  layout differs). Format:
+   *    SLUG_AGENT_MAPPINGS=SUBSTRING:label,SUBSTRING:label,...
+   *  e.g. `project-a:agent-a,project-b:agent-b`. First substring match wins.
+   *
+   *  Falls back to the slug's last segment stripped of the leading user-path
+   *  noise so unmapped slugs still produce something semi-readable. */
   private slugToAgent(slug: string): string {
-    // -Users-test-user-dev-conductor → conductor; brain/tl etc. live there
     if (slug.endsWith('-conductor')) return 'conductor-agents';
-    if (slug.includes('project-c')) return 'qa';
-    if (slug.includes('project-a')) return 'pwa';
-    if (slug.includes('project-b')) return 'sfcc';
-    if (slug.includes('project-d')) return 'algo';
-    if (slug.includes('Datadog')) return 'dd';
-    if (slug === '-Users-test-user-dev') return 'operator-dev-root';
-    return slug.replace(/^-Users-test-user-/, '').replace(/-/g, '/');
+    for (const [needle, label] of slugMappings()) {
+      if (slug.includes(needle)) return label;
+    }
+    // Generic fallback: strip leading `-Users-<user>-` if present, then dashes → slashes.
+    return slug.replace(/^-Users-[^-]+(?:-[^-]+)?-/, '').replace(/-/g, '/');
   }
+}
+
+/** Parse SLUG_AGENT_MAPPINGS into an ordered array of [substring, label] pairs.
+ *  Empty/unset → empty array (no operator-specific mappings; falls back to the
+ *  generic slug-cleanup transform). */
+function slugMappings(): Array<[string, string]> {
+  const raw = process.env['SLUG_AGENT_MAPPINGS'];
+  if (!raw) return [];
+  const out: Array<[string, string]> = [];
+  for (const pair of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
+    const [needle, label] = pair.split(':').map((s) => s.trim());
+    if (needle && label) out.push([needle, label]);
+  }
+  return out;
 }
 
 

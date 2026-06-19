@@ -75,7 +75,7 @@ describe('CLAUDE_ACTIVITY_INDICATOR catches the spinner-line activity context (N
   const re = new RegExp(activity.regex);
 
   it('matches the Watching X for N… (Ys) spinner shape', () => {
-    const sample = '✶ Watching TICKET-NNNN PR #1395 Sonar fix + CI… (10m 20s · ↓ 9.0k tokens)';
+    const sample = '✶ Watching TICKET-2472 PR #1395 Sonar fix + CI… (10m 20s · ↓ 9.0k tokens)';
     const m = sample.match(re);
     assert.ok(m, 'should match the Watching spinner line');
     assert.equal(m![1], 'Watching');
@@ -95,7 +95,7 @@ describe('CLAUDE_ACTIVITY_INDICATOR catches the spinner-line activity context (N
   });
 
   it('does not falsely match prose mentions of the spinner verbs', () => {
-    assert.doesNotMatch('We are watching TICKET-NNNN closely.', re);
+    assert.doesNotMatch('We are watching TICKET-2472 closely.', re);
     assert.doesNotMatch('I brewed coffee for 13 seconds before commit.', re);
     assert.doesNotMatch('The cogitated decision was made on 2026-05-30.', re);
   });
@@ -156,7 +156,7 @@ describe('CLAUDE_APPROVAL_INDICATOR regex covers all three prompt shapes', () =>
     assert.match('  Do you want to proceed?  ', re);
   });
 
-  it('matches the AskUserQuestion footer (the gap that caused pwa-2391 TICKET-NNNN to go silent)', () => {
+  it('matches the AskUserQuestion footer (the gap that caused a worktree-suffixed persona to go silent)', () => {
     assert.match('Enter to select · ↑/↓ to navigate · Esc to cancel', re);
     assert.match('Enter to select - up/down to navigate - Esc to cancel', re);
   });

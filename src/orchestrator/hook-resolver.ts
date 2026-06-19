@@ -72,8 +72,8 @@ export type TemplateVars = {
    * "Trust this directory?" prompt that fires when an agent's cwd or
    * a sibling worktree directory has never been seen before.
    *
-   * Example: CLAUDE_ADD_DIRS="/Users/x/dev/project-b-worktrees,/Users/x/dev/conductor-worktrees"
-   *   →  --add-dir '/Users/x/dev/project-b-worktrees' --add-dir '/Users/x/dev/conductor-worktrees'
+   * Example: CLAUDE_ADD_DIRS="/Users/x/dev/project-a-worktrees,/Users/x/dev/conductor-worktrees"
+   *   →  --add-dir '/Users/x/dev/project-a-worktrees' --add-dir '/Users/x/dev/conductor-worktrees'
    */
   ADD_DIR_FLAGS?: string;
   /** Captured variables from pipeline capture steps (fallback for $VAR interpolation) */
