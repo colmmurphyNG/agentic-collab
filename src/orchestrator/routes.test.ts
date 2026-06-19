@@ -1480,6 +1480,7 @@ describe('API Routes — /scratch (R: render-only endpoint)', () => {
   let tmpDir: string;
   let projectA: string;
   let projectB: string;
+  let projectC: string;
   let prevProjectRenderRoots: string | undefined;
   /** Set to non-null to enable auth-required mode in the test server. */
   let testSecret: string | null;
@@ -1489,18 +1490,38 @@ describe('API Routes — /scratch (R: render-only endpoint)', () => {
     tmpDir = realpathSync(mkdtempSync(join(tmpdir(), 'agentic-scratch-test-')));
     projectA = join(tmpDir, 'project-a');
     projectB = join(tmpDir, 'project-b');
+    projectC = join(tmpDir, 'project-c');
     mkdirSync(join(projectA, 'scratch', 'sub'), { recursive: true });
     mkdirSync(join(projectB, 'scratch'), { recursive: true });
+    // project-c models the monorepo layout (project-a/retail-react-app/scratch).
+    // Has both a top-level scratch dir and a nested one inside `subapp/`.
+    mkdirSync(join(projectC, 'scratch'), { recursive: true });
+    mkdirSync(join(projectC, 'subapp', 'scratch', 'pr-1500-review'), { recursive: true });
+    mkdirSync(join(projectC, 'unrelated-dir'), { recursive: true });
 
     // Seed: project-a has two markdown files (one nested), project-b has one.
     writeFileSync(join(projectA, 'scratch', 'top.md'), '# Top\nProject A top-level note.');
     writeFileSync(join(projectA, 'scratch', 'sub', 'deep.md'), '# Deep\nProject A nested note.');
     writeFileSync(join(projectB, 'scratch', 'b.md'), '# B\nProject B note.');
+    // project-c: top-level + nested-scratch layout for the discoverScratchRoots path.
+    writeFileSync(join(projectC, 'scratch', 'c-top.md'), '# C-Top\nProject C top-level note.');
+    writeFileSync(join(projectC, 'subapp', 'scratch', 'nested.md'), '# Nested\nProject C nested-scratch note.');
+    writeFileSync(join(projectC, 'subapp', 'scratch', 'pr-1500-review', 'comments.md'), '# PR-1500\nReview comments.');
+    // Unrelated subdir without its own scratch must not be scanned.
+    writeFileSync(join(projectC, 'unrelated-dir', 'should-not-appear.md'), '# Hidden\nShould never appear.');
     // Non-markdown file should be invisible to the index and rejected by render.
     writeFileSync(join(projectA, 'scratch', 'secret.txt'), 'should not appear');
 
+    // Persona-discovery directory — attribution heuristic reads this at request
+    // time via getKnownPersonas(). Seed `prev` so the pr-NNNN attribution rule
+    // ("dir matching pr-NNNN-* → prev") fires under test.
+    const personasFixtureDir = join(tmpDir, 'personas');
+    mkdirSync(personasFixtureDir, { recursive: true });
+    writeFileSync(join(personasFixtureDir, 'prev.md'), '---\nengine: claude\n---\n');
+    process.env['PERSONAS_DIR'] = personasFixtureDir;
+
     prevProjectRenderRoots = process.env['PROJECT_RENDER_ROOTS'];
-    process.env['PROJECT_RENDER_ROOTS'] = `${projectA},${projectB}`;
+    process.env['PROJECT_RENDER_ROOTS'] = `${projectA},${projectB},${projectC}`;
     testSecret = null; // dev mode by default; per-test can flip via setSecret()
 
     db = new Database(join(tmpDir, 'test.db'));
@@ -1691,8 +1712,57 @@ describe('API Routes — /scratch (R: render-only endpoint)', () => {
       assert.equal(status, 200);
       assert.match(body, /No projects are configured/);
     } finally {
-      process.env['PROJECT_RENDER_ROOTS'] = `${projectA},${projectB}`;
+      process.env['PROJECT_RENDER_ROOTS'] = `${projectA},${projectB},${projectC}`;
     }
+  });
+
+  // ── nested-scratch discovery (monorepo layouts like project-a/retail-react-app/scratch) ──
+
+  it('GET /scratch surfaces nested-scratch files with the subdir as a URL prefix', async () => {
+    const { status, body } = await getHtml('/scratch');
+    assert.equal(status, 200);
+    // Top-level project-c file still appears at the bare path.
+    assert.match(body, /\/scratch\/project-c\/c-top\.md/);
+    // Nested file appears with the `subapp/` prefix, NOT `subapp/scratch/`
+    // (the inner `scratch/` is implicit — the discoverScratchRoots root strips it).
+    assert.match(body, /\/scratch\/project-c\/subapp\/nested\.md/);
+    assert.match(body, /\/scratch\/project-c\/subapp\/pr-1500-review\/comments\.md/);
+    // Sibling dir without its own scratch/ must not be scanned.
+    assert.ok(!body.includes('should-not-appear'), 'subdir without scratch/ must not be walked');
+  });
+
+  it('GET /scratch/:project/subapp/<file> renders a nested-scratch .md file', async () => {
+    const { status, body } = await getHtml('/scratch/project-c/subapp/nested.md');
+    assert.equal(status, 200);
+    assert.match(body, /Project C nested-scratch note/);
+  });
+
+  it('GET /scratch/:project/subapp/<deep>/<file> resolves deep paths under nested scratch', async () => {
+    const { status, body } = await getHtml('/scratch/project-c/subapp/pr-1500-review/comments.md');
+    assert.equal(status, 200);
+    assert.match(body, /Review comments/);
+  });
+
+  it('returns 404 for a nested-scratch path under a subdir that has no scratch/ child', async () => {
+    const { status, data } = await getJson('/scratch/project-c/unrelated-dir/should-not-appear.md');
+    assert.equal(status, 404);
+    assert.match(String(data.error), /File not found/);
+  });
+
+  it('attributes pr-NNNN-* nested-scratch dirs to prev (canonical PR-reviewer)', async () => {
+    const { status, body } = await getHtml('/scratch');
+    assert.equal(status, 200);
+    // The pr-1500-review entry must list **prev** as its persona (not the project-a
+    // primary fallback of `pwa`). The list row is markdown rendered to HTML:
+    // `… — <strong>prev</strong>, …`. The relevant slice should contain BOTH the
+    // path and the strong-tagged persona.
+    const prRowMatch = /pr-1500-review[\s\S]{0,200}?<strong>prev<\/strong>/i.exec(body);
+    assert.ok(prRowMatch, `expected pr-1500-review row to attribute to <strong>prev</strong> — body slice: ${body.slice(0, 500)}`);
+  });
+
+  it('path-traversal `..` is rejected on nested-scratch URLs too', async () => {
+    const { status } = await getJson('/scratch/project-c/subapp/../scratch/c-top.md');
+    assert.ok(status === 400 || status === 404, `expected traversal to be rejected, got ${status}`);
   });
 });
 

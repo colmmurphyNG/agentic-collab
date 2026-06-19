@@ -1211,8 +1211,39 @@ function getProjectRenderRoots(): Map<string, string> {
   return map;
 }
 
+type ScratchRoot = { absRoot: string; urlPrefix: string };
+
+/** Discover all scratch roots for a project — the top-level `<project>/scratch/`
+ *  plus any one-level-deep monorepo subdirectory that has its own scratch dir
+ *  (e.g. `project-a/retail-react-app/scratch/`). Returns roots ordered by
+ *  urlPrefix length descending so prefix matching in resolveScratchFile picks
+ *  the most specific. The top-level root's urlPrefix is empty. */
+function discoverScratchRoots(projectRoot: string): ScratchRoot[] {
+  const roots: ScratchRoot[] = [];
+  const topScratch = join(projectRoot, 'scratch');
+  if (existsSync(topScratch)) {
+    roots.push({ absRoot: topScratch, urlPrefix: '' });
+  }
+  let entries: Array<{ name: string; isDirectory(): boolean }>;
+  try { entries = readdirSync(projectRoot, { withFileTypes: true }); } catch { return roots; }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'scratch') continue;
+    const nested = join(projectRoot, entry.name, 'scratch');
+    if (existsSync(nested)) {
+      roots.push({ absRoot: nested, urlPrefix: `${entry.name}/` });
+    }
+  }
+  roots.sort((a, b) => b.urlPrefix.length - a.urlPrefix.length);
+  return roots;
+}
+
 /** Resolve a (project, relPath) tuple to an absolute on-disk `.md` path.
- *  Returns null + a reason string if any check fails. */
+ *  Returns null + a reason string if any check fails.
+ *
+ *  Supports nested scratch dirs via discoverScratchRoots — a relPath that
+ *  starts with `<subdir>/` resolves under `<project>/<subdir>/scratch/`
+ *  instead of `<project>/scratch/`. */
 function resolveScratchFile(project: string, relPath: string): { path: string } | { error: string; status: number } {
   if (relPath.includes('..')) return { error: 'Invalid path', status: 400 };
   if (!relPath.toLowerCase().endsWith('.md')) return { error: 'Only .md files are renderable', status: 400 };
@@ -1221,17 +1252,25 @@ function resolveScratchFile(project: string, relPath: string): { path: string } 
   const projectRoot = roots.get(project);
   if (!projectRoot) return { error: 'Unknown project', status: 404 };
 
-  const scratchRoot = join(projectRoot, 'scratch');
-  let scratchRootReal: string;
-  try { scratchRootReal = realpathSync(scratchRoot); } catch { return { error: 'Project has no scratch directory', status: 404 }; }
+  const scratchRoots = discoverScratchRoots(projectRoot);
+  if (scratchRoots.length === 0) return { error: 'Project has no scratch directory', status: 404 };
 
-  const candidate = join(scratchRoot, relPath);
+  // Pick the most-specific matching root for this relPath (roots are pre-sorted
+  // longest-prefix-first so the first match wins).
+  const matched = scratchRoots.find((r) => r.urlPrefix === '' || relPath.startsWith(r.urlPrefix));
+  if (!matched) return { error: 'File not found', status: 404 };
+
+  let scratchRootReal: string;
+  try { scratchRootReal = realpathSync(matched.absRoot); } catch { return { error: 'Project has no scratch directory', status: 404 }; }
+
+  const innerRel = matched.urlPrefix ? relPath.slice(matched.urlPrefix.length) : relPath;
+  const candidate = join(matched.absRoot, innerRel);
   if (!existsSync(candidate)) return { error: 'File not found', status: 404 };
 
   let candidateReal: string;
   try { candidateReal = realpathSync(candidate); } catch { return { error: 'File not found', status: 404 }; }
 
-  // Symlink-escape guard: realpath must stay under the project's scratch realroot.
+  // Symlink-escape guard: realpath must stay under the matched scratch realroot.
   if (!candidateReal.startsWith(scratchRootReal + '/') && candidateReal !== scratchRootReal) {
     return { error: 'Path escapes project scratch dir', status: 400 };
   }
@@ -1286,8 +1325,10 @@ function formatRelativeAge(mtimeMs: number, nowMs: number = Date.now()): string 
 //   1. Filename starts with `handoff_<persona>_<date>` → that persona
 //   2. First path segment under scratch/ is a known persona → that persona
 //   3. Worktree-name pattern `<persona>-NNNN` → base persona (numeric suffix stripped)
-//   4. Project-primary fallback (operator-configured via PROJECT_PRIMARY_PERSONAS env)
-//   5. Otherwise `unattributed`
+//   4. Dir matching `pr-NNNN-{review,refresh,nits-check,...}` → `prev` (only when
+//      `prev` is a known persona on this operator's setup; off otherwise)
+//   5. Project-primary fallback (operator-configured via PROJECT_PRIMARY_PERSONAS env)
+//   6. Otherwise `unattributed`
 //
 // Persona list is operator-local — derived at request time from the on-disk
 // persistent-agents/ directory. NOT hardcoded in this file; persona handles
@@ -1339,6 +1380,12 @@ function attributePersona(relPath: string, project: string): string {
   if (known.has(firstSeg)) return firstSeg;
   const firstSegBase = firstSeg.replace(/-\d+$/, '');
   if (known.has(firstSegBase)) return firstSegBase;
+  // PR-review directory pattern — match anywhere in the path so nested scratch
+  // dirs (e.g. `subapp/pr-NNNN-review/...`) attribute to `prev`. Only honoured
+  // when `prev` is a known persona on this operator's setup.
+  if (known.has('prev') && /(?:^|\/)pr-\d+(?:-[a-z]+)*(?:\/|$)/.test(relPath.toLowerCase())) {
+    return 'prev';
+  }
   // Project-primary fallback (operator-local env config)
   return getProjectPrimaryPersona()[project] ?? 'unattributed';
 }
@@ -1357,9 +1404,11 @@ route('GET', '/scratch', async (req, res, _match, ctx) => {
   type Entry = { project: string; relPath: string; size: number; mtimeMs: number; persona: string };
   const all: Entry[] = [];
   for (const [project, projectRoot] of roots.entries()) {
-    const scratchRoot = join(projectRoot, 'scratch');
-    for (const f of listMarkdownRecursive(scratchRoot)) {
-      all.push({ project, ...f, persona: attributePersona(f.relPath, project) });
+    for (const root of discoverScratchRoots(projectRoot)) {
+      for (const f of listMarkdownRecursive(root.absRoot)) {
+        const relPath = `${root.urlPrefix}${f.relPath}`;
+        all.push({ project, relPath, size: f.size, mtimeMs: f.mtimeMs, persona: attributePersona(relPath, project) });
+      }
     }
   }
   all.sort((a, b) => b.mtimeMs - a.mtimeMs);
