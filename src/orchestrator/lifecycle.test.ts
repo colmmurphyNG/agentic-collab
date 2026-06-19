@@ -10,8 +10,11 @@ import { shellQuote } from '../shared/utils.ts';
 import {
   spawnAgent, resumeAgent, suspendAgent, destroyAgent,
   reloadAgent, interruptAgent, compactAgent, killAgent, startWatchdog,
-  executeCustomButton, claudeAddDirFlags, type LifecycleContext,
+  executeCustomButton, claudeAddDirFlags, withLaunchEnv,
+  _resetLitellmKeysCacheForTesting,
+  type LifecycleContext,
 } from './lifecycle.ts';
+import type { AgentRecord } from '../shared/types.ts';
 
 describe('Lifecycle', () => {
   let db: Database;
@@ -2232,5 +2235,161 @@ describe('claudeAddDirFlags — CLAUDE_ADD_DIRS env → --add-dir flags', () => 
     // shellQuote replaces ' with '\'' → '/Users/x/d'\''ev/a'
     const result = claudeAddDirFlags();
     assert.ok(result.includes("'\\''"), 'inner single-quote must be shell-escaped');
+  });
+});
+
+// ── LiteLLM env injection (Phase 1 of /pages/brain-litellm-pilot) ──────────
+//
+// withLaunchEnv must:
+//   - inject ANTHROPIC_BASE_URL + virtual key when LITELLM_PROXY_ENABLED=true,
+//     agent is claude-engine, and a key is in litellm-keys.json
+//   - NOT inject when LITELLM_PROXY_ENABLED is unset / false
+//   - NOT inject when the agent has no key in the keys file (graceful pass-through)
+//   - NOT inject for non-claude engines (codex personas hit OpenAI, not Anthropic)
+describe('withLaunchEnv — LiteLLM proxy injection (Phase 1)', () => {
+  let tmpConfigDir: string;
+  let prevConfigDir: string | undefined;
+  let prevProxyEnabled: string | undefined;
+  let prevProxyUrl: string | undefined;
+
+  function makeAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
+    return {
+      name: 'test-agent',
+      engine: 'claude',
+      model: null,
+      thinking: null,
+      cwd: '/tmp/agent-cwd',
+      persona: null,
+      permissions: null,
+      proxyId: null,
+      agentGroup: null,
+      account: null,
+      launchEnv: null,
+      sortOrder: 0,
+      hookStart: null,
+      hookResume: null,
+      hookExit: null,
+      hookInterrupt: null,
+      hookCompact: null,
+      hookReload: null,
+      customButtons: null,
+      indicators: null,
+      sessionId: null,
+      state: 'void',
+      capturedVars: null,
+      version: 1,
+      tmuxSessionName: null,
+      lastActivity: null,
+      spawnCount: 0,
+      idleSince: null,
+      contextPct: null,
+      createdAt: new Date().toISOString(),
+      ...overrides,
+    } as AgentRecord;
+  }
+
+  before(() => {
+    tmpConfigDir = mkdtempSync(join(tmpdir(), 'litellm-keys-test-'));
+    prevConfigDir = process.env['AGENTIC_COLLAB_CONFIG_DIR'];
+    prevProxyEnabled = process.env['LITELLM_PROXY_ENABLED'];
+    prevProxyUrl = process.env['LITELLM_PROXY_URL'];
+    process.env['AGENTIC_COLLAB_CONFIG_DIR'] = tmpConfigDir;
+  });
+
+  after(() => {
+    rmSync(tmpConfigDir, { recursive: true, force: true });
+    if (prevConfigDir !== undefined) process.env['AGENTIC_COLLAB_CONFIG_DIR'] = prevConfigDir;
+    else delete process.env['AGENTIC_COLLAB_CONFIG_DIR'];
+    if (prevProxyEnabled !== undefined) process.env['LITELLM_PROXY_ENABLED'] = prevProxyEnabled;
+    else delete process.env['LITELLM_PROXY_ENABLED'];
+    if (prevProxyUrl !== undefined) process.env['LITELLM_PROXY_URL'] = prevProxyUrl;
+    else delete process.env['LITELLM_PROXY_URL'];
+  });
+
+  beforeEach(() => {
+    _resetLitellmKeysCacheForTesting();
+  });
+
+  it('injects ANTHROPIC_BASE_URL + virtual key when LITELLM_PROXY_ENABLED=true and key is present', () => {
+    process.env['LITELLM_PROXY_ENABLED'] = 'true';
+    writeFileSync(join(tmpConfigDir, 'litellm-keys.json'), JSON.stringify({ 'test-agent': 'sk-conductor-test-agent-abc12345' }));
+    const cmd = withLaunchEnv(makeAgent({ name: 'test-agent' }), 'claude --some-flag', '/path/to/persona.md');
+    assert.match(cmd, /ANTHROPIC_BASE_URL=/);
+    assert.match(cmd, /ANTHROPIC_API_KEY=/);
+    assert.match(cmd, /sk-conductor-test-agent-abc12345/);
+    assert.match(cmd, /http:\/\/litellm-proxy:8080/);
+  });
+
+  it('respects LITELLM_PROXY_URL override', () => {
+    process.env['LITELLM_PROXY_ENABLED'] = 'true';
+    process.env['LITELLM_PROXY_URL'] = 'http://my-litellm:9999';
+    writeFileSync(join(tmpConfigDir, 'litellm-keys.json'), JSON.stringify({ 'test-agent': 'sk-foo' }));
+    const cmd = withLaunchEnv(makeAgent({ name: 'test-agent' }), 'claude', '/p.md');
+    assert.match(cmd, /http:\/\/my-litellm:9999/);
+    delete process.env['LITELLM_PROXY_URL'];
+  });
+
+  it('does NOT inject when LITELLM_PROXY_ENABLED is unset (default behaviour)', () => {
+    delete process.env['LITELLM_PROXY_ENABLED'];
+    writeFileSync(join(tmpConfigDir, 'litellm-keys.json'), JSON.stringify({ 'test-agent': 'sk-conductor-test-agent-abc12345' }));
+    const cmd = withLaunchEnv(makeAgent({ name: 'test-agent' }), 'claude --x', '/p.md');
+    assert.doesNotMatch(cmd, /ANTHROPIC_BASE_URL=/);
+    assert.doesNotMatch(cmd, /sk-conductor-test-agent/);
+  });
+
+  it('does NOT inject when LITELLM_PROXY_ENABLED=false explicitly', () => {
+    process.env['LITELLM_PROXY_ENABLED'] = 'false';
+    writeFileSync(join(tmpConfigDir, 'litellm-keys.json'), JSON.stringify({ 'test-agent': 'sk-foo' }));
+    const cmd = withLaunchEnv(makeAgent({ name: 'test-agent' }), 'claude', '/p.md');
+    assert.doesNotMatch(cmd, /ANTHROPIC_BASE_URL=/);
+  });
+
+  it('does NOT inject when keys file is missing (graceful pass-through)', () => {
+    process.env['LITELLM_PROXY_ENABLED'] = 'true';
+    // Ensure file doesn't exist
+    const keysPath = join(tmpConfigDir, 'litellm-keys.json');
+    if (existsSync(keysPath)) rmSync(keysPath);
+    const cmd = withLaunchEnv(makeAgent({ name: 'test-agent' }), 'claude', '/p.md');
+    assert.doesNotMatch(cmd, /ANTHROPIC_BASE_URL=/);
+  });
+
+  it('does NOT inject when keys file exists but lacks this agent', () => {
+    process.env['LITELLM_PROXY_ENABLED'] = 'true';
+    writeFileSync(join(tmpConfigDir, 'litellm-keys.json'), JSON.stringify({ 'other-agent': 'sk-other' }));
+    const cmd = withLaunchEnv(makeAgent({ name: 'test-agent' }), 'claude', '/p.md');
+    assert.doesNotMatch(cmd, /ANTHROPIC_BASE_URL=/);
+    assert.doesNotMatch(cmd, /sk-other/);
+  });
+
+  it('does NOT inject for non-claude engines (codex personas use OpenAI, not Anthropic)', () => {
+    process.env['LITELLM_PROXY_ENABLED'] = 'true';
+    writeFileSync(join(tmpConfigDir, 'litellm-keys.json'), JSON.stringify({ 'test-agent': 'sk-foo' }));
+    const cmd = withLaunchEnv(makeAgent({ name: 'test-agent', engine: 'codex' }), 'codex', '/p.md');
+    assert.doesNotMatch(cmd, /ANTHROPIC_BASE_URL=/);
+  });
+
+  it('keeps base COLLAB_AGENT + COLLAB_PERSONA_FILE exports alongside the LiteLLM env (no shadowing)', () => {
+    process.env['LITELLM_PROXY_ENABLED'] = 'true';
+    writeFileSync(join(tmpConfigDir, 'litellm-keys.json'), JSON.stringify({ 'test-agent': 'sk-conductor-test-agent-deadbeef' }));
+    const cmd = withLaunchEnv(makeAgent({ name: 'test-agent' }), 'claude --x', '/path/to/persona.md');
+    assert.match(cmd, /COLLAB_AGENT='test-agent'/);
+    assert.match(cmd, /COLLAB_PERSONA_FILE=/);
+    assert.match(cmd, /ANTHROPIC_BASE_URL=/);
+    assert.match(cmd, /ANTHROPIC_API_KEY=/);
+  });
+
+  it('treats malformed keys.json as missing (warns, does not throw)', () => {
+    process.env['LITELLM_PROXY_ENABLED'] = 'true';
+    writeFileSync(join(tmpConfigDir, 'litellm-keys.json'), '{ not valid json');
+    // Should not throw; just no injection.
+    const cmd = withLaunchEnv(makeAgent({ name: 'test-agent' }), 'claude', '/p.md');
+    assert.doesNotMatch(cmd, /ANTHROPIC_BASE_URL=/);
+  });
+
+  it('ignores non-string values in keys.json (defensive against bad provisioning)', () => {
+    process.env['LITELLM_PROXY_ENABLED'] = 'true';
+    writeFileSync(join(tmpConfigDir, 'litellm-keys.json'), JSON.stringify({ 'test-agent': 42 }));
+    const cmd = withLaunchEnv(makeAgent({ name: 'test-agent' }), 'claude', '/p.md');
+    assert.doesNotMatch(cmd, /ANTHROPIC_BASE_URL=/);
   });
 });
