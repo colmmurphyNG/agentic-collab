@@ -42,11 +42,11 @@ function buildFixtureIndex(dbPath: string, rows: Array<{
     stmt.run(
       `evt-${i++}`,
       'session-fixture',
-      r.project_slug ?? '-Users-colm-murphy-dev-conductor',
+      r.project_slug ?? '-Users-test-user-dev-conductor',
       r.timestamp,
       r.role,
       r.content_kind,
-      '/Users/colm.murphy/dev/conductor',
+      '/Users/test-user/dev/conductor',
       'main',
       r.content,
     );
@@ -115,25 +115,49 @@ describe('DroneAuditAggregator', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('counts pattern occurrences and attributes to the right agent slug', async () => {
+  it('counts pattern occurrences and attributes via SLUG_AGENT_MAPPINGS env config', async () => {
     const now = new Date().toISOString();
     buildFixtureIndex(dbPath, [
       { timestamp: now, role: 'assistant', content_kind: 'tool_use', content: '[tool_use Bash] gh run view 999' },
       { timestamp: now, role: 'assistant', content_kind: 'tool_use', content: '[tool_use Bash] gh pr checks 1234' },
-      { timestamp: now, role: 'assistant', content_kind: 'tool_use', content: 'mcp__datadog__logs query', project_slug: '-Users-colm-murphy-dev-Datadog' },
-      { timestamp: now, role: 'user', content_kind: 'text', content: 'gh run view' },  // wrong role/kind — should NOT match ci-status-checks (contentKindFilter excludes text)
+      { timestamp: now, role: 'assistant', content_kind: 'tool_use', content: 'mcp__datadog__logs query', project_slug: '-Users-test-user-dev-project-a' },
+      { timestamp: now, role: 'user', content_kind: 'text', content: 'gh run view' },  // wrong role/kind — should NOT match ci-status-checks
     ]);
 
+    // Operator-local mapping that the slugToAgent helper consults.
+    const prev = process.env['SLUG_AGENT_MAPPINGS'];
+    process.env['SLUG_AGENT_MAPPINGS'] = 'project-a:agent-a';
+    try {
+      const agg = new DroneAuditAggregator({ indexPath: dbPath, windowDays: 7 });
+      const report = await agg.audit();
+
+      const ci = report.patternMatches.find(p => p.patternId === 'ci-status-checks')!;
+      assert.equal(ci.totalOccurrences, 2);
+      assert.ok(ci.estSavingsUsd > 0);
+
+      const dd = report.patternMatches.find(p => p.patternId === 'log-scans')!;
+      assert.equal(dd.totalOccurrences, 1);
+      assert.deepEqual(dd.byAgent.map(a => a.agent), ['agent-a']);
+    } finally {
+      if (prev === undefined) delete process.env['SLUG_AGENT_MAPPINGS'];
+      else process.env['SLUG_AGENT_MAPPINGS'] = prev;
+    }
+  });
+
+  it('falls back to generic slug-cleanup when SLUG_AGENT_MAPPINGS is unset', () => {
     const agg = new DroneAuditAggregator({ indexPath: dbPath, windowDays: 7 });
-    const report = await agg.audit();
-
-    const ci = report.patternMatches.find(p => p.patternId === 'ci-status-checks')!;
-    assert.equal(ci.totalOccurrences, 2);
-    assert.ok(ci.estSavingsUsd > 0);
-
-    const dd = report.patternMatches.find(p => p.patternId === 'log-scans')!;
-    assert.equal(dd.totalOccurrences, 1);
-    assert.deepEqual(dd.byAgent.map(a => a.agent), ['dd']);
+    const slugToAgent = (agg as unknown as { slugToAgent: (s: string) => string }).slugToAgent.bind(agg);
+    const prev = process.env['SLUG_AGENT_MAPPINGS'];
+    delete process.env['SLUG_AGENT_MAPPINGS'];
+    try {
+      // Generic fallback: strip the leading `-Users-<user>-` (or `-Users-<first>-<last>-`)
+      // then replace remaining dashes with slashes.
+      assert.equal(slugToAgent('-Users-test-user-dev-project-a'), 'dev/project/a');
+      assert.equal(slugToAgent('-Users-jane-doe-dev-project-b'), 'dev/project/b');
+      assert.equal(slugToAgent('-Users-test-user-dev-conductor'), 'conductor-agents');
+    } finally {
+      if (prev !== undefined) process.env['SLUG_AGENT_MAPPINGS'] = prev;
+    }
   });
 
   it('respects the windowDays cutoff', async () => {

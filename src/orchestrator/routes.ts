@@ -1187,8 +1187,8 @@ route('GET', '/pages/:slug', async (_req, res, match, ctx) => {
 //
 // Whitelist via PROJECT_RENDER_ROOTS env var (comma-separated absolute
 // paths). The basename of each entry becomes the URL segment, e.g.
-//   PROJECT_RENDER_ROOTS=/host-projects/conductor,/host-projects/SFCC-webapp
-//   → /scratch/conductor/<rel-path>, /scratch/SFCC-webapp/<rel-path>
+//   PROJECT_RENDER_ROOTS=/host-projects/project-a,/host-projects/project-b
+//   → /scratch/project-a/<rel-path>, /scratch/project-b/<rel-path>
 //
 // Security:
 //   - Path-traversal `..` rejected before resolving.
@@ -1285,35 +1285,62 @@ function formatRelativeAge(mtimeMs: number, nowMs: number = Date.now()): string 
 // Persona attribution heuristic for /scratch view:
 //   1. Filename starts with `handoff_<persona>_<date>` → that persona
 //   2. First path segment under scratch/ is a known persona → that persona
-//   3. Worktree-name pattern `<persona>-NNNN` (e.g. `pwa-2391`) → base persona
-//   4. Fall back to the project's primary-persona convention
+//   3. Worktree-name pattern `<persona>-NNNN` → base persona (numeric suffix stripped)
+//   4. Project-primary fallback (operator-configured via PROJECT_PRIMARY_PERSONAS env)
 //   5. Otherwise `unattributed`
-const KNOWN_PERSONAS = ['brain', 'tl', 'pwa', 'sfcc', 'sfcc-2298', 'qa', 'dd', 'algo', 'prev', 'tridion-expert', 'drone', 'codex-drone', 'codex-prev', 'cs'];
-const PROJECT_PRIMARY_PERSONA: Record<string, string> = {
-  'conductor': 'brain',
-  'SFCC-webapp': 'pwa',
-  'SFCC-commerce': 'sfcc',
-  'datadog': 'dd',
-  'SFCC-Test-Suite': 'qa',
-};
+//
+// Persona list is operator-local — derived at request time from the on-disk
+// persistent-agents/ directory. NOT hardcoded in this file; persona handles
+// stay in each operator's environment, never in the public codebase.
+//
+// Project-primary fallback is operator-configured via env:
+//   PROJECT_PRIMARY_PERSONAS=project-a:agent-a,project-b:agent-b
+// (comma-separated colon-pairs). Empty/unset → no fallback, `unattributed`.
+
+function getKnownPersonas(): Set<string> {
+  // Runtime discovery — the persona list IS the persistent-agents/ directory.
+  // Excludes the inherited-defaults file (_default.md) which isn't a persona.
+  try {
+    const entries = readdirSync(getPersonasDir(), { withFileTypes: true });
+    return new Set(
+      entries
+        .filter((e) => e.isFile() && e.name.endsWith('.md') && !e.name.startsWith('_'))
+        .map((e) => e.name.slice(0, -3).toLowerCase()),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function getProjectPrimaryPersona(): Record<string, string> {
+  const raw = process.env['PROJECT_PRIMARY_PERSONAS'];
+  if (!raw) return {};
+  const out: Record<string, string> = {};
+  for (const pair of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
+    const [project, persona] = pair.split(':').map((s) => s.trim());
+    if (project && persona) out[project] = persona;
+  }
+  return out;
+}
 
 function attributePersona(relPath: string, project: string): string {
-  // Handoff filename: handoff_<persona>_<timestamp>.md (persona may contain hyphens like pwa-2391)
+  const known = getKnownPersonas();
+  // Handoff filename: handoff_<persona>_<timestamp>.md
   const handoffMatch = /^handoff[-_]([a-zA-Z0-9-]+?)[-_]\d{8}/.exec(basename(relPath));
   if (handoffMatch) {
     const candidate = handoffMatch[1]!.toLowerCase();
-    // Strip worktree suffix (e.g. pwa-2391 → pwa) if base name is a known persona
+    // Strip worktree suffix (agent-NNNN → agent) if base name is a known persona
     const base = candidate.replace(/-\d+$/, '');
-    if (KNOWN_PERSONAS.includes(candidate)) return candidate;
-    if (KNOWN_PERSONAS.includes(base)) return base;
+    if (known.has(candidate)) return candidate;
+    if (known.has(base)) return base;
   }
   // First path segment matches a known persona
   const firstSeg = relPath.split('/')[0]?.toLowerCase() ?? '';
-  if (KNOWN_PERSONAS.includes(firstSeg)) return firstSeg;
+  if (known.has(firstSeg)) return firstSeg;
   const firstSegBase = firstSeg.replace(/-\d+$/, '');
-  if (KNOWN_PERSONAS.includes(firstSegBase)) return firstSegBase;
-  // Project-primary fallback
-  return PROJECT_PRIMARY_PERSONA[project] ?? 'unattributed';
+  if (known.has(firstSegBase)) return firstSegBase;
+  // Project-primary fallback (operator-local env config)
+  return getProjectPrimaryPersona()[project] ?? 'unattributed';
 }
 
 route('GET', '/scratch', async (req, res, _match, ctx) => {

@@ -593,7 +593,7 @@ describe('Lifecycle', () => {
           tmuxSession: 'agent-handoff-agent',
           proxyId: 'p1',
         });
-        db.addDashboardMessage('handoff-agent', 'to_agent', 'work in progress on PHX-1234', { topic: 'PHX-1234' });
+        db.addDashboardMessage('handoff-agent', 'to_agent', 'work in progress on TICKET-1234', { topic: 'TICKET-1234' });
 
         proxyCommands = [];
         await destroyAgent(ctx, 'handoff-agent');
@@ -619,7 +619,7 @@ describe('Lifecycle', () => {
         assert.match(body, /# Handoff: handoff-agent →/);
         assert.match(body, /State at destroy/);
         assert.match(body, /Recent dashboard messages/);
-        assert.match(body, /work in progress on PHX-1234/);
+        assert.match(body, /work in progress on TICKET-1234/);
 
         // DB row for the agent is gone.
         assert.equal(db.getAgent('handoff-agent'), undefined);
@@ -827,38 +827,38 @@ describe('Lifecycle', () => {
 
       try {
         // Master persona with a host-style cwd that the slug derivation can
-        // convert: `/Users/colm.murphy/dev/SFCC-webapp` → `-Users-colm-murphy-dev-SFCC-webapp`.
+        // convert: `/Users/<user>/dev/project-a` → `-Users-<user>-dev-project-a`.
         writeFileSync(
-          join(personasDir, 'pwa.md'),
-          '---\nengine: claude\ncwd: /Users/colm.murphy/dev/SFCC-webapp\n---\n',
+          join(personasDir, 'agent-a.md'),
+          '---\nengine: claude\ncwd: /Users/test-user/dev/project-a\n---\n',
         );
         writeFileSync(
-          join(personasDir, 'pwa-b.md'),
-          '---\nengine: claude\ncwd: /tmp/pwa-b\nderived_from: pwa\n---\n',
+          join(personasDir, 'agent-a-b.md'),
+          '---\nengine: claude\ncwd: /tmp/agent-a-b\nderived_from: agent-a\n---\n',
         );
 
-        db.createAgent({ name: 'pwa-b', engine: 'claude', cwd: '/tmp/pwa-b', proxyId: 'p1' });
-        const a = db.getAgent('pwa-b')!;
-        db.updateAgentState('pwa-b', 'active', a.version, { tmuxSession: 'agent-pwa-b', proxyId: 'p1' });
+        db.createAgent({ name: 'agent-a-b', engine: 'claude', cwd: '/tmp/agent-a-b', proxyId: 'p1' });
+        const a = db.getAgent('agent-a-b')!;
+        db.updateAgentState('agent-a-b', 'active', a.version, { tmuxSession: 'agent-agent-a-b', proxyId: 'p1' });
 
-        await destroyAgent(ctx, 'pwa-b');
+        await destroyAgent(ctx, 'agent-a-b');
 
-        const expectedMemoryDir = join(projectsDir, '-Users-colm-murphy-dev-SFCC-webapp', 'memory');
+        const expectedMemoryDir = join(projectsDir, '-Users-test-user-dev-project-a', 'memory');
         assert.ok(existsSync(expectedMemoryDir), 'project memory dir should be created');
 
         // Find the handoff_*.md file (timestamp varies per run).
-        const memoryFiles = readdirSync(expectedMemoryDir).filter((f) => f.startsWith('handoff_pwa-b_'));
+        const memoryFiles = readdirSync(expectedMemoryDir).filter((f) => f.startsWith('handoff_agent-a-b_'));
         assert.equal(memoryFiles.length, 1, `expected exactly one handoff mirror; got: ${memoryFiles.join(', ')}`);
 
         const mirroredBody = readFileSync(join(expectedMemoryDir, memoryFiles[0]!), 'utf-8');
         assert.match(mirroredBody, /^---$/m, 'mirror must have frontmatter');
         assert.match(mirroredBody, /^type: project$/m, 'mirror frontmatter must declare type: project');
-        assert.match(mirroredBody, /^name: Handoff from pwa-b$/m);
-        assert.match(mirroredBody, /# Handoff: pwa-b → pwa/);
+        assert.match(mirroredBody, /^name: Handoff from agent-a-b$/m);
+        assert.match(mirroredBody, /# Handoff: agent-a-b → agent-a/);
 
         // MEMORY.md should have a pointer entry.
         const memoryIndex = readFileSync(join(expectedMemoryDir, 'MEMORY.md'), 'utf-8');
-        assert.match(memoryIndex, /Handoff: pwa-b/);
+        assert.match(memoryIndex, /Handoff: agent-a-b/);
         assert.match(memoryIndex, new RegExp(memoryFiles[0]!.replace('.', '\\.')));
       } finally {
         process.env['PAGES_DIR'] = origPagesDir;
@@ -884,29 +884,29 @@ describe('Lifecycle', () => {
 
       try {
         writeFileSync(
-          join(personasDir, 'algo.md'),
-          '---\nengine: claude\ncwd: /Users/colm.murphy/dev/EcommerceAI\n---\n',
+          join(personasDir, 'agent-c.md'),
+          '---\nengine: claude\ncwd: /Users/test-user/dev/project-b\n---\n',
         );
         writeFileSync(
-          join(personasDir, 'algo-x.md'),
-          '---\nengine: claude\ncwd: /tmp/algo-x\nderived_from: algo\n---\n',
+          join(personasDir, 'agent-c-x.md'),
+          '---\nengine: claude\ncwd: /tmp/agent-c-x\nderived_from: agent-c\n---\n',
         );
 
         // Seed an existing MEMORY.md with an unrelated entry.
-        const memoryDir = join(projectsDir, '-Users-colm-murphy-dev-EcommerceAI', 'memory');
+        const memoryDir = join(projectsDir, '-Users-test-user-dev-project-b', 'memory');
         mkdirSync(memoryDir, { recursive: true });
         const preexisting = '- [Existing entry](existing.md) — preserved across handoff writes\n';
         writeFileSync(join(memoryDir, 'MEMORY.md'), preexisting);
 
-        db.createAgent({ name: 'algo-x', engine: 'claude', cwd: '/tmp/algo-x', proxyId: 'p1' });
-        const a = db.getAgent('algo-x')!;
-        db.updateAgentState('algo-x', 'active', a.version, { tmuxSession: 'agent-algo-x', proxyId: 'p1' });
+        db.createAgent({ name: 'agent-c-x', engine: 'claude', cwd: '/tmp/algo-x', proxyId: 'p1' });
+        const a = db.getAgent('agent-c-x')!;
+        db.updateAgentState('agent-c-x', 'active', a.version, { tmuxSession: 'agent-algo-x', proxyId: 'p1' });
 
-        await destroyAgent(ctx, 'algo-x');
+        await destroyAgent(ctx, 'agent-c-x');
 
         const memoryIndex = readFileSync(join(memoryDir, 'MEMORY.md'), 'utf-8');
         assert.ok(memoryIndex.includes(preexisting), 'pre-existing MEMORY.md entries must be preserved');
-        assert.match(memoryIndex, /Handoff: algo-x/, 'new pointer must be appended');
+        assert.match(memoryIndex, /Handoff: agent-c-x/, 'new pointer must be appended');
       } finally {
         process.env['PAGES_DIR'] = origPagesDir;
         process.env['PERSONAS_DIR'] = origPersonasDir;
@@ -929,19 +929,19 @@ describe('Lifecycle', () => {
       delete process.env['CLAUDE_PROJECTS_DIR'];
 
       try {
-        writeFileSync(join(personasDir, 'brain.md'), '---\nengine: claude\ncwd: /Users/colm.murphy/dev/conductor\n---\n');
+        writeFileSync(join(personasDir, 'agent-d.md'), '---\nengine: claude\ncwd: /Users/test-user/dev/project-c\n---\n');
 
-        db.createAgent({ name: 'brain', engine: 'claude', cwd: '/Users/colm.murphy/dev/conductor', proxyId: 'p1' });
-        const a = db.getAgent('brain')!;
-        db.updateAgentState('brain', 'active', a.version, { tmuxSession: 'agent-brain', proxyId: 'p1' });
+        db.createAgent({ name: 'agent-d', engine: 'claude', cwd: '/Users/test-user/dev/project-c', proxyId: 'p1' });
+        const a = db.getAgent('agent-d')!;
+        db.updateAgentState('agent-d', 'active', a.version, { tmuxSession: 'agent-agent-d', proxyId: 'p1' });
 
-        await destroyAgent(ctx, 'brain');
+        await destroyAgent(ctx, 'agent-d');
 
         // The /pages handoff must still exist (mirror is additive, not a
         // replacement). And destroy must complete.
         const pages = db.listPages();
-        assert.ok(pages.some((p) => p.slug.startsWith('handoff-brain-')), 'handoff page must still be written without CLAUDE_PROJECTS_DIR');
-        assert.equal(db.getAgent('brain'), undefined, 'destroy must complete');
+        assert.ok(pages.some((p) => p.slug.startsWith('handoff-agent-d-')), 'handoff page must still be written without CLAUDE_PROJECTS_DIR');
+        assert.equal(db.getAgent('agent-d'), undefined, 'destroy must complete');
       } finally {
         process.env['PAGES_DIR'] = origPagesDir;
         process.env['PERSONAS_DIR'] = origPersonasDir;
@@ -2194,8 +2194,8 @@ describe('claudeAddDirFlags — CLAUDE_ADD_DIRS env → --add-dir flags', () => 
   });
 
   it('should emit a single --add-dir flag for one path', () => {
-    process.env['CLAUDE_ADD_DIRS'] = '/Users/x/dev/SFCC-commerce-worktrees';
-    assert.equal(claudeAddDirFlags(), `--add-dir '/Users/x/dev/SFCC-commerce-worktrees'`);
+    process.env['CLAUDE_ADD_DIRS'] = '/Users/x/dev/project-a-worktrees';
+    assert.equal(claudeAddDirFlags(), `--add-dir '/Users/x/dev/project-a-worktrees'`);
   });
 
   it('should emit one --add-dir per comma-separated path', () => {

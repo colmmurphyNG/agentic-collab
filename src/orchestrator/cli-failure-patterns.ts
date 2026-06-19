@@ -47,9 +47,9 @@ export function stripCliFailureLines(captured: string): string {
  * onboarding heredoc can drop the shell into.
  */
 // User-and-host character class includes word chars + `.` + `-` so common
-// shapes like `colm.murphy@IE-colm.murph-M` match. Plain `\w+` (no dot/dash)
-// silently misses real-world macOS/Linux usernames + hostnames — the bug
-// that let tl's bare-zsh pane go undetected during today's incident.
+// shapes like `<first.last>@<HOST-with-dots>` match. Plain `\w+` (no dot/dash)
+// silently misses real-world macOS/Linux usernames + hostnames containing
+// dots or dashes — a class of bugs where bare-zsh panes went undetected.
 const USER_HOST = String.raw`[\w.-]+@[\w.-]+`;
 export const shellPromptPatterns: readonly RegExp[] = [
   new RegExp(`${USER_HOST}[:\\s].*[$%#>]\\s*$`),                     // user@host:path$ / user@host path% / root@host:~#
