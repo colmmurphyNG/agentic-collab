@@ -1123,13 +1123,13 @@ function resolveMasterPersona(name: string): string {
 }
 
 /**
- * Map a host-side project directory (e.g. `/Users/test-user/dev/project-a`)
+ * Map a host-side project directory (e.g. `/Users/<user>/dev/project-a`)
  * to the Claude Code projects slug convention used by `~/.claude/projects/`:
  * a leading `-` followed by the absolute path with each `/` AND each `.`
- * replaced by `-`. The `.` mapping is what turns `test-user` (the host
- * username with a dot) into `test-user` in the slug.
+ * replaced by `-`. The `.` mapping is what turns a username containing a dot
+ * (e.g. `first.last`) into `first-last` in the slug.
  *
- * `/Users/test-user/dev/conductor` → `-Users-test-user-dev-conductor`
+ * `/Users/<user>/dev/conductor` → `-Users-<user>-dev-conductor`
  *
  * Returns null if the input is not an absolute path.
  */

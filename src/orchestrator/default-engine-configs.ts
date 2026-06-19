@@ -33,8 +33,8 @@ const CONTEXT_LIMIT_INDICATOR = { id: 'context-limit', regex: 'Context limit rea
 //                                        "Enter to select · ↑/↓ to navigate · Esc to cancel"
 // Without shape 3, the indicator-bridge (PR #41) doesn't fire on AskUserQuestion
 // prompts and the question never surfaces to the Messages thread (empirical
-// trigger: pwa-2391 TICKET-NNNN npm-install recovery, 2026-05-30). All three shapes
-// folded into the default regex; per-persona overrides win when present.
+// trigger: a worktree-suffixed persona's npm-install recovery 2026-05-30). All
+// three shapes folded into the default regex; per-persona overrides win when present.
 const CLAUDE_APPROVAL_INDICATOR = {
   id: 'approval',
   regex: '(Yes)\\s*/\\s*(No)\\s*/\\s*(Always allow)|Do you want to proceed\\?|Enter to select.{1,30}to navigate.{1,30}Esc to cancel',

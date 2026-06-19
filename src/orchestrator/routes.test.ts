@@ -1989,9 +1989,9 @@ describe('recoverFailedAgents (HH — refuse to heal when CLI gone but pane aliv
     seedFailedAgent('dead-tl', 'proxy-x');
     captureResponse = [
       'zsh: bad pattern: [from:',
-      "test-user@test-host dev % [from: dashboard]: 'hi'",
+      "user.name@host-shape dev % [from: dashboard]: 'hi'",
       'zsh: bad pattern: [from:',
-      'test-user@test-host dev %',
+      'user.name@host-shape dev %',
     ].join('\n');
 
     await recoverFailedAgents(makeCtx(), 'proxy-x');

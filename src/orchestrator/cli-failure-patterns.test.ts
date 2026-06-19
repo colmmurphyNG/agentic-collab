@@ -62,15 +62,15 @@ describe('cli-failure-patterns', () => {
   });
 
   describe('shellPromptPatterns + paneEndsWithShellPrompt (HH)', () => {
-    it('should match the operator-incident zsh prompt at end of pane', () => {
+    it('should match a realistic zsh prompt with dotted user + dashed host at end of pane', () => {
       const pane = [
         'zsh: bad pattern: [from:',
-        "test-user@test-host dev % [from: dashboard, reply with collab send dashboard --topic foo]: 'hi'",
+        "user.name@host-shape dev % [from: dashboard, reply with collab send dashboard --topic foo]: 'hi'",
         'zsh: bad pattern: [from:',
-        'test-user@test-host dev %',
+        'user.name@host-shape dev %',
       ].join('\n');
       assert.equal(paneEndsWithShellPrompt(pane), true,
-        'tl-incident shape: pane ending in `user@host path %` must be detected as shell prompt');
+        'pane ending in `<user>@<host> path %` (with dots/dashes) must be detected as shell prompt');
     });
 
     it('should match bash prompt at end of pane', () => {
