@@ -10,7 +10,8 @@ import { shellQuote } from '../shared/utils.ts';
 import {
   spawnAgent, resumeAgent, suspendAgent, destroyAgent,
   reloadAgent, interruptAgent, compactAgent, killAgent, startWatchdog,
-  executeCustomButton, claudeAddDirFlags, withLaunchEnv,
+  executeCustomButton, executeIndicatorAction, normalizePipelineSteps,
+  claudeAddDirFlags, withLaunchEnv,
   _resetLitellmKeysCacheForTesting,
   type LifecycleContext,
 } from './lifecycle.ts';
@@ -2391,5 +2392,155 @@ describe('withLaunchEnv — LiteLLM proxy injection (Phase 1)', () => {
     writeFileSync(join(tmpConfigDir, 'litellm-keys.json'), JSON.stringify({ 'test-agent': 42 }));
     const cmd = withLaunchEnv(makeAgent({ name: 'test-agent' }), 'claude', '/p.md');
     assert.doesNotMatch(cmd, /ANTHROPIC_BASE_URL=/);
+  });
+});
+
+// ── T1: indicator-action keystroke field + $N interpolation guards ─────────
+//
+// Cherry-picked from sammons/agentic-collab@41fec81. Pre-fix, every default
+// indicator action dispatched `keys: undefined` to the proxy because the
+// defaults wrote steps as { type: 'keystroke', keystroke: '...' } but the
+// executor only read step.key. The $N interpolation path also threw on
+// step.key.replace(...) when the field was undefined.
+describe('executeIndicatorAction — keystroke field + $N interpolation (T1)', () => {
+  let db: Database;
+  let tmpDir: string;
+  let proxyCommands: ProxyCommand[];
+  let ctx: LifecycleContext;
+
+  before(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'lifecycle-t1-test-'));
+    db = new Database(join(tmpDir, 'test.db'));
+  });
+
+  after(() => {
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    proxyCommands = [];
+    ctx = {
+      db,
+      locks: new LockManager(db.rawDb),
+      proxyDispatch: async (_proxyId: string, command: ProxyCommand): Promise<ProxyResponse> => {
+        proxyCommands.push(command);
+        return { ok: true };
+      },
+      orchestratorHost: 'http://localhost:3000',
+    } as unknown as LifecycleContext;
+  });
+
+  function createIndicatorAgent(name: string, indicators: unknown): void {
+    db.createAgent({
+      name,
+      engine: 'claude',
+      cwd: '/tmp',
+      proxyId: 'p1',
+      indicators: JSON.stringify(indicators),
+    } as Parameters<typeof db.createAgent>[0]);
+    const agent = db.getAgent(name)!;
+    db.updateAgentState(name, 'active', agent.version, {
+      tmuxSession: `agent-${name}`,
+      proxyId: 'p1',
+    });
+  }
+
+  it('executes an action whose steps use the legacy keystroke field', async () => {
+    createIndicatorAgent('indicator-legacy-spelling', [{
+      id: 'file-permission',
+      regex: 'Do you want to .+\\?',
+      badge: 'Needs Approval',
+      style: 'warning',
+      actions: {
+        'Yes': [{ type: 'keystroke', keystroke: '1' }],
+      },
+    }]);
+
+    proxyCommands = [];
+    await executeIndicatorAction(ctx, 'indicator-legacy-spelling', 'file-permission', 'Yes');
+
+    const keys = proxyCommands.filter(c => c.action === 'send_keys');
+    assert.deepEqual(
+      keys.map(c => (c as { keys: string }).keys),
+      ['1'],
+      'legacy keystroke-spelled step should dispatch its key',
+    );
+  });
+
+  it('interpolates $N action keys when steps use the legacy keystroke field', async () => {
+    createIndicatorAgent('indicator-legacy-interp', [{
+      id: 'approval',
+      regex: '(Yes)\\s*/\\s*(No)',
+      badge: 'Needs Approval',
+      style: 'warning',
+      actions: {
+        '$1': [{ type: 'keystroke', keystroke: '$1' }],
+        '$2': [{ type: 'keystroke', keystroke: '$2' }],
+      },
+    }]);
+
+    proxyCommands = [];
+    const interpCtx: LifecycleContext = {
+      ...ctx,
+      proxyDispatch: async (_proxyId: string, command: ProxyCommand): Promise<ProxyResponse> => {
+        proxyCommands.push(command);
+        if (command.action === 'capture') {
+          return { ok: true, data: 'Do it? Yes / No\n' };
+        }
+        return { ok: true };
+      },
+    };
+    // Pre-fix this threw: TypeError step.key.replace is not a function
+    await executeIndicatorAction(interpCtx, 'indicator-legacy-interp', 'approval', 'Yes');
+
+    const keys = proxyCommands.filter(c => c.action === 'send_keys');
+    assert.deepEqual(
+      keys.map(c => (c as { keys: string }).keys),
+      ['Yes'],
+      '$1 should interpolate to the regex capture and dispatch it',
+    );
+  });
+
+  it('skips a keystroke step with neither key nor keystroke without throwing', async () => {
+    createIndicatorAgent('indicator-malformed-step', [{
+      id: 'broken',
+      regex: 'whatever',
+      badge: 'Broken',
+      style: 'warning',
+      actions: {
+        'Go': [
+          { type: 'keystroke' },
+          { type: 'shell', command: 'echo after' },
+        ],
+      },
+    }]);
+
+    proxyCommands = [];
+    await executeIndicatorAction(ctx, 'indicator-malformed-step', 'broken', 'Go');
+
+    const keys = proxyCommands.filter(c => c.action === 'send_keys' && (c as { keys?: unknown }).keys !== 'Enter');
+    assert.equal(keys.length, 0, 'malformed keystroke step should not dispatch');
+    const pastes = proxyCommands.filter(c => c.action === 'paste');
+    assert.ok(
+      pastes.some(c => 'text' in c && (c as { text: string }).text.includes('echo after')),
+      'pipeline should continue past the malformed step',
+    );
+  });
+});
+
+describe('normalizePipelineSteps (T1)', () => {
+  it('copies the legacy keystroke field into key and leaves canonical steps alone', () => {
+    const normalized = normalizePipelineSteps([
+      // legacy spelling smuggled past the type via JSON-shaped data
+      JSON.parse('{"type":"keystroke","keystroke":"Enter"}'),
+      { type: 'keystroke', key: 'Escape' },
+      { type: 'shell', command: 'echo hi' },
+    ]);
+    assert.deepEqual(normalized, [
+      { type: 'keystroke', keystroke: 'Enter', key: 'Enter' },
+      { type: 'keystroke', key: 'Escape' },
+      { type: 'shell', command: 'echo hi' },
+    ]);
   });
 });

@@ -153,6 +153,30 @@ function wrapLaunchResult(result: HookResult, agent: AgentRecord, personaFile: s
 }
 
 /**
+ * Normalize pipeline steps loaded from JSON (DB indicators, engine configs,
+ * custom buttons) to the canonical PipelineStep shape.
+ *
+ * The canonical keystroke step is `{ type: 'keystroke', key: 'Enter' }`
+ * (shared/types.ts), but the default indicator actions and the archived v2
+ * dashboard wrote `{ type: 'keystroke', keystroke: 'Enter' }`. Both spellings
+ * exist in seeded DB rows, so the executor accepts both: when `key` is absent
+ * the legacy `keystroke` field is copied into `key`.
+ *
+ * Adapted from upstream sammons/agentic-collab@41fec81 (T1).
+ */
+export function normalizePipelineSteps(steps: PipelineStep[]): PipelineStep[] {
+  return steps.map(step => {
+    if (step && typeof step === 'object' && step.type === 'keystroke' && typeof (step as { key?: unknown }).key !== 'string') {
+      const legacy = (step as { keystroke?: unknown }).keystroke;
+      if (typeof legacy === 'string') {
+        return { ...step, key: legacy };
+      }
+    }
+    return step;
+  });
+}
+
+/**
  * Dispatch a resolved hook result to the proxy.
  * Handles paste, keys, send sequences, pipelines, and skip modes uniformly.
  *
@@ -209,10 +233,16 @@ async function dispatchHookResult(
   }
 
   if (result.mode === 'pipeline') {
-    for (const step of result.steps) {
+    for (const step of normalizePipelineSteps(result.steps)) {
       if (step.type === 'keystrokes') {
         await dispatchHookResult(ctx, proxyId, tmuxSession, { mode: 'send', actions: step.actions }, opts);
       } else if (step.type === 'keystroke') {
+        if (typeof step.key !== 'string') {
+          // Malformed step (neither `key` nor `keystroke`) — skip instead of
+          // dispatching `keys: undefined` to the proxy.
+          console.warn(`[lifecycle] skipping malformed keystroke step (no key/keystroke field): ${JSON.stringify(step)}`);
+          continue;
+        }
         await ctx.proxyDispatch(proxyId, {
           action: 'send_keys',
           sessionName: tmuxSession,
@@ -2197,15 +2227,24 @@ export async function executeIndicatorAction(
       for (const [key, val] of Object.entries(indicator.actions)) {
         const interpolatedKey = key.replace(/\$(\d+)/g, (_m, idx) => match![parseInt(idx, 10)] ?? '');
         if (interpolatedKey === actionName && Array.isArray(val)) {
-          // Interpolate $N in the pipeline steps too
-          steps = (val as PipelineStep[]).map(step => {
-            if (step.type === 'keystroke') return { ...step, key: step.key.replace(/\$(\d+)/g, (_m, idx) => match![parseInt(idx, 10)] ?? '') };
-            if (step.type === 'shell') return { ...step, command: step.command.replace(/\$(\d+)/g, (_m, idx) => match![parseInt(idx, 10)] ?? '') };
+          // Normalize legacy `keystroke` spelling to canonical `key`, then
+          // interpolate $N in pipeline-step fields. Guards against undefined
+          // fields so a malformed step doesn't throw on .replace().
+          steps = normalizePipelineSteps(val as PipelineStep[]).map(step => {
+            if (step.type === 'keystroke' && typeof step.key === 'string') {
+              return { ...step, key: step.key.replace(/\$(\d+)/g, (_m, idx) => match![parseInt(idx, 10)] ?? '') };
+            }
+            if (step.type === 'shell' && typeof step.command === 'string') {
+              return { ...step, command: step.command.replace(/\$(\d+)/g, (_m, idx) => match![parseInt(idx, 10)] ?? '') };
+            }
             return step;
           });
           break;
         }
       }
+    } else if (steps) {
+      // Exact-match action — also normalize so the dispatch reads `key`.
+      steps = normalizePipelineSteps(steps);
     }
 
     if (!steps || !Array.isArray(steps)) {
