@@ -142,16 +142,23 @@ export function renderMarkdown(md: string): string {
       continue;
     }
 
-    // Paragraph
+    // Paragraph — always consume the current line first so `i` advances by at
+    // least one on every iteration. The block-dispatch above and this
+    // continuation guard don't use identical predicates (dispatch treats a
+    // heading as `#{1,6}\s+…`, but the guard below excludes any line that merely
+    // `startsWith('#')`). A line like "#1602 …" is therefore NOT a heading yet
+    // is rejected by the guard — without seeding paraLines with the current
+    // line, the loop would consume nothing, `i` would never move, and the whole
+    // render (and the orchestrator's event loop) would hang. Seeding guarantees
+    // forward progress regardless of any dispatch/guard mismatch.
     closeList();
-    const paraLines: string[] = [];
+    const paraLines: string[] = [lines[i]!];
+    i++;
     while (i < lines.length && lines[i]!.trim() !== '' && !lines[i]!.startsWith('#') && !lines[i]!.startsWith('```') && !lines[i]!.startsWith('|') && !/^[-*]\s/.test(lines[i]!.trim()) && !/^\d+\.\s/.test(lines[i]!.trim())) {
       paraLines.push(lines[i]!);
       i++;
     }
-    if (paraLines.length > 0) {
-      out.push(`<p>${inlineFormat(paraLines.join(' '))}</p>`);
-    }
+    out.push(`<p>${inlineFormat(paraLines.join(' '))}</p>`);
   }
 
   closeList();

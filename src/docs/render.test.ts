@@ -1,6 +1,17 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { renderMarkdown } from './render.ts';
+
+// renderMarkdown is synchronous, so an infinite-loop regression would hang the
+// whole test suite rather than fail one test. Run the render in a short-lived
+// subprocess with a hard timeout: a hang surfaces as a thrown ETIMEDOUT (test
+// failure), keeping the suite responsive.
+function renderInSubprocess(input: string, ms = 4000): string {
+  const url = new URL('./render.ts', import.meta.url).href;
+  const script = `import(${JSON.stringify(url)}).then(m=>{process.stdout.write(m.renderMarkdown(${JSON.stringify(input)}))})`;
+  return execFileSync(process.execPath, ['--input-type=module', '-e', script], { timeout: ms, encoding: 'utf-8' });
+}
 
 describe('renderMarkdown', () => {
   // ── Inline formatting ──
@@ -207,6 +218,42 @@ describe('renderMarkdown', () => {
     it('handles links with special chars in text', () => {
       const html = renderMarkdown('[Hooks & Indicators](hooks-and-indicators)');
       assert.ok(html.includes('<a href="hooks-and-indicators">Hooks &amp; Indicators</a>'), `Got: ${html}`);
+    });
+  });
+
+  // Regression: a line that reaches the paragraph branch but is rejected by the
+  // continuation guard (e.g. starts with '#' yet is not a heading) must still
+  // advance the cursor. Before the fix the block loop stalled and spun forever,
+  // hanging the renderer and the orchestrator event loop with it (a single
+  // published page like /pages/team-pr-sweep-2026-06-29 wedged the whole app).
+  describe('forward-progress / no-hang', () => {
+    it('should not hang on a line starting with # that is not a heading', () => {
+      const html = renderInSubprocess('#1602, #1578 (coordinate w/ #1605), #1586.');
+      assert.ok(html.includes('<p>'), `Got: ${html}`);
+      assert.ok(html.includes('#1602'), `Got: ${html}`);
+    });
+
+    it('should not hang on a bare ordered-list marker with no content', () => {
+      const html = renderInSubprocess('1. ');
+      assert.equal(typeof html, 'string');
+    });
+
+    it('should render a #-prefixed non-heading as a paragraph, not a heading', () => {
+      const html = renderInSubprocess('#1602 not a heading');
+      assert.ok(!/<h[1-6]/.test(html), `Should not be a heading. Got: ${html}`);
+      assert.ok(html.includes('<p>'), `Got: ${html}`);
+    });
+
+    it('should still render a proper "# heading" as a heading', () => {
+      const html = renderInSubprocess('# Real Heading');
+      assert.ok(/<h1[^>]*>.*Real Heading/.test(html), `Got: ${html}`);
+    });
+
+    it('should not hang on a multi-line page mixing headings and #-prefixed text', () => {
+      const md = '## Mergeable now\n#1602, #1578, #1586, #1530.\n\n## Next\nplain text line.';
+      const html = renderInSubprocess(md);
+      assert.ok(html.includes('#1602'), `Got: ${html}`);
+      assert.ok(html.includes('Mergeable now'), `Got: ${html}`);
     });
   });
 });
