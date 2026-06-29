@@ -52,6 +52,7 @@ src/
 - **Health monitor**: 30s poll cycle, idle detection via tmux parsing, 80%→compact, 90%→reload
 - **Message dispatch**: event-driven queue with cool-down coordination (300ms after lifecycle ops)
 - **Personas**: `persistent-agents/*.md` with YAML frontmatter (engine, cwd, model, hooks)
+- **`renderMarkdown` forward-progress invariant** (`src/docs/render.ts`): every branch in the block-dispatch `while` loop **must** advance `i` before `continue`. The heading regex (`#{1,6}\s+…`) and the paragraph continuation guard (`startsWith('#')`) are intentionally non-identical — a line like `#1602 foo` falls through to the paragraph branch, which seeds `paraLines` with the current line before incrementing `i`. Any new dispatch branch that does not advance `i` will spin the event loop forever and wedge the orchestrator (all HTTP stops, CPU 100%, log silence). The regression test in `src/docs/render.test.ts` uses a subprocess-with-hard-timeout harness (`execFileSync` + `timeout: 4000`) so a hang surfaces as a test failure rather than a suite hang — follow this pattern for any synchronous parser/renderer regression test.
 
 ## Capacity Scaling
 
@@ -92,6 +93,13 @@ Motivation: <why>
 Changes:
  - <file>: <one-line>
 ```
+
+## Known Issues / Gotchas
+
+<!-- AUTO-MANAGED: git-insights -->
+- **AppleDouble wedge (2026-06-29)** — macOS `._*` metadata files in a pages bundle directory cause a CPU-pinning event-loop wedge. `routes.ts` page handler uses `readdirSync` + `*.md` glob; `._index.md` ends in `.md`, its binary AppleDouble header triggers pathological behaviour in the markdown parser (CPU 100%, log silence, HTTP timeouts from inside and outside the container). **Fix needed in `routes.ts`**: skip dotfiles (`name.startsWith('.')`) or match only `index.md` literally. **Fix needed in `POST /api/pages` tar handler**: strip `._*` and `.DS_Store` before writing to `PAGES_DIR`. Diagnostic: CPU 100%, Node state `R wchan=0`, FD count stable, all background loop logs stop. Full incident: `scratch/brain/wedge-2026-06-29/index.md`.
+- **`lastActivity` hydration corruption on restart** — after an orchestrator restart, 14/15 agents log `grace elapsed=~1.78e12 ms` (~56,000 years) on the first health-monitor pass. `lastActivity` is stored as `0`/`null` in the DB for non-`tl` agents, so `Date.now() - 0 = epoch ms`. Unrelated to the AppleDouble wedge; no fix landed yet.
+<!-- END AUTO-MANAGED -->
 
 ## Don't
 
