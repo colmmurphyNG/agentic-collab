@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, realpathSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Database } from './database.ts';
-import { createRouter, routeTelegramMessage, type RouteContext } from './routes.ts';
+import { createRouter, routeTelegramMessage, pruneJunkFiles, isJunkFile, type RouteContext } from './routes.ts';
 import type { TelegramDispatcher } from './telegram.ts';
 import { WebSocketServer } from '../shared/websocket-server.ts';
 
@@ -2334,5 +2334,138 @@ describe('POST /api/dashboard/reply auto-forwards to Telegram when route active'
     } finally {
       db.updateDestination('cmCollab', { enabled: true });
     }
+  });
+});
+
+/**
+ * AppleDouble / macOS sidecar guards on the pages surface.
+ *
+ * `._foo.md` is a binary AppleDouble resource fork whose name ends in `.md`,
+ * so any `*.md` glob picks it up. Handing one to `renderMarkdown` pins the
+ * event loop and wedges the whole orchestrator (HTTP stops, CPU 100%, log
+ * silence). A sweep on 2026-08-06 found 655 such files across 212 published
+ * bundles — 194 of them `._index.md` — every one a latent wedge trigger.
+ *
+ * Each serving test carries an explicit timeout so a regression surfaces as a
+ * failed assertion rather than a hung suite.
+ */
+describe('routes: pages AppleDouble guards', () => {
+  let db: Database;
+  let wss: WebSocketServer;
+  let server: Server;
+  let port: number;
+  let tmpDir: string;
+  let pagesDir: string;
+
+  before(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'agentic-pages-appledouble-'));
+    pagesDir = join(tmpDir, 'pages');
+    db = new Database(join(tmpDir, 'test.db'));
+    wss = new WebSocketServer();
+
+    const mockProxyDispatch = async (_proxyId: string, _command: ProxyCommand): Promise<ProxyResponse> => ({ ok: true });
+    const locks = new LockManager(db.rawDb);
+
+    const ctx: RouteContext = {
+      db,
+      wss,
+      locks,
+      proxyDispatch: mockProxyDispatch,
+      getDashboardHtml: () => '<html></html>',
+      orchestratorHost: 'http://localhost:3000',
+      orchestratorSecret: null,
+      messageDispatcher: makeTestDispatcher(db, locks, mockProxyDispatch),
+      usagePoller: { getUsageData: () => ({}), pollNow: async () => {} } as any,
+      voiceEnabled: false,
+      accountStore: new AccountStore({ accountsDir: join(tmpDir, 'accounts'), agentHomesDir: join(tmpDir, 'agent-homes'), skipAutoRegister: true }),
+      telegramDispatcher: makeStubTelegramDispatcher(),
+      pagesDir,
+      storesDir: join(tmpDir, 'stores'),
+      filesDir: join(tmpDir, 'files'),
+    };
+
+    const router = createRouter(ctx);
+    server = createServer(async (req, res) => { await router(req, res); });
+    await new Promise<void>((resolve) => {
+      server.listen(0, () => {
+        const addr = server.address();
+        port = typeof addr === 'object' && addr ? addr.port : 0;
+        resolve();
+      });
+    });
+  });
+
+  after(() => {
+    wss.close();
+    server.close();
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** A minimal AppleDouble header — the byte shape that wedges the renderer. */
+  const APPLEDOUBLE = Buffer.from([0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00, 0x4d, 0x61, 0x63, 0x20, 0x4f, 0x53, 0x20, 0x58]);
+
+  it('should prune ._* and .DS_Store from an extracted bundle, recursively', () => {
+    const d = join(tmpDir, 'prune-target');
+    mkdirSync(join(d, 'nested'), { recursive: true });
+    writeFileSync(join(d, 'index.md'), '# real page\n');
+    writeFileSync(join(d, '._index.md'), APPLEDOUBLE);
+    writeFileSync(join(d, '.DS_Store'), Buffer.from([0x00, 0x01]));
+    writeFileSync(join(d, 'nested', 'notes.md'), '# nested\n');
+    writeFileSync(join(d, 'nested', '._notes.md'), APPLEDOUBLE);
+
+    const removed = pruneJunkFiles(d);
+
+    assert.equal(removed, 3, 'must remove both sidecars and the .DS_Store');
+    assert.ok(existsSync(join(d, 'index.md')), 'real index.md must survive');
+    assert.ok(existsSync(join(d, 'nested', 'notes.md')), 'nested real file must survive');
+    assert.ok(!existsSync(join(d, '._index.md')));
+    assert.ok(!existsSync(join(d, '.DS_Store')));
+    assert.ok(!existsSync(join(d, 'nested', '._notes.md')), 'must recurse into subdirectories');
+  });
+
+  it('should classify sidecar names without touching ordinary dotfiles', () => {
+    assert.ok(isJunkFile('._index.md'));
+    assert.ok(isJunkFile('.DS_Store'));
+    assert.ok(!isJunkFile('index.md'));
+    assert.ok(!isJunkFile('.gitignore'), 'ordinary dotfiles are not sidecars');
+  });
+
+  it('should reject a single-file upload named ._something', async () => {
+    const resp = await fetch(`http://localhost:${port}/api/pages?slug=single-junk&filename=._index.md`, { method: 'POST', body: APPLEDOUBLE });
+    assert.equal(resp.status, 400);
+    assert.ok(!existsSync(join(pagesDir, 'single-junk', '._index.md')));
+  });
+
+  it('should not render ._index.md when it is the only file in a bundle', { timeout: 5000 }, async () => {
+    mkdirSync(join(pagesDir, 'only-junk'), { recursive: true });
+    writeFileSync(join(pagesDir, 'only-junk', '._index.md'), APPLEDOUBLE);
+    const resp = await fetch(`http://localhost:${port}/pages/only-junk`);
+    const body = await resp.text();
+    // The bundle has no servable file, so an empty listing is the correct
+    // outcome. What matters is that the sidecar was never fed to the renderer:
+    // the response returns promptly and mentions neither the junk filename nor
+    // its contents.
+    assert.ok(!body.includes('._index.md'), 'sidecar must not appear in output');
+    assert.ok(!body.includes('Mac OS'), 'AppleDouble contents must not be rendered');
+  });
+
+  it('should 404 a ._*.md file requested directly by subpath', { timeout: 5000 }, async () => {
+    mkdirSync(join(pagesDir, 'subpath-junk'), { recursive: true });
+    writeFileSync(join(pagesDir, 'subpath-junk', 'index.md'), '# real\n');
+    writeFileSync(join(pagesDir, 'subpath-junk', '._index.md'), APPLEDOUBLE);
+    const resp = await fetch(`http://localhost:${port}/pages/subpath-junk/._index.md`);
+    await resp.text();
+    assert.equal(resp.status, 404);
+  });
+
+  it('should still serve a normal single-file bundle alongside a sidecar', { timeout: 5000 }, async () => {
+    mkdirSync(join(pagesDir, 'mixed'), { recursive: true });
+    writeFileSync(join(pagesDir, 'mixed', 'index.md'), '# hello world\n');
+    writeFileSync(join(pagesDir, 'mixed', '._index.md'), APPLEDOUBLE);
+    const resp = await fetch(`http://localhost:${port}/pages/mixed`);
+    const html = await resp.text();
+    assert.equal(resp.status, 200);
+    assert.ok(html.includes('hello world'), 'real index.md must still render');
   });
 });
