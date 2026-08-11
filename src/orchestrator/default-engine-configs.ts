@@ -41,9 +41,9 @@ const CLAUDE_APPROVAL_INDICATOR = {
   badge: 'Needs Approval',
   style: 'warning',
   actions: {
-    '$1': [{ type: 'keystroke', keystroke: '$1' }],
-    '$2': [{ type: 'keystroke', keystroke: '$2' }],
-    '$3': [{ type: 'keystroke', keystroke: '$3' }],
+    '$1': [{ type: 'keystroke', key: '$1' }],
+    '$2': [{ type: 'keystroke', key: '$2' }],
+    '$3': [{ type: 'keystroke', key: '$3' }],
   },
 };
 const CLAUDE_FILE_PERMISSION_INDICATOR = {
@@ -52,9 +52,9 @@ const CLAUDE_FILE_PERMISSION_INDICATOR = {
   badge: 'Needs Approval',
   style: 'warning',
   actions: {
-    'Yes': [{ type: 'keystroke', keystroke: '1' }],
-    'Allow All': [{ type: 'keystroke', keystroke: '2' }],
-    'No': [{ type: 'keystroke', keystroke: '3' }],
+    'Yes': [{ type: 'keystroke', key: '1' }],
+    'Allow All': [{ type: 'keystroke', key: '2' }],
+    'No': [{ type: 'keystroke', key: '3' }],
   },
 };
 const CLAUDE_PLAN_INDICATOR = {
@@ -63,9 +63,9 @@ const CLAUDE_PLAN_INDICATOR = {
   badge: 'Plan Review',
   style: 'warning',
   actions: {
-    '$1': [{ type: 'keystroke', keystroke: '$1' }],
-    '$2': [{ type: 'keystroke', keystroke: '$2' }],
-    '$3': [{ type: 'keystroke', keystroke: '$3' }],
+    '$1': [{ type: 'keystroke', key: '$1' }],
+    '$2': [{ type: 'keystroke', key: '$2' }],
+    '$3': [{ type: 'keystroke', key: '$3' }],
   },
 };
 const CLAUDE_RESUME_PROMPT_INDICATOR = {
@@ -74,8 +74,8 @@ const CLAUDE_RESUME_PROMPT_INDICATOR = {
   badge: 'Resume Prompt',
   style: 'warning',
   actions: {
-    'Summary': [{ type: 'keystroke', keystroke: 'Enter' }],
-    'Full': [{ type: 'keystroke', keystroke: 'Down' }, { type: 'keystroke', keystroke: 'Enter' }],
+    'Summary': [{ type: 'keystroke', key: 'Enter' }],
+    'Full': [{ type: 'keystroke', key: 'Down' }, { type: 'keystroke', key: 'Enter' }],
   },
 };
 const LOGGED_OUT_INDICATOR = { id: 'logged-out', regex: 'Not logged in', badge: 'Logged Out', style: 'danger' };
