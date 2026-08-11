@@ -32,6 +32,7 @@ import type { HookResult, TemplateVars } from './hook-resolver.ts';
 import type { AccountStore } from './accounts.ts';
 import { resolveEffectiveConfig } from './engine-config-resolver.ts';
 import { stripCliFailureLines } from './cli-failure-patterns.ts';
+import { findSessionTranscript } from './session-transcript.ts';
 
 export type LifecycleContext = {
   db: Database;
@@ -158,6 +159,11 @@ function wrapLaunchResult(result: HookResult, agent: AgentRecord, personaFile: s
  *
  * When agentName is provided and the pipeline contains capture steps,
  * captured variables are stored in the agent's captured_vars column.
+ *
+ * Returns the variables captured during THIS dispatch. Callers use it to learn
+ * the session id the CLI actually chose, which is only knowable after the hook
+ * has run. Reading captured_vars back from the DB instead would not distinguish
+ * a value captured now from a stale one left by an earlier launch.
  */
 async function dispatchHookResult(
   ctx: LifecycleContext,
@@ -165,8 +171,9 @@ async function dispatchHookResult(
   tmuxSession: string,
   result: HookResult,
   opts?: { pressEnter?: boolean; keyDelay?: number; agentName?: string },
-): Promise<void> {
-  if (result.mode === 'skip') return;
+): Promise<Record<string, string>> {
+  const capturedNow: Record<string, string> = {};
+  if (result.mode === 'skip') return capturedNow;
 
   if (result.mode === 'keys') {
     for (const key of result.keys) {
@@ -177,7 +184,7 @@ async function dispatchHookResult(
       });
       if (opts?.keyDelay) await sleep(opts.keyDelay);
     }
-    return;
+    return capturedNow;
   }
 
   if (result.mode === 'send') {
@@ -205,13 +212,13 @@ async function dispatchHookResult(
       const waitMs = action.post_wait_ms;
       if (waitMs && waitMs > 0) await sleep(waitMs);
     }
-    return;
+    return capturedNow;
   }
 
   if (result.mode === 'pipeline') {
     for (const step of result.steps) {
       if (step.type === 'keystrokes') {
-        await dispatchHookResult(ctx, proxyId, tmuxSession, { mode: 'send', actions: step.actions }, opts);
+        Object.assign(capturedNow, await dispatchHookResult(ctx, proxyId, tmuxSession, { mode: 'send', actions: step.actions }, opts));
       } else if (step.type === 'keystroke') {
         await ctx.proxyDispatch(proxyId, {
           action: 'send_keys',
@@ -263,6 +270,7 @@ async function dispatchHookResult(
             const match = re.exec(sanitised);
             if (match && match[1]) {
               const captured = match[1].trim();
+              capturedNow[step.var] = captured;
               ctx.db.updateAgentCapturedVar(opts.agentName, step.var, captured);
               console.log(`[lifecycle] ${opts.agentName}: captured $${step.var} = ${captured}`);
               // When capturing SESSION_ID, also update currentSessionId for legacy resume flow
@@ -283,7 +291,7 @@ async function dispatchHookResult(
         await sleep(step.ms);
       }
     }
-    return;
+    return capturedNow;
   }
 
   // mode === 'paste' — split paste and Enter so the delay happens
@@ -306,6 +314,51 @@ async function dispatchHookResult(
       keys: 'Enter',
     });
   }
+  return capturedNow;
+}
+
+/**
+ * Pick the session id to persist after a launch hook has run.
+ *
+ * The orchestrator generates a UUID up front, but a persona whose custom
+ * `start` hook omits `--session-id` leaves the CLI free to choose its own. In
+ * that case the generated id names no transcript, and persisting it makes every
+ * later resume fail — so a session id captured during this launch always wins.
+ */
+function reconcileSessionId(
+  agentName: string,
+  generated: string | null,
+  capturedNow: Record<string, string>,
+): string | null {
+  const captured = capturedNow['SESSION_ID'];
+  if (!captured || captured === generated) return generated;
+  console.log(
+    `[lifecycle] ${agentName}: CLI chose session ${captured} (generated ${generated ?? 'none'} was not adopted) — persisting the CLI's id`,
+  );
+  return captured;
+}
+
+/**
+ * Pick which stored session id to resume from.
+ *
+ * Rows written before the reconcile fix can hold a `currentSessionId` that
+ * names no transcript while `capturedVars.SESSION_ID` holds the real one.
+ * Prefer the captured id only when disk positively contradicts the stored one:
+ * 'unknown' (no CLAUDE_PROJECTS_DIR, or the tree is unreadable) must never be
+ * read as 'absent', or an unmounted deployment would swap ids on every resume.
+ */
+function preferOnDiskSessionId(
+  agentName: string,
+  stored: string | null,
+  captured: string | undefined,
+): string | null {
+  if (!stored || !captured || stored === captured) return stored;
+  if (findSessionTranscript(stored) !== 'absent') return stored;
+  if (findSessionTranscript(captured) !== 'present') return stored;
+  console.warn(
+    `[lifecycle] ${agentName}: stored session ${stored} has no transcript; resuming captured session ${captured} instead`,
+  );
+  return captured;
 }
 
 // ── Shared launch-sequence helpers ──
@@ -834,7 +887,8 @@ export async function spawnAgent(
     // Wrap launch command with agent env vars
     const wrappedStart = wrapLaunchResult(startResult, effectiveCurrent, personaFile, accountHome);
 
-    await dispatchHookResult(ctx, opts.proxyId, tmuxSession, wrappedStart, { agentName: opts.name });
+    const capturedNow = await dispatchHookResult(ctx, opts.proxyId, tmuxSession, wrappedStart, { agentName: opts.name });
+    const sessionId = reconcileSessionId(opts.name, generatedSessionId, capturedNow);
 
     // 5. Wait for CLI init, then inject /rename
     await injectRename(ctx, opts.proxyId, tmuxSession, adapter, opts.name);
@@ -847,11 +901,11 @@ export async function spawnAgent(
       lastActivity: new Date().toISOString(),
       spawnCount: spawnCount + 1,
       lastContextPct: 0,
-      currentSessionId: generatedSessionId,
+      currentSessionId: sessionId,
     }, 'spawned', {
       engine,
       model: opts.model,
-      sessionId: generatedSessionId,
+      sessionId,
     }, 'spawn');
   } finally {
     clearTimeout(watchdog);
@@ -969,8 +1023,14 @@ export async function resumeAgent(
       ? await materialiseMcpConfigForAgent(ctx, proxyId, name, cwd, mcpAllowlist)
       : undefined;
 
-    // SESSION_ID resolution: DB currentSessionId → capturedVars.SESSION_ID → null (fresh spawn)
-    const resolvedSessionId = currentSessionId
+    // SESSION_ID resolution: DB currentSessionId → capturedVars.SESSION_ID → null (fresh spawn).
+    // A stored id that disk contradicts loses to a captured id disk confirms.
+    const storedSessionId = preferOnDiskSessionId(
+      name,
+      currentSessionId,
+      phase1.current.capturedVars?.['SESSION_ID'],
+    );
+    const resolvedSessionId = storedSessionId
       ?? phase1.current.capturedVars?.['SESSION_ID']
       ?? null;
     const resumeTemplateVars: TemplateVars = {
@@ -984,7 +1044,7 @@ export async function resumeAgent(
       capturedVars: phase1.current.capturedVars ?? undefined,
     };
 
-    if (!currentSessionId) {
+    if (!storedSessionId) {
       console.log(`[lifecycle] ${name}: no stored session ID, will spawn fresh via hookStart`);
     }
 
@@ -993,7 +1053,7 @@ export async function resumeAgent(
       hookResume,
       hookStart,
       agentRecord: effectiveCurrent,
-      sessionId: currentSessionId,
+      sessionId: storedSessionId,
       name,
       cwd,
       resumeTask: adapter.supportsResumePrompt ? opts?.task : undefined,
@@ -1014,14 +1074,15 @@ export async function resumeAgent(
     // Wrap launch command with agent env vars
     const wrappedResume = wrapLaunchResult(resumeResult, effectiveCurrent, personaFile, accountHome);
 
-    await dispatchHookResult(ctx, proxyId, tmuxSession, wrappedResume, { agentName: name });
+    const capturedNow = await dispatchHookResult(ctx, proxyId, tmuxSession, wrappedResume, { agentName: name });
+    const sessionId = reconcileSessionId(name, resumeSessionId, capturedNow);
 
     // 5. /rename injection
     await injectRename(ctx, proxyId, tmuxSession, adapter, name);
 
     // 6. Paste task if provided (and resuming existing session).
     // Skip if the engine consumed the task inline via buildResumeCommand.
-    if (opts?.task && currentSessionId && !adapter.supportsResumePrompt) {
+    if (opts?.task && storedSessionId && !adapter.supportsResumePrompt) {
       await sleep(POST_RENAME_TASK_DELAY_MS);
       await ctx.proxyDispatch(proxyId, {
         action: 'paste',
@@ -1037,8 +1098,8 @@ export async function resumeAgent(
       lastActivity: new Date().toISOString(),
       stateBeforeShutdown: null,
       lastContextPct: 0,
-      currentSessionId: resumeSessionId,
-    }, 'resumed', { sessionId: resumeSessionId }, 'resume');
+      currentSessionId: sessionId,
+    }, 'resumed', { sessionId }, 'resume');
   } finally {
     clearTimeout(watchdog);
   }
@@ -1618,7 +1679,8 @@ export async function reloadAgent(
     // Wrap launch command with agent env vars
     const wrappedReload = wrapLaunchResult(reloadResult, effectiveCurrent, personaFile, accountHome);
 
-    await dispatchHookResult(ctx, proxyId, tmuxSession, wrappedReload, { agentName: name });
+    const capturedNow = await dispatchHookResult(ctx, proxyId, tmuxSession, wrappedReload, { agentName: name });
+    const sessionId = reconcileSessionId(name, reloadSessionId, capturedNow);
 
     // 6. /rename injection
     await injectRename(ctx, proxyId, tmuxSession, adapter, name);
@@ -1642,10 +1704,10 @@ export async function reloadAgent(
       spawnCount: spawnCount + 1,
       lastContextPct: 0,
       lastActivity: new Date().toISOString(),
-      currentSessionId: reloadSessionId,
+      currentSessionId: sessionId,
     }, 'reloaded', {
       previousContextPct,
-      sessionId: reloadSessionId,
+      sessionId,
     }, 'reload');
   } finally {
     clearTimeout(watchdog);
@@ -1771,7 +1833,8 @@ export async function recoverAgent(
     }
 
     const wrappedStart = wrapLaunchResult(startResult, effectiveCurrent, personaFile, accountHome);
-    await dispatchHookResult(ctx, proxyId, tmuxSession, wrappedStart, { agentName: name });
+    const capturedNow = await dispatchHookResult(ctx, proxyId, tmuxSession, wrappedStart, { agentName: name });
+    const sessionId = reconcileSessionId(name, generatedSessionId, capturedNow);
 
     // 5. Inject rename
     await injectRename(ctx, proxyId, tmuxSession, adapter, name);
@@ -1783,10 +1846,10 @@ export async function recoverAgent(
       spawnCount: spawnCount + 1,
       lastContextPct: 0,
       lastActivity: new Date().toISOString(),
-      currentSessionId: generatedSessionId,
+      currentSessionId: sessionId,
     }, 'recovered', {
       engine,
-      sessionId: generatedSessionId,
+      sessionId,
       reason: 'auto-recovery from failed state',
     }, 'recover');
   } finally {
@@ -1982,7 +2045,8 @@ export async function recycleAgent(
     }
 
     const wrappedStart = wrapLaunchResult(startResult, effectiveCurrent, personaFile, accountHome);
-    await dispatchHookResult(ctx, proxyId, tmuxSession, wrappedStart, { agentName: name });
+    const capturedNow = await dispatchHookResult(ctx, proxyId, tmuxSession, wrappedStart, { agentName: name });
+    const sessionId = reconcileSessionId(name, generatedSessionId, capturedNow);
 
     // 6. Inject /rename + brief settle
     await injectRename(ctx, proxyId, tmuxSession, adapter, name);
@@ -1994,10 +2058,10 @@ export async function recycleAgent(
       spawnCount: spawnCount + 1,
       lastContextPct: 0,
       lastActivity: new Date().toISOString(),
-      currentSessionId: generatedSessionId,
+      currentSessionId: sessionId,
     }, 'recycled', {
       engine,
-      sessionId: generatedSessionId,
+      sessionId,
       previousSessionId: agentSnapshot.currentSessionId ?? undefined,
     }, 'recycle');
   } finally {
