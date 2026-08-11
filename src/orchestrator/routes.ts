@@ -2282,7 +2282,9 @@ route('POST', '/api/agents/:name/spawn', async (req, res, match, ctx) => {
         ctx.db.updateAgentState(name, agent.state, agent.version, { proxyId });
       }
       const result = await resumeAgent(lifecycleCtx, name, {
-        task: body.task as string | undefined,
+        // Spread rather than assign undefined — exactOptionalPropertyTypes
+        // rejects an explicit undefined for an optional field.
+        ...(body.task !== undefined ? { task: body.task as string } : {}),
       });
       broadcastAgentUpdate(ctx, name);
       broadcastLifecycleEvent(ctx, name, 'Resumed');
