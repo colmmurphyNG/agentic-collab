@@ -1561,6 +1561,93 @@ Persona body
       assert.equal(fullScope!.lines, undefined, 'omitted `lines` must remain undefined (full-snapshot evaluation)');
     });
 
+    it('strips YAML quotes from indicator action names and keystroke values', () => {
+      // The shape every persona in the fleet actually uses. `1:` bare would
+      // parse as a number and `y:` as a boolean, so authors quote them — and
+      // the quotes were being kept, so the action key was three characters and
+      // the keystroke typed `"1"` into the pane instead of selecting option 1.
+      const fm = parseFrontmatter(`---
+engine: claude
+cwd: /tmp
+indicators:
+  approval:
+    regex: 'Do you want to proceed\\?'
+    badge: Needs Approval
+    style: warning
+    actions:
+      "1":
+        - keystroke: "1"
+      'y':
+        - keystroke: 'y'
+      Escape:
+        - keystroke: Escape
+---
+Body
+`).frontmatter as { indicators?: Array<{ id: string; actions?: Record<string, Array<{ type: string; key?: string }>> }> };
+
+      const approval = fm.indicators?.find(ind => ind.id === 'approval');
+      assert.ok(approval, 'approval indicator parsed');
+      assert.deepEqual(
+        Object.keys(approval.actions ?? {}).sort(),
+        ['1', 'Escape', 'y'],
+        'action names must not carry their YAML quotes',
+      );
+      assert.equal(approval.actions!['1']![0]!.key, '1', 'double-quoted keystroke');
+      assert.equal(approval.actions!['y']![0]!.key, 'y', 'single-quoted keystroke');
+      assert.equal(approval.actions!['Escape']![0]!.key, 'Escape', 'unquoted keystroke unchanged');
+    });
+
+    it('leaves quotes that are part of the value alone', () => {
+      // Only a matched pair at both ends is syntax. An apostrophe inside a
+      // word, or a quoted phrase mid-string, is content.
+      const fm = parseFrontmatter(`---
+engine: claude
+cwd: /tmp
+indicators:
+  typing:
+    regex: 'prompt'
+    badge: Typing
+    actions:
+      quoted:
+        - keystrokes:
+            - text: he said "hi"
+      apostrophe:
+        - keystrokes:
+            - text: don't
+---
+Body
+`).frontmatter as { indicators?: Array<{ id: string; actions?: Record<string, Array<{ type: string; actions?: Array<{ text?: string }> }>> }> };
+
+      const typing = fm.indicators?.find(ind => ind.id === 'typing');
+      assert.ok(typing, 'typing indicator parsed');
+      assert.equal(typing.actions!['quoted']![0]!.actions![0]!.text, 'he said "hi"');
+      assert.equal(typing.actions!['apostrophe']![0]!.actions![0]!.text, "don't");
+    });
+
+    it('keeps keystroke values as strings rather than coercing them', () => {
+      // `keystroke: 1` must stay the character "1", not become the number 1 —
+      // it is typed into a terminal, and coercion is what pushed authors to
+      // quote these in the first place.
+      const fm = parseFrontmatter(`---
+engine: claude
+cwd: /tmp
+indicators:
+  numeric:
+    regex: 'choose'
+    badge: Choose
+    actions:
+      pick:
+        - keystrokes:
+            - keystroke: 1
+---
+Body
+`).frontmatter as { indicators?: Array<{ id: string; actions?: Record<string, Array<{ actions?: Array<{ keystroke?: unknown }> }>> }> };
+
+      const numeric = fm.indicators?.find(ind => ind.id === 'numeric');
+      assert.equal(numeric!.actions!['pick']![0]!.actions![0]!.keystroke, '1');
+      assert.equal(typeof numeric!.actions!['pick']![0]!.actions![0]!.keystroke, 'string');
+    });
+
     it('syncs indicators to database', () => {
       const personasDir = mkdtempSync(join(tmpdir(), 'persona-indicators-'));
       const dbPath = join(personasDir, 'test.db');
