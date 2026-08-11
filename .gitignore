@@ -12,3 +12,31 @@ src/test/ui/snapshots/
 .build-version
 .build-image-sha
 litellm-keys.json
+
+# graphify code-graph output (relocated to conductor scratch/brain)
+graphify-out/
+
+# ── Operator-local: never commit to a public fork ──
+# These paths hold live credentials, employer-internal analysis, or references
+# to private repos and hostnames. All are currently untracked, which is one
+# `git add -A` away from being published.
+# (.gitignore has no inline comments — trailing text becomes part of the pattern)
+
+# Live API keys
+docker-compose.override.yml
+# Local harness config, skills, settings
+.claude/
+# Investigation artifacts: credentials, internal hostnames, employer-internal analysis
+scratch/
+# Published page bundles (PAGES_DIR bind mount)
+pages/
+# Local knowledge-base entrypoint, hardcoded host paths
+bin/ask
+# Operator-local tooling; pr-sweep defaults to a private repo slug
+scripts/harvest-tmp.py
+scripts/pr-sweep.py
+# Spreadsheets and exports: test plans, sandbox credentials
+*.xlsx
+*.csv
+# Pasted screenshots dropped at repo root
+/image*.png
