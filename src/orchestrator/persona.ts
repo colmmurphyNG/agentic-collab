@@ -94,6 +94,8 @@ const NESTED_FIELDS = new Set([...nestedPersonaKeys(), 'env', 'spawn']);
 
 /** Frontmatter field names that accept inline flow-style string arrays (`[a, b, c]`). */
 const FLOW_ARRAY_FIELDS = new Set(['mcps']);
+/** SendAction fields whose value is typed into the terminal as-is. */
+const KEY_VALUE_FIELDS = new Set(['keystroke', 'text', 'paste']);
 
 /**
  * Parse YAML-like frontmatter from a markdown string.
@@ -393,7 +395,14 @@ function parsePipelineSteps(
         if (actionColonIdx === -1) { i++; continue; }
         const actionKey = actionContent.slice(0, actionColonIdx).trim();
         const actionVal = actionContent.slice(actionColonIdx + 1).trim();
-        const action: Record<string, unknown> = { [actionKey]: coerceScalar(actionVal) };
+        // Keystroke/text/paste values are sent to the terminal verbatim, so they
+        // stay strings: coercing would turn `keystroke: 1` into the number 1,
+        // and quoting to avoid that would otherwise leave the quotes in.
+        const action: Record<string, unknown> = {
+          [actionKey]: KEY_VALUE_FIELDS.has(actionKey)
+            ? unquoteScalar(actionVal)
+            : coerceScalar(actionVal),
+        };
         // Check for sub-properties on the next line (e.g. post_wait_ms)
         i++;
         while (i < lines.length) {
@@ -438,7 +447,7 @@ function parsePipelineSteps(
         var: String(captureObj['var'] ?? ''),
       });
     } else if (stepKey === 'keystroke') {
-      steps.push({ type: 'keystroke', key: stepVal });
+      steps.push({ type: 'keystroke', key: unquoteScalar(stepVal) });
       i++;
     } else if (stepKey === 'wait') {
       const ms = typeof coerceScalar(stepVal) === 'number' ? coerceScalar(stepVal) as number : parseInt(stepVal, 10);
@@ -485,7 +494,9 @@ function parseNamedPipelineMap(
     if (lineIndent === baseIndent) {
       const colonIdx = line.indexOf(':');
       if (colonIdx === -1) { i++; continue; }
-      const name = line.slice(0, colonIdx).trim();
+      // Action names are matched against what the dashboard sends, so the
+      // quotes an author needs around `"1":` must not survive into the key.
+      const name = unquoteScalar(line.slice(0, colonIdx).trim());
       if (!name) { i++; continue; }
 
       // Next lines should be pipeline steps at deeper indent
@@ -730,6 +741,28 @@ function parseSubObject(
 }
 
 /** Coerce YAML scalar strings to appropriate JS types. */
+/**
+ * Strip the quotes YAML uses to mark a scalar, so `"1"` yields the one
+ * character the author meant rather than three.
+ *
+ * Quoting is near-mandatory for keys and keystroke values that would otherwise
+ * coerce to another type — `1:` is a number, `y:` is a boolean, `Escape` is
+ * fine bare — so these are exactly the values most likely to be written quoted
+ * and least able to survive the quotes being kept. A keystroke reaches tmux
+ * verbatim, so `"1"` types a quote, a 1, and a quote.
+ *
+ * Only strips a matched pair, and only at both ends: `don't` and `he said "hi"`
+ * are unchanged.
+ */
+function unquoteScalar(val: string): string {
+  if (val.length < 2) return val;
+  const first = val[0];
+  if ((first === '"' || first === "'") && val[val.length - 1] === first) {
+    return val.slice(1, -1);
+  }
+  return val;
+}
+
 function coerceScalar(val: string): string | number | boolean {
   // Numbers
   if (/^\d+$/.test(val)) return parseInt(val, 10);
