@@ -23,6 +23,7 @@ import { getAdapter } from './adapters/index.ts';
 import { reloadAgent, recoverAgent, recycleAgent, type LifecycleContext } from './lifecycle.ts';
 import { resolveEffectiveConfig } from './engine-config-resolver.ts';
 import { cliFailurePatterns, shellPromptPatterns } from './cli-failure-patterns.ts';
+import { findSessionTranscript } from './session-transcript.ts';
 
 type CompiledDetection = {
   json: string;
@@ -88,6 +89,13 @@ export class HealthMonitor {
   /** Pane snapshot captured at the moment an agent was marked failed.
    *  Used to distinguish stale pane output from a genuinely revived CLI. */
   private readonly failureSnapshot = new Map<string, string>();
+  /**
+   * Session id per agent that a resume failure spared because its transcript
+   * was on disk. Sparing the same id twice would re-open the PR #11 deadlock —
+   * an unusable id kept forever, retried forever — so the second failure on
+   * that id clears it like any other.
+   */
+  private readonly sparedSessionId = new Map<string, string>();
   /** Last tmux window_activity timestamp per agent. When unchanged between
    *  polls, the pane has received no output — agent is definitively idle
    *  without needing to capture and diff pane content. */
@@ -749,20 +757,54 @@ export class HealthMonitor {
 
     // On confirmed resume failure, clear the dead session id so the next
     // recovery falls through to the `start` hook instead of looping on the
-    // same dead UUID. resolveResumeOrStartHook picks the resume hook whenever
-    // currentSessionId OR capturedVars.SESSION_ID is set, so both must be
-    // cleared. See scratch/brain/lifecycle-resume-bug.md.
+    // same dead UUID (PR #11). resolveResumeOrStartHook picks the resume hook
+    // whenever currentSessionId OR capturedVars.SESSION_ID is set, so both must
+    // be cleared.
+    //
+    // But clearing is destructive: it discards the only pointer to a transcript
+    // that may still be on disk. Two failures look identical in the pane and
+    // need opposite handling — an id that never existed (clear it) versus one
+    // whose transcript IS on disk and failed to resume for some other reason
+    // (keep it; clearing would throw away recoverable context). Disk presence
+    // is the discriminator; 'unknown' keeps the old clear-it behaviour so a
+    // deployment without CLAUDE_PROJECTS_DIR is unchanged. Sparing is granted
+    // once per id — see sparedSessionId.
     const isResumeFailure = reason === 'CLI session not found — resume failed';
+    const failedSessionId = agent.currentSessionId ?? agent.capturedVars?.['SESSION_ID'] ?? null;
+    const alreadySpared = failedSessionId !== null
+      && this.sparedSessionId.get(agent.name) === failedSessionId;
+    const recoverable = isResumeFailure
+      && !alreadySpared
+      && (findSessionTranscript(agent.currentSessionId) === 'present'
+        || findSessionTranscript(agent.capturedVars?.['SESSION_ID']) === 'present');
+    const clearSessionId = isResumeFailure && !recoverable;
     const now = new Date().toISOString();
     this.db.updateAgentState(agent.name, 'failed', agent.version, {
       failedAt: now,
       failureReason: reason,
       lastFailedAt: now,
       lastFailureReason: reason,
-      ...(isResumeFailure ? { currentSessionId: null } : {}),
+      ...(clearSessionId ? { currentSessionId: null } : {}),
     });
-    if (isResumeFailure) {
+    if (clearSessionId) {
       this.db.updateAgentCapturedVar(agent.name, 'SESSION_ID', null);
+      // Name the loss explicitly, but only when there was something to lose —
+      // an agent with no session id on the row discards nothing. Without this
+      // the next recovery fresh-spawns and the discarded context is invisible.
+      this.sparedSessionId.delete(agent.name);
+      if (failedSessionId) {
+        const why = alreadySpared ? 'transcript on disk but resume failed twice' : 'no transcript on disk';
+        console.warn(`[health] ${agent.name}: CONTEXT-LOST — discarding session ${failedSessionId} (${why})`);
+        this.db.logEvent(agent.name, 'context_lost', undefined, {
+          reason,
+          why,
+          discardedSessionId: agent.currentSessionId,
+          discardedCapturedSessionId: agent.capturedVars?.['SESSION_ID'] ?? null,
+        });
+      }
+    } else if (recoverable && failedSessionId) {
+      this.sparedSessionId.set(agent.name, failedSessionId);
+      console.warn(`[health] ${agent.name}: resume failed but a transcript exists on disk — keeping session ${failedSessionId} for one retry`);
     }
     this.db.logEvent(agent.name, 'cli_exit_detected', undefined, { reason, lastLine });
     this.emitSystemMessage(agent.name, `Failed — ${reason}`);

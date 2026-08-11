@@ -1579,6 +1579,80 @@ describe('Lifecycle', () => {
       assert.equal(agent.capturedVars!['SESSION_ID'], 'a1b2c3d4-e5f6-7890-abcd-ef1234567890');
     });
 
+    it('persists the CLI-chosen session id over the generated one on spawn', async () => {
+      // Regression test for the 2026-08-11 fleet-wide resume failure. The
+      // orchestrator generates a UUID up front, but a persona whose custom
+      // `start` hook omits --session-id leaves the CLI to pick its own. The
+      // generated id then names no transcript, and finalize used to write it
+      // over the correct id the capture step had just stored — so every later
+      // resume failed on an id that had never existed.
+      const cliChosenId = 'deadbeef-1111-2222-3333-444444444444';
+      const startPipeline = JSON.stringify([
+        // Note: no --session-id, exactly as every persona's start hook is written.
+        { type: 'shell', command: 'claude --dangerously-skip-permissions' },
+        { type: 'shell', command: '/status' },
+        { type: 'capture', lines: 30, regex: 'uuid', var: 'SESSION_ID' },
+      ]);
+      db.createAgent({
+        name: 'spawn-cli-chosen-session',
+        engine: 'claude',
+        cwd: '/tmp',
+        proxyId: 'p1',
+        hookStart: startPipeline,
+      });
+
+      const captureCtx: LifecycleContext = {
+        ...ctx,
+        proxyDispatch: async (_proxyId: string, command: ProxyCommand): Promise<ProxyResponse> => {
+          proxyCommands.push(command);
+          if (command.action === 'capture') {
+            return { ok: true, data: `Session ID: ${cliChosenId}\nModel: opus\n` };
+          }
+          if (command.action === 'has_session') return { ok: true, data: false };
+          return { ok: true };
+        },
+      };
+
+      proxyCommands = [];
+      await spawnAgent(captureCtx, {
+        name: 'spawn-cli-chosen-session',
+        engine: 'claude',
+        cwd: '/tmp',
+        proxyId: 'p1',
+      });
+
+      const agent = db.getAgent('spawn-cli-chosen-session')!;
+      assert.equal(agent.capturedVars?.['SESSION_ID'], cliChosenId);
+      assert.equal(agent.currentSessionId, cliChosenId,
+        'finalize must not overwrite the captured session id with the generated one');
+    });
+
+    it('keeps the generated session id when the start hook captures nothing', async () => {
+      // The reconcile must only defer to a capture that actually happened.
+      // A persona with no capture step still needs its generated id persisted.
+      db.createAgent({
+        name: 'spawn-no-capture-session',
+        engine: 'claude',
+        cwd: '/tmp',
+        proxyId: 'p1',
+      });
+
+      proxyCommands = [];
+      await spawnAgent(ctx, {
+        name: 'spawn-no-capture-session',
+        engine: 'claude',
+        cwd: '/tmp',
+        proxyId: 'p1',
+      });
+
+      const agent = db.getAgent('spawn-no-capture-session')!;
+      assert.match(
+        agent.currentSessionId ?? '',
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+        'generated session id should still be persisted when nothing was captured',
+      );
+    });
+
     it('refuses to capture a UUID that appears inside a CLI failure line', async () => {
       // Regression test for the resume-deadlock bug
       // (scratch/brain/lifecycle-resume-bug.md). Without the strip-failure-lines

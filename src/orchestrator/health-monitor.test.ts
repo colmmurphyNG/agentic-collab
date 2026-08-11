@@ -1,6 +1,6 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Database } from './database.ts';
@@ -794,6 +794,142 @@ describe('HealthMonitor', () => {
     assert.equal(final.state, 'failed');
     assert.equal(final.currentSessionId, liveId);
     assert.equal(final.capturedVars?.['SESSION_ID'], liveId);
+  });
+
+  it('should keep the session id on resume failure when its transcript is on disk', async () => {
+    // Two resume failures look identical in the pane and need opposite handling:
+    // an id that named no transcript (clear it) versus one whose transcript IS
+    // on disk and failed for some other reason. Clearing the second discards
+    // recoverable context — the 2026-08-11 fleet-wide loss.
+    const agentName = 'health-resume-failure-transcript-on-disk';
+    const liveId = 'aaaaaaaa-1111-2222-3333-444444444444';
+    const projectsDir = mkdtempSync(join(tmpdir(), 'health-projects-'));
+    mkdirSync(join(projectsDir, '-proj'));
+    writeFileSync(join(projectsDir, '-proj', `${liveId}.jsonl`), '{}\n');
+    const prevProjectsDir = process.env['CLAUDE_PROJECTS_DIR'];
+    process.env['CLAUDE_PROJECTS_DIR'] = projectsDir;
+
+    try {
+      db.createAgent({ name: agentName, engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      const a = db.getAgent(agentName)!;
+      db.updateAgentState(agentName, 'active', a.version, {
+        tmuxSession: `agent-${agentName}`,
+        currentSessionId: liveId,
+      });
+      db.updateAgentCapturedVar(agentName, 'SESSION_ID', liveId);
+
+      captureOutput = [
+        `No conversation found with session ID: ${liveId}`,
+        'user@host:~$ ',
+      ].join('\n');
+
+      const monitor = makeMonitor();
+      await monitor.pollAgent(db.getAgent(agentName)!);
+      ensureActive(agentName);
+      await monitor.pollAgent(db.getAgent(agentName)!);
+
+      const final = db.getAgent(agentName)!;
+      assert.equal(final.state, 'failed');
+      assert.equal(final.failureReason, 'CLI session not found — resume failed');
+      assert.equal(final.currentSessionId, liveId,
+        'a session id whose transcript is on disk must survive the failure');
+      assert.equal(final.capturedVars?.['SESSION_ID'], liveId);
+      assert.equal(db.getEvents(agentName).some(e => e.event === 'context_lost'), false,
+        'nothing was lost, so no context_lost event should be logged');
+    } finally {
+      if (prevProjectsDir === undefined) delete process.env['CLAUDE_PROJECTS_DIR'];
+      else process.env['CLAUDE_PROJECTS_DIR'] = prevProjectsDir;
+      rmSync(projectsDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should clear a spared session id when resume fails on it a second time', async () => {
+    // Sparing is granted once. Sparing forever would re-open the PR #11
+    // deadlock: an id that is on disk but genuinely unusable would be retried
+    // by autoRecover indefinitely.
+    const agentName = 'health-resume-failure-spared-once';
+    const liveId = 'cccccccc-1111-2222-3333-444444444444';
+    const projectsDir = mkdtempSync(join(tmpdir(), 'health-projects-spare-'));
+    mkdirSync(join(projectsDir, '-proj'));
+    writeFileSync(join(projectsDir, '-proj', `${liveId}.jsonl`), '{}\n');
+    const prevProjectsDir = process.env['CLAUDE_PROJECTS_DIR'];
+    process.env['CLAUDE_PROJECTS_DIR'] = projectsDir;
+
+    try {
+      db.createAgent({ name: agentName, engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      const a = db.getAgent(agentName)!;
+      db.updateAgentState(agentName, 'active', a.version, {
+        tmuxSession: `agent-${agentName}`,
+        currentSessionId: liveId,
+      });
+
+      captureOutput = [
+        `No conversation found with session ID: ${liveId}`,
+        'user@host:~$ ',
+      ].join('\n');
+
+      // The monitor holds the spared-id map, so both rounds use one instance.
+      const monitor = makeMonitor();
+      await monitor.pollAgent(db.getAgent(agentName)!);
+      ensureActive(agentName);
+      await monitor.pollAgent(db.getAgent(agentName)!);
+      assert.equal(db.getAgent(agentName)!.currentSessionId, liveId, 'first failure spares the id');
+
+      // Second round on the same id.
+      ensureActive(agentName);
+      await monitor.pollAgent(db.getAgent(agentName)!);
+      ensureActive(agentName);
+      await monitor.pollAgent(db.getAgent(agentName)!);
+
+      assert.equal(db.getAgent(agentName)!.currentSessionId, null,
+        'second failure on a spared id must clear it');
+      const lost = db.getEvents(agentName).find(e => e.event === 'context_lost');
+      assert.ok(lost, 'the eventual discard must still be announced');
+      assert.equal(JSON.parse(lost.meta!)['why'], 'transcript on disk but resume failed twice');
+    } finally {
+      if (prevProjectsDir === undefined) delete process.env['CLAUDE_PROJECTS_DIR'];
+      else process.env['CLAUDE_PROJECTS_DIR'] = prevProjectsDir;
+      rmSync(projectsDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should log context_lost when a resume failure discards a session id with no transcript', async () => {
+    // The silent half of the incident: autoRecover fresh-spawns after this
+    // clear, so without an explicit event the discarded context is invisible.
+    const agentName = 'health-resume-failure-context-lost-event';
+    const deadId = 'bbbbbbbb-1111-2222-3333-444444444444';
+    const projectsDir = mkdtempSync(join(tmpdir(), 'health-projects-empty-'));
+    const prevProjectsDir = process.env['CLAUDE_PROJECTS_DIR'];
+    process.env['CLAUDE_PROJECTS_DIR'] = projectsDir;
+
+    try {
+      db.createAgent({ name: agentName, engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      const a = db.getAgent(agentName)!;
+      db.updateAgentState(agentName, 'active', a.version, {
+        tmuxSession: `agent-${agentName}`,
+        currentSessionId: deadId,
+      });
+
+      captureOutput = [
+        `No conversation found with session ID: ${deadId}`,
+        'user@host:~$ ',
+      ].join('\n');
+
+      const monitor = makeMonitor();
+      await monitor.pollAgent(db.getAgent(agentName)!);
+      ensureActive(agentName);
+      await monitor.pollAgent(db.getAgent(agentName)!);
+
+      const final = db.getAgent(agentName)!;
+      assert.equal(final.currentSessionId, null, 'a truly dead id must still be cleared');
+      const lost = db.getEvents(agentName).find(e => e.event === 'context_lost');
+      assert.ok(lost, 'context_lost event must be logged when a session id is discarded');
+      assert.equal(JSON.parse(lost.meta!)['discardedSessionId'], deadId);
+    } finally {
+      if (prevProjectsDir === undefined) delete process.env['CLAUDE_PROJECTS_DIR'];
+      else process.env['CLAUDE_PROJECTS_DIR'] = prevProjectsDir;
+      rmSync(projectsDir, { recursive: true, force: true });
+    }
   });
 
   // ── CLI Recovery Detection ──
