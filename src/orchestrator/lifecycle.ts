@@ -502,7 +502,8 @@ export function claudeAddDirFlags(): string {
  * pastes the multi-KB shell-quoted string into zsh; tmux's send-keys
  * buffer can split mid-`'\''` escape sequence, leaving zsh stuck in
  * `cmdand quote>` continuation prompt and the pane unresponsive
- * (Sammons/agentic-collab#5; captured live on sfcc-2298 vanish 2026-05-25).
+ * (Sammons/agentic-collab#5; captured live on a specialist agent that
+ * vanished 2026-05-25).
  *
  * Switching to a file-based path eliminates all shell quoting entirely —
  * claude reads the file directly, byte-exact. No tmux send-keys buffer

@@ -109,7 +109,7 @@ const DEFAULT_JSONL_DIR = process.env['USAGE_JSONL_DIR'] || '/host-projects';
 const DEFAULT_WINDOW_DAYS = parseInt(process.env['USAGE_WINDOW_DAYS'] || '7', 10);
 // COST_MULTIPLIER — operator-configurable scale for displayed dollar figures.
 // PR #50's list-price overlay is ~100-300× the actual Enterprise contract cost
-// per the 2026-05-31 Netgear chargeback calibration. Default 1.0 (list-price);
+// per the 2026-05-31 enterprise chargeback calibration. Default 1.0 (list-price);
 // operator sets ~0.01 (1%) for Enterprise reality, or 0.0 to suppress dollars.
 const COST_MULTIPLIER = parseFloat(process.env['COST_MULTIPLIER'] || '1.0');
 // SEAT_QUOTA_TOKENS_PER_MONTH — operator's Anthropic seat token allowance.
@@ -409,8 +409,8 @@ export function renderUsageMarkdown(agg: UsageAggregate): string {
   // Cost multiplier scales the list-price overlay against Enterprise reality.
   // Default 1.0 (list-price), operator can set COST_MULTIPLIER=0.01 (or whatever
   // their actual/list ratio is) to make the displayed dollars directionally
-  // useful instead of wildly inflated. Calibration source: 2026-05-31 Netgear
-  // chargeback showed ~0.3-1% of list price for Enterprise plan.
+  // useful instead of wildly inflated. Calibration source: a 2026-05-31
+  // enterprise chargeback review showed ~0.3-1% of list price on that plan.
   const mult = agg.costMultiplier;
   const fmtUsd = (n: number) => `$${(n * mult).toFixed(2)}`;
 
