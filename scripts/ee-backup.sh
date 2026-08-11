@@ -2,7 +2,7 @@
 #
 # ee-backup.sh — daily backup of the operator-local customisation surface
 # into ~/Documents/agentic-collab-backups/ (which corporate OneDrive backs
-# up automatically per the operator's NETGEAR config — see backlog item EE).
+# up automatically per the operator's corporate config — see backlog item EE).
 #
 # Tier-1 surface (operator-irreplaceable; all gitignored):
 #   - persistent-agents/      — 12 persona files, including drone.md

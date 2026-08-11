@@ -27,7 +27,7 @@ describe('UsageAggregator', () => {
   });
 
   it('aggregates input/output/cache-read tokens across assistant messages', async () => {
-    const slugDir = join(tmpDir, '-Users-colm-test');
+    const slugDir = join(tmpDir, '-Users-testuser-test');
     mkdirSync(slugDir);
     const ts = nowIso(0);
     writeFileSync(join(slugDir, 'session-a.jsonl'), makeFixtureJsonl([
