@@ -158,6 +158,40 @@ export async function recoverFailedAgents(ctx: RouteContext, proxyId: string): P
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse, match: URLPatternResult, ctx: RouteContext) => Promise<void>;
 
+/**
+ * macOS sidecar metadata that must never be stored in, or served from, a page
+ * bundle. AppleDouble files (`._foo.md`) are binary resource forks that end in
+ * `.md`, so any `*.md` glob picks them up; feeding one to `renderMarkdown`
+ * pins the event loop and wedges the orchestrator (all HTTP stops, CPU 100%,
+ * log silence). Publishing from a macOS host produces them routinely — a live
+ * sweep found 655 across 212 published bundles, 194 of them `._index.md`.
+ */
+export function isJunkFile(name: string): boolean {
+  return name.startsWith('._') || name === '.DS_Store';
+}
+
+/**
+ * Recursively delete macOS sidecar files left behind by a tar extract.
+ *
+ * Exported for direct testing: GNU/busybox tar (what the container runs)
+ * extracts `._*` entries as ordinary files, but macOS bsdtar consumes them as
+ * resource-fork metadata instead, so the contaminated-extract scenario cannot
+ * be reproduced faithfully through HTTP on a macOS test host.
+ */
+export function pruneJunkFiles(dir: string): number {
+  let removed = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      removed += pruneJunkFiles(p);
+    } else if (isJunkFile(entry.name)) {
+      rmSync(p, { force: true });
+      removed++;
+    }
+  }
+  return removed;
+}
+
 type Route = {
   method: string;
   pattern: URLPattern;
@@ -1206,6 +1240,7 @@ route('POST', '/api/pages', async (req, res, _match, ctx) => {
 
   if (filename) {
     // Single file upload
+    if (isJunkFile(basename(filename))) return json(res, 400, { error: 'Refusing to store macOS sidecar file' });
     mkdirSync(pageDir, { recursive: true });
     writeFileSync(join(pageDir, filename), body);
   } else {
@@ -1217,6 +1252,10 @@ route('POST', '/api/pages', async (req, res, _match, ctx) => {
     } catch (err) {
       return json(res, 400, { error: 'Failed to extract tar: ' + (err as Error).message });
     }
+    // Prune after extraction rather than passing --exclude to tar: the flag's
+    // pattern semantics vary between GNU/BSD/busybox tar, and the container's
+    // implementation is not guaranteed. Post-extract pruning is deterministic.
+    pruneJunkFiles(pageDir);
   }
 
   const stats = dirStats(pageDir);
@@ -1296,19 +1335,20 @@ route('GET', '/pages/:slug', async (_req, res, match, ctx) => {
   }
   // No index — list files (or single-file fallback).
   if (!existsSync(pageDir)) return json(res, 404, { error: 'Page not found' });
-  const files = readdirSync(pageDir);
-  if (files.length === 1) {
-    const filePath = join(pageDir, files[0]!);
+  // Hide macOS resource-fork sidecar files (._*) and hidden dotfiles. This must
+  // happen BEFORE the single-file check: a bundle whose only entry is `._foo.md`
+  // would otherwise take the single-file branch and render an AppleDouble binary.
+  const visibleFiles = readdirSync(pageDir).filter(f => !f.startsWith('.'));
+  if (visibleFiles.length === 1) {
+    const filePath = join(pageDir, visibleFiles[0]!);
     if (filePath.toLowerCase().endsWith('.md')) {
-      serveMarkdownAsHtml(res, filePath, `${slug}/${files[0]}`, `/pages/${slug}/`);
+      serveMarkdownAsHtml(res, filePath, `${slug}/${visibleFiles[0]}`, `/pages/${slug}/`);
       return;
     }
     res.writeHead(200, { 'Content-Type': pageMime(filePath) });
     res.end(readFileSync(filePath));
     return;
   }
-  // Hide macOS resource-fork sidecar files (._*) and hidden dotfiles from the listing.
-  const visibleFiles = files.filter(f => !f.startsWith('.') && !f.startsWith('._'));
   const links = visibleFiles.map(f => `<li><a href="/pages/${slug}/${f}">${f}</a></li>`).join('');
   res.writeHead(200, { 'Content-Type': 'text/html' });
   res.end(`<!DOCTYPE html><html><head><title>${slug}</title></head><body><h1>${slug}</h1><ul>${links}</ul></body></html>`);
@@ -1616,6 +1656,9 @@ route('GET', '/pages/:slug/:path+', async (_req, res, match, ctx) => {
   const slug = match.pathname.groups['slug']!;
   const filePath = match.pathname.groups['path']!;
   if (filePath.includes('..')) return json(res, 400, { error: 'Invalid path' });
+  // Never serve a macOS sidecar file. `._foo.md` ends in `.md`, so without this
+  // guard the renderer below would be handed an AppleDouble binary and wedge.
+  if (isJunkFile(basename(filePath))) return json(res, 404, { error: 'File not found' });
   const fullPath = join(ctx.pagesDir, slug, filePath);
   if (!existsSync(fullPath)) return json(res, 404, { error: 'File not found' });
 
