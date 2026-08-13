@@ -312,6 +312,21 @@ async function dispatchHookResult(
                   });
                 }
               }
+            } else {
+              // A miss leaves whatever the previous launch stored, which then reads
+              // as this launch's id. Silence made that indistinguishable from
+              // success: the only trace was a missing log line, and absence is not
+              // something anyone reads for.
+              const stale = ctx.db.getAgent(opts.agentName)?.capturedVars?.[step.var] ?? null;
+              console.warn(
+                `[lifecycle] ${opts.agentName}: capture for $${step.var} matched nothing in ${step.lines} lines`
+                + ` — retaining previous value ${stale ?? 'none'}, which may now be stale`,
+              );
+              ctx.db.logEvent(opts.agentName, 'capture_miss', undefined, {
+                var: step.var,
+                lines: step.lines,
+                retainedValue: stale,
+              });
             }
           } catch (err) {
             console.warn(`[lifecycle] ${opts.agentName}: capture regex failed for $${step.var}:`, (err as Error).message);

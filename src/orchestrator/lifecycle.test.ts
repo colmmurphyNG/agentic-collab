@@ -277,6 +277,83 @@ describe('Lifecycle', () => {
     });
   });
 
+  describe('spawnAgent — capture miss is reported, not swallowed', () => {
+    const OLD_ID = 'dbf96e82-bd82-407e-80ac-3f0bd2d24c49';
+    const NEW_ID = 'acbc5499-5a68-41d9-8970-424fe3804d90';
+    // A bare test DB seeds no engine config and leaves hook_start NULL, and the
+    // fallback hook dispatches no capture step at all — so the pipeline has to be
+    // supplied here or these tests assert against a path they never reach.
+    const HOOK_WITH_CAPTURE = JSON.stringify([
+      { type: 'shell', command: 'claude' },
+      { type: 'capture', lines: 30, regex: 'uuid', var: 'SESSION_ID' },
+    ]);
+
+    function ctxWithPane(pane: string): LifecycleContext {
+      return {
+        ...ctx,
+        proxyDispatch: async (_proxyId: string, command: ProxyCommand): Promise<ProxyResponse> => {
+          proxyCommands.push(command);
+          if (command.action === 'has_session') return { ok: true, data: false };
+          if (command.action === 'capture') return { ok: true, data: pane };
+          return { ok: true };
+        },
+      };
+    }
+
+    it('should log a capture_miss event when the regex matches nothing', async () => {
+      db.createAgent({ name: 'cap-miss', engine: 'claude', cwd: '/tmp', proxyId: 'p1', hookStart: HOOK_WITH_CAPTURE });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      db.updateAgentCapturedVar('cap-miss', 'SESSION_ID', OLD_ID);
+
+      // A pane with no UUID anywhere — what a wedged /status modal leaves behind.
+      await spawnAgent(ctxWithPane('some pane text with no uuid in it\n> \n'), {
+        name: 'cap-miss', engine: 'claude', cwd: '/tmp', proxyId: 'p1',
+      });
+
+      const miss = db.getEvents('cap-miss', 50).find(e => e.event === 'capture_miss');
+      assert.ok(miss, 'a capture that matches nothing must emit capture_miss');
+      const meta = typeof miss.meta === 'string' ? JSON.parse(miss.meta) : miss.meta;
+      assert.equal(meta.var, 'SESSION_ID');
+      assert.equal(meta.retainedValue, OLD_ID, 'the event must name the stale value it kept');
+    });
+
+    it('should retain the previous captured value on a miss rather than clearing it', async () => {
+      db.createAgent({ name: 'cap-miss-keep', engine: 'claude', cwd: '/tmp', proxyId: 'p1', hookStart: HOOK_WITH_CAPTURE });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      db.updateAgentCapturedVar('cap-miss-keep', 'SESSION_ID', OLD_ID);
+
+      await spawnAgent(ctxWithPane('no uuid here\n> \n'), {
+        name: 'cap-miss-keep', engine: 'claude', cwd: '/tmp', proxyId: 'p1',
+      });
+
+      assert.equal(
+        db.getAgent('cap-miss-keep')?.capturedVars?.['SESSION_ID'], OLD_ID,
+        'clearing would discard the only pointer to a transcript that may still be on disk',
+      );
+    });
+
+    // The control. Without it, capture_miss firing unconditionally would pass the
+    // test above and the event would carry no information.
+    it('should not log capture_miss when the regex does match', async () => {
+      db.createAgent({ name: 'cap-hit', engine: 'claude', cwd: '/tmp', proxyId: 'p1', hookStart: HOOK_WITH_CAPTURE });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      db.updateAgentCapturedVar('cap-hit', 'SESSION_ID', OLD_ID);
+
+      await spawnAgent(ctxWithPane(`session uuid: ${NEW_ID}\n> \n`), {
+        name: 'cap-hit', engine: 'claude', cwd: '/tmp', proxyId: 'p1',
+      });
+
+      assert.equal(
+        db.getEvents('cap-hit', 50).some(e => e.event === 'capture_miss'), false,
+        'a successful capture must not report a miss',
+      );
+      assert.equal(
+        db.getAgent('cap-hit')?.capturedVars?.['SESSION_ID'], NEW_ID,
+        'a successful capture must overwrite the stale value',
+      );
+    });
+  });
+
   describe('spawnAgent — paste command verification', () => {
     it('claude spawn includes --model, --effort, and -p flags', async () => {
       db.createAgent({ name: 'cmd-claude', engine: 'claude', cwd: '/tmp', proxyId: 'p1', permissions: 'skip' });
