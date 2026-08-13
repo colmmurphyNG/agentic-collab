@@ -7,6 +7,17 @@ import { execSync, execFileSync, type ExecSyncOptions } from 'node:child_process
 
 const EXEC_OPTS: ExecSyncOptions = { encoding: 'utf-8', timeout: 10_000 };
 
+// tmux resolves -t exact-then-prefix, so an unanchored 'agent-dev' matches
+// 'agent-dev-a'. The two anchored forms are not interchangeable: a pane or
+// window target needs the trailing colon, and '=name' alone fails to resolve.
+export function sessionTarget(name: string): string {
+  return `=${name}`;
+}
+
+export function paneTarget(name: string): string {
+  return `=${name}:`;
+}
+
 function exec(cmd: string): string {
   try {
     return (execSync(cmd, EXEC_OPTS) as string).trim();
@@ -29,7 +40,7 @@ export function createSession(sessionName: string, cwd: string): void {
 export function hasSession(sessionName: string): boolean {
   validateSessionName(sessionName);
   try {
-    exec(`tmux has-session -t '${esc(sessionName)}'`);
+    exec(`tmux has-session -t '${esc(sessionTarget(sessionName))}'`);
     return true;
   } catch {
     return false;
@@ -39,7 +50,7 @@ export function hasSession(sessionName: string): boolean {
 export function killSession(sessionName: string): void {
   validateSessionName(sessionName);
   try {
-    exec(`tmux kill-session -t '${esc(sessionName)}'`);
+    exec(`tmux kill-session -t '${esc(sessionTarget(sessionName))}'`);
   } catch {
     // Session may already be gone
   }
@@ -48,7 +59,7 @@ export function killSession(sessionName: string): void {
 export function clearHistory(sessionName: string): void {
   validateSessionName(sessionName);
   try {
-    exec(`tmux clear-history -t '${esc(sessionName)}'`);
+    exec(`tmux clear-history -t '${esc(paneTarget(sessionName))}'`);
   } catch {
     // Session may be gone — non-fatal
   }
@@ -77,17 +88,17 @@ export async function pasteText(sessionName: string, text: string, pressEnter: b
   validateSessionName(sessionName);
   // Verify tmux is responsive before pasting — catches locked/overloaded sessions
   try {
-    execSync(`tmux capture-pane -t '${esc(sessionName)}' -p -S -1`, { ...EXEC_OPTS, timeout: 5000 });
+    execSync(`tmux capture-pane -t '${esc(paneTarget(sessionName))}' -p -S -1`, { ...EXEC_OPTS, timeout: 5000 });
   } catch {
     throw new Error(`tmux session "${sessionName}" is not responsive (capture-pane timed out)`);
   }
   // Pass text via stdin (input option) to avoid all shell escaping issues
   execSync('tmux load-buffer -', { ...EXEC_OPTS, input: text });
-  exec(`tmux paste-buffer -t '${esc(sessionName)}'`);
+  exec(`tmux paste-buffer -t '${esc(paneTarget(sessionName))}'`);
 
   if (pressEnter) {
     await new Promise<void>((r) => setTimeout(r, pasteEnterDelay(text.length)));
-    exec(`tmux send-keys -t '${esc(sessionName)}' Enter`);
+    exec(`tmux send-keys -t '${esc(paneTarget(sessionName))}' Enter`);
   }
 }
 
@@ -97,7 +108,7 @@ export async function pasteText(sessionName: string, text: string, pressEnter: b
 export function capturePaneLines(sessionName: string, lines: number): string {
   validateSessionName(sessionName);
   const safeLines = Math.max(1, Math.min(Math.floor(lines) || 50, 10000));
-  return exec(`tmux capture-pane -t '${esc(sessionName)}' -p -S -${safeLines}`);
+  return exec(`tmux capture-pane -t '${esc(paneTarget(sessionName))}' -p -S -${safeLines}`);
 }
 
 /**
@@ -106,7 +117,7 @@ export function capturePaneLines(sessionName: string, lines: number): string {
  */
 export function paneActivity(sessionName: string): number {
   validateSessionName(sessionName);
-  const output = exec(`tmux display-message -t '${esc(sessionName)}' -p '#{window_activity}'`);
+  const output = exec(`tmux display-message -t '${esc(paneTarget(sessionName))}' -p '#{window_activity}'`);
   const ts = parseInt(output, 10);
   return Number.isFinite(ts) ? ts : 0;
 }
@@ -123,7 +134,7 @@ export function sendKeys(sessionName: string, keys: string): void {
   if (!SAFE_KEYS_RE.test(keys)) {
     throw new Error(`Invalid keys: "${keys}" — only alphanumeric, spaces, and hyphens allowed`);
   }
-  exec(`tmux send-keys -t '${esc(sessionName)}' ${keys}`);
+  exec(`tmux send-keys -t '${esc(paneTarget(sessionName))}' ${keys}`);
 }
 
 /**
@@ -135,7 +146,7 @@ export function sendKeysRaw(sessionName: string, keys: string[]): void {
   if (!Array.isArray(keys) || keys.length === 0) {
     throw new Error('keys required');
   }
-  execFileSync('tmux', ['send-keys', '-t', sessionName, ...keys], EXEC_OPTS);
+  execFileSync('tmux', ['send-keys', '-t', paneTarget(sessionName), ...keys], EXEC_OPTS);
 }
 
 /**
@@ -146,7 +157,7 @@ export function displayMessage(sessionName: string, format: string): string {
   if (!format) {
     throw new Error('format required');
   }
-  return (execFileSync('tmux', ['display-message', '-t', sessionName, '-p', format], EXEC_OPTS) as string).trim();
+  return (execFileSync('tmux', ['display-message', '-t', paneTarget(sessionName), '-p', format], EXEC_OPTS) as string).trim();
 }
 
 /**
@@ -156,7 +167,7 @@ export function resizePane(sessionName: string, width: number, height: number): 
   validateSessionName(sessionName);
   const w = Math.max(1, Math.min(Math.floor(width), 500));
   const h = Math.max(1, Math.min(Math.floor(height), 200));
-  exec(`tmux resize-window -t '${esc(sessionName)}' -x ${w} -y ${h}`);
+  exec(`tmux resize-window -t '${esc(paneTarget(sessionName))}' -x ${w} -y ${h}`);
 }
 
 /**
