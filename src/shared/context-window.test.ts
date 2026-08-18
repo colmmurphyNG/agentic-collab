@@ -25,9 +25,11 @@ describe('parseContextWindow', () => {
     assert.equal(parseContextWindow('(128K context)'), 128_000);
   });
 
-  test('should fall back to the default when no window is declared', () => {
-    const pane = '  ~/dev/conductor  Opus 5  ctx: 12% used';
-    assert.equal(parseContextWindow(pane), DEFAULT_CONTEXT_WINDOW_TOKENS);
+  test('should fall back to the default when neither a window nor a known model is present', () => {
+    // A recognised model name is enough on its own, so this case needs a banner
+    // carrying neither — see the model-name suite for the "Opus 5, no
+    // declaration" case, which resolves to 1M by design.
+    assert.equal(parseContextWindow('  ~/dev/conductor  SomeFutureModel  ctx: 12% used'), DEFAULT_CONTEXT_WINDOW_TOKENS);
     assert.equal(parseContextWindow(''), DEFAULT_CONTEXT_WINDOW_TOKENS);
   });
 
@@ -37,5 +39,33 @@ describe('parseContextWindow', () => {
 
   test('should not treat a token count as a window declaration', () => {
     assert.equal(parseContextWindow('· Pontificating… (2m 14s · ↓ 4.0k tokens)'), DEFAULT_CONTEXT_WINDOW_TOKENS);
+  });
+});
+
+describe('parseContextWindow — model-name source', () => {
+  test('should derive 1M for an Opus 5 banner that omits the declaration', () => {
+    // Measured 2026-08-18: tl and pwa both print a bare "Opus 5" yet run a 1M
+    // window (943,749 tokens at 94%; 417,941 at 42%). Falling back to 200k here
+    // would reintroduce the 5x error this module exists to remove.
+    assert.equal(parseContextWindow('  ~/dev  Opus 5  ctx: 94% used'), 1_000_000);
+    assert.equal(parseContextWindow('  ~/dev/SFCC-webapp  Opus 5  ctx: 42% used'), 1_000_000);
+  });
+
+  test('should prefer an explicit declaration over the model-name mapping', () => {
+    assert.equal(parseContextWindow('Opus 5 (200k context)  ctx: 30% used'), 200_000);
+  });
+
+  test('should agree with the model mapping when both sources are present', () => {
+    assert.equal(parseContextWindow('Opus 5 (1M context)  ctx: 81% used'), 1_000_000);
+  });
+
+  test('should be case-insensitive on the model name', () => {
+    assert.equal(parseContextWindow('opus 5  ctx: 10% used'), 1_000_000);
+    assert.equal(parseContextWindow('OPUS5  ctx: 10% used'), 1_000_000);
+  });
+
+  test('should fall back to the default for an unmeasured model', () => {
+    // Haiku's window has not been measured here, so it must not be guessed.
+    assert.equal(parseContextWindow('  ~/dev  Haiku  ctx: 73% used'), DEFAULT_CONTEXT_WINDOW_TOKENS);
   });
 });
