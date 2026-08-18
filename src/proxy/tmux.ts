@@ -27,6 +27,24 @@ function exec(cmd: string): string {
   }
 }
 
+/**
+ * Detached tmux sessions default to 80x24, which is too narrow for the Claude
+ * Code status bar: it renders the displayed path, the model, and `ctx: NN% used`
+ * on one line, so a long path pushes the context reading past the right edge and
+ * it is never written to the pane at all.
+ *
+ * That silently removed agents from the ctx-threshold auto-recycle net — and
+ * selectively, since a long displayed path comes from working in a deep scratch
+ * or memory directory, which is also what accumulates context fastest. Measured
+ * 2026-08-18 at 80 columns: four agents unreadable, one of them at 83%, plus a
+ * fifth truncated mid-value at 93% (above the 92% recycle threshold).
+ *
+ * 200 columns fits the longest path in use with room to spare. Nothing reads the
+ * pane by fixed column offsets, so widening is safe for every consumer.
+ */
+const SESSION_WIDTH = 200;
+const SESSION_HEIGHT = 50;
+
 export function createSession(sessionName: string, cwd: string): void {
   validateSessionName(sessionName);
   // Unset CLAUDECODE so spawned Claude Code instances don't think they're nested.
@@ -34,7 +52,7 @@ export function createSession(sessionName: string, cwd: string): void {
   // Explicitly pass PATH so engines like Codex that spawn sub-shells don't lose
   // the collab bin directory that the proxy prepended at startup.
   const path = process.env['PATH'] ?? '';
-  exec(`tmux new-session -d -s '${esc(sessionName)}' -c '${esc(cwd)}' -e CLAUDECODE= -e PATH='${esc(path)}'`);
+  exec(`tmux new-session -d -s '${esc(sessionName)}' -c '${esc(cwd)}' -x ${SESSION_WIDTH} -y ${SESSION_HEIGHT} -e CLAUDECODE= -e PATH='${esc(path)}'`);
 }
 
 export function hasSession(sessionName: string): boolean {
