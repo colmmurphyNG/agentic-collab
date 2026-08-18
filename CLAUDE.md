@@ -49,7 +49,7 @@ src/
 ## Key Patterns
 
 - **3-phase locking**: lifecycle.ts uses optimistic concurrency via version column
-- **Health monitor**: 30s poll cycle, idle detection via tmux parsing, 80%→compact, 90%→reload
+- **Health monitor**: 30s poll cycle, idle detection via tmux parsing, context% recorded for display, auto-**recycle** at ≥92% (`AUTO_RECYCLE_THRESHOLD_PCT`) when the agent is **idle**, with a 30-minute per-agent cooldown. There is no auto-compact and no auto-reload — `compactAgent` is only reachable via `POST /api/agents/:name/compact`. Context% comes from the pane: a printed percentage is used as-is, a token count is divided by the window the pane declares (`shared/context-window.ts`), not a fixed 200k.
 - **Message dispatch**: event-driven queue with cool-down coordination (300ms after lifecycle ops)
 - **Personas**: `persistent-agents/*.md` with YAML frontmatter (engine, cwd, model, hooks)
 - **`renderMarkdown` forward-progress invariant** (`src/docs/render.ts`): every branch in the block-dispatch `while` loop **must** advance `i` before `continue`. The heading regex (`#{1,6}\s+…`) and the paragraph continuation guard (`startsWith('#')`) are intentionally non-identical — a line like `#1602 foo` falls through to the paragraph branch, which seeds `paraLines` with the current line before incrementing `i`. Any new dispatch branch that does not advance `i` will spin the event loop forever and wedge the orchestrator (all HTTP stops, CPU 100%, log silence). The regression test in `src/docs/render.test.ts` uses a subprocess-with-hard-timeout harness (`execFileSync` + `timeout: 4000`) so a hang surfaces as a test failure rather than a suite hang — follow this pattern for any synchronous parser/renderer regression test.

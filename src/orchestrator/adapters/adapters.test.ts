@@ -235,13 +235,15 @@ describe('Engine Adapters', () => {
     });
 
     it('parses context percent from token count format', () => {
-      const result = adapter.parseContextPercent('some output\n                                                                  15048 tokens');
+      // The window must be knowable to convert a token count, so the banner
+      // declares it — same arithmetic as before against 200k.
+      const result = adapter.parseContextPercent('(200k context)\n                                                                  15048 tokens');
       assert.equal(result.contextPct, 8); // 15048/200000 ≈ 7.5% rounds to 8%
       assert.equal(result.confident, true);
     });
 
     it('parses context percent from large token count', () => {
-      const result = adapter.parseContextPercent('  160000 tokens');
+      const result = adapter.parseContextPercent('(200k context)\n  160000 tokens');
       assert.equal(result.contextPct, 80);
       assert.equal(result.confident, true);
     });
@@ -610,6 +612,56 @@ describe('Engine Adapters', () => {
 
     it('buildDetectSessionCommand returns null (OpenCode uses pane parsing)', () => {
       assert.equal(adapter.buildDetectSessionCommand('/some/cwd'), null);
+    });
+  });
+
+  describe('ClaudeAdapter context window derivation', () => {
+    const adapter = new ClaudeAdapter();
+
+    it('should read the current "ctx: NN% used" status-bar format', () => {
+      const pane = '  ~/dev/SFCC-webapp/retail-react-app  Opus 5 (1M context)  ctx: 81% used';
+      const result = adapter.parseContextPercent(pane);
+      assert.equal(result.contextPct, 81);
+      assert.equal(result.confident, true);
+    });
+
+    it('should use a printed percentage directly rather than rescaling it', () => {
+      // A percentage from Claude Code is already computed against the real
+      // window: 809,657 tokens on 1M reads as 81%. Rescaling would double-count.
+      const pane = 'Opus 5 (1M context)  ctx: 81% used';
+      assert.equal(adapter.parseContextPercent(pane).contextPct, 81);
+    });
+
+    it('should derive the window from the pane for a token count, not assume 200k', () => {
+      // 500,000 tokens is 50% of a declared 1M window. The old hardcoded
+      // 200k divisor would have saturated this to 100.
+      const pane = 'Opus 5 (1M context)\n  500000 tokens';
+      assert.equal(adapter.parseContextPercent(pane).contextPct, 50);
+    });
+
+    it('should report nothing for a token count when the window is unknowable', () => {
+      // Deliberately not a 200k guess: over-reporting occupancy would recycle a
+      // healthy agent. No window means no reading, so no recycle.
+      const result = adapter.parseContextPercent('  160000 tokens');
+      assert.equal(result.contextPct, null);
+      assert.equal(result.confident, false);
+    });
+
+    it('should convert a token count using the window implied by the model', () => {
+      assert.equal(adapter.parseContextPercent('Opus 5\n  500000 tokens').contextPct, 50);
+    });
+
+    it('should not be tripped into a low reading by the spinner token counter', () => {
+      // The spinner prints an abbreviated transfer count ("4.0k tokens") which
+      // must not be read as context occupancy.
+      const pane = '\u00b7 Pontificating\u2026 (2m 14s \u00b7 \u2193 4.0k tokens)\n  Opus 5 (1M context)  ctx: 38% used';
+      assert.equal(adapter.parseContextPercent(pane).contextPct, 38);
+    });
+
+    it('should return null when the pane carries no context reading', () => {
+      const result = adapter.parseContextPercent('no context info here');
+      assert.equal(result.contextPct, null);
+      assert.equal(result.confident, false);
     });
   });
 });

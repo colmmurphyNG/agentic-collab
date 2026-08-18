@@ -23,6 +23,7 @@ import { getAdapter } from './adapters/index.ts';
 import { reloadAgent, recoverAgent, recycleAgent, type LifecycleContext } from './lifecycle.ts';
 import { resolveEffectiveConfig } from './engine-config-resolver.ts';
 import { cliFailurePatterns, shellPromptPatterns } from './cli-failure-patterns.ts';
+import { parseContextWindow } from '../shared/context-window.ts';
 import { findSessionTranscript } from './session-transcript.ts';
 
 type CompiledDetection = {
@@ -557,9 +558,17 @@ export class HealthMonitor {
           // If the matched text contains '%', treat as direct percentage.
           // Otherwise assume token count and convert (200k context window).
           if (match[0].includes('%')) {
+            // Already a percentage against the model's real window — use directly.
             contextPct = Math.min(100, rawValue);
           } else {
-            contextPct = Math.min(100, Math.round((rawValue / 200_000) * 100));
+            // Token count: needs a known window. When it is unknown we leave
+            // contextPct null so nothing is recorded and no recycle fires —
+            // guessing small would over-report and destroy a healthy agent
+            // (see shared/context-window.ts).
+            const maxTokens = parseContextWindow(paneOutput);
+            if (maxTokens !== null) {
+              contextPct = Math.min(100, Math.round((rawValue / maxTokens) * 100));
+            }
           }
           break;
         }

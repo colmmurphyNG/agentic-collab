@@ -4,6 +4,7 @@
 
 import { SPINNER_REGEX, type EngineAdapter, type SpawnOptions, type ResumeOptions, type IdleState, type ContextResult } from './types.ts';
 import { shellQuote } from '../../shared/utils.ts';
+import { parseContextWindow } from '../../shared/context-window.ts';
 
 /**
  * Optional path passed to `claude --add-dir` so the spawned agent can read
@@ -128,24 +129,29 @@ export class ClaudeAdapter implements EngineAdapter {
 
   parseContextPercent(paneOutput: string): ContextResult {
     const lines = paneOutput.split('\n');
+    const maxTokens = parseContextWindow(paneOutput);
 
     // Search bottom-up for status bar indicators.
-    // Claude Code v2.x shows token count ("NNNNN tokens") in the status bar.
-    // Older versions may show "XX% context used".
     for (let i = lines.length - 1; i >= Math.max(0, lines.length - 20); i--) {
       const line = lines[i] ?? '';
 
-      // Percentage format: "XX% context"
-      const pctMatch = line.match(/(\d+)%\s*context/i);
+      // Percentage formats. Current Claude Code prints "ctx: NN% used"; older
+      // builds printed "NN% context". Both are already computed against the
+      // model's real window, so use them directly — verified 2026-08-18 on a
+      // 1M-window Opus 5 agent reading 81% at 809,657 actual tokens (81.0%).
+      const pctMatch = line.match(/(\d+)%\s*(?:used|context)/i);
       if (pctMatch) {
         return { contextPct: parseInt(pctMatch[1]!, 10), confident: true };
       }
 
-      // Token count format: "NNNNN tokens" — estimate percentage from 200k context window
+      // Token count format: "NNNNN tokens" — needs a known window to convert.
+      // If the window is unknown we report nothing rather than guessing: a
+      // guessed-small window over-reports occupancy and would recycle an agent
+      // that was fine. See shared/context-window.ts on why the fail-safe
+      // direction inverts for a destructive consumer.
       const tokenMatch = line.match(/(\d[\d,]*)\s*tokens/);
-      if (tokenMatch) {
+      if (tokenMatch && maxTokens !== null) {
         const tokens = parseInt(tokenMatch[1]!.replace(/,/g, ''), 10);
-        const maxTokens = 200_000; // Claude's context window
         const pct = Math.min(100, Math.round((tokens / maxTokens) * 100));
         return { contextPct: pct, confident: true };
       }

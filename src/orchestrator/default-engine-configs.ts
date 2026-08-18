@@ -144,7 +144,11 @@ const CLAUDE_DETECTION = {
     // visible as info indicators (see BACKGROUND_SHELLS_INDICATOR /
     // BACKGROUND_TASKS_INDICATOR above).
   ],
-  contextPattern: '(\\d+)\\s*tokens',
+  // Claude Code prints "ctx: NN% used"; older builds printed "NN% context".
+  // A bare token count is handled by the adapter fallback. Matching a percentage
+  // here is deliberate: the percent branch in health-monitor uses the value
+  // directly, bypassing any window-size conversion.
+  contextPattern: '(\\d+)%\\s*(?:used|context)',
   idleThreshold: 2,
   activeGraceMs: 10000,
   snapshotLines: 30,
