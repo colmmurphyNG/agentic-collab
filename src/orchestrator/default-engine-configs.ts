@@ -144,11 +144,15 @@ const CLAUDE_DETECTION = {
     // visible as info indicators (see BACKGROUND_SHELLS_INDICATOR /
     // BACKGROUND_TASKS_INDICATOR above).
   ],
-  // Claude Code prints "ctx: NN% used"; older builds printed "NN% context".
-  // A bare token count is handled by the adapter fallback. Matching a percentage
-  // here is deliberate: the percent branch in health-monitor uses the value
-  // directly, bypassing any window-size conversion.
-  contextPattern: '(\\d+)%\\s*(?:used|context)',
+  // Anchored on the literal "ctx:" prefix and stopping at the '%' — NOT on the
+  // trailing word. The status bar is truncated at the pane's right edge, so a
+  // long displayed path leaves "ctx: 93% u" with "used" cut off. Requiring the
+  // trailing word silently loses exactly the agents whose banners overflow, and
+  // one of them was above the recycle threshold when this was found. Older
+  // builds printed "NN% context"; the adapter fallback still covers that and a
+  // bare token count. Matching a percentage is deliberate: the percent branch in
+  // health-monitor uses the value directly, bypassing window-size conversion.
+  contextPattern: 'ctx:\\s*(\\d+)%',
   idleThreshold: 2,
   activeGraceMs: 10000,
   snapshotLines: 30,
