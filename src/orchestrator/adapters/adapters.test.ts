@@ -612,4 +612,46 @@ describe('Engine Adapters', () => {
       assert.equal(adapter.buildDetectSessionCommand('/some/cwd'), null);
     });
   });
+
+  describe('ClaudeAdapter context window derivation', () => {
+    const adapter = new ClaudeAdapter();
+
+    it('should read the current "ctx: NN% used" status-bar format', () => {
+      const pane = '  ~/dev/SFCC-webapp/retail-react-app  Opus 5 (1M context)  ctx: 81% used';
+      const result = adapter.parseContextPercent(pane);
+      assert.equal(result.contextPct, 81);
+      assert.equal(result.confident, true);
+    });
+
+    it('should use a printed percentage directly rather than rescaling it', () => {
+      // A percentage from Claude Code is already computed against the real
+      // window: 809,657 tokens on 1M reads as 81%. Rescaling would double-count.
+      const pane = 'Opus 5 (1M context)  ctx: 81% used';
+      assert.equal(adapter.parseContextPercent(pane).contextPct, 81);
+    });
+
+    it('should derive the window from the pane for a token count, not assume 200k', () => {
+      // 500,000 tokens is 50% of a declared 1M window. The old hardcoded
+      // 200k divisor would have saturated this to 100.
+      const pane = 'Opus 5 (1M context)\n  500000 tokens';
+      assert.equal(adapter.parseContextPercent(pane).contextPct, 50);
+    });
+
+    it('should still assume 200k for a token count when no window is declared', () => {
+      assert.equal(adapter.parseContextPercent('  160000 tokens').contextPct, 80);
+    });
+
+    it('should not be tripped into a low reading by the spinner token counter', () => {
+      // The spinner prints an abbreviated transfer count ("4.0k tokens") which
+      // must not be read as context occupancy.
+      const pane = '\u00b7 Pontificating\u2026 (2m 14s \u00b7 \u2193 4.0k tokens)\n  Opus 5 (1M context)  ctx: 38% used';
+      assert.equal(adapter.parseContextPercent(pane).contextPct, 38);
+    });
+
+    it('should return null when the pane carries no context reading', () => {
+      const result = adapter.parseContextPercent('no context info here');
+      assert.equal(result.contextPct, null);
+      assert.equal(result.confident, false);
+    });
+  });
 });

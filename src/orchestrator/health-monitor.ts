@@ -23,6 +23,7 @@ import { getAdapter } from './adapters/index.ts';
 import { reloadAgent, recoverAgent, recycleAgent, type LifecycleContext } from './lifecycle.ts';
 import { resolveEffectiveConfig } from './engine-config-resolver.ts';
 import { cliFailurePatterns, shellPromptPatterns } from './cli-failure-patterns.ts';
+import { parseContextWindow } from '../shared/context-window.ts';
 import { findSessionTranscript } from './session-transcript.ts';
 
 type CompiledDetection = {
@@ -557,9 +558,13 @@ export class HealthMonitor {
           // If the matched text contains '%', treat as direct percentage.
           // Otherwise assume token count and convert (200k context window).
           if (match[0].includes('%')) {
+            // Already a percentage against the model's real window — use directly.
             contextPct = Math.min(100, rawValue);
           } else {
-            contextPct = Math.min(100, Math.round((rawValue / 200_000) * 100));
+            // Token count: divide by the window the pane declares, not a
+            // hardcoded 200k (Opus 5 runs 1M — see shared/context-window.ts).
+            const maxTokens = parseContextWindow(paneOutput);
+            contextPct = Math.min(100, Math.round((rawValue / maxTokens) * 100));
           }
           break;
         }
