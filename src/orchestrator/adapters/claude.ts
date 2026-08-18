@@ -139,6 +139,15 @@ export class ClaudeAdapter implements EngineAdapter {
       // builds printed "NN% context". Both are already computed against the
       // model's real window, so use them directly — verified 2026-08-18 on a
       // 1M-window Opus 5 agent reading 81% at 809,657 actual tokens (81.0%).
+      // Anchored on "ctx:" and stopping at '%', so a banner truncated at the
+      // pane edge ("ctx: 93% u") still reads. Requiring the trailing word loses
+      // agents whose displayed path is long enough to overflow the status bar.
+      const ctxMatch = line.match(/ctx:\s*(\d+)%/i);
+      if (ctxMatch) {
+        return { contextPct: parseInt(ctxMatch[1]!, 10), confident: true };
+      }
+
+      // Older builds: "NN% context" / "NN% used" without the ctx: prefix.
       const pctMatch = line.match(/(\d+)%\s*(?:used|context)/i);
       if (pctMatch) {
         return { contextPct: parseInt(pctMatch[1]!, 10), confident: true };
