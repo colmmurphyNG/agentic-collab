@@ -639,6 +639,34 @@ describe('Engine Adapters', () => {
       assert.equal(adapter.parseContextPercent(pane).contextPct, 50);
     });
 
+    it('should read a status bar truncated at the pane edge', () => {
+      // Long displayed paths push the status bar past the pane width, leaving the
+      // value intact but the trailing word cut: "ctx: 93% u". Found live on an
+      // agent sitting ABOVE the 92% recycle threshold and therefore invisible to
+      // it — requiring "used" loses exactly the agents that overflow.
+      const pane = '  ~/.claude/projects/-Users-colm-murphy-dev-datadog/memory  Opus 5  ctx: 93% u';
+      const result = adapter.parseContextPercent(pane);
+      assert.equal(result.contextPct, 93);
+      assert.equal(result.confident, true);
+    });
+
+    it('should read a status bar truncated immediately after the percent sign', () => {
+      assert.equal(adapter.parseContextPercent('  ~/very/long/path  Opus 5  ctx: 74%').contextPct, 74);
+    });
+
+    it('should still read the older "NN% context" form without a ctx: prefix', () => {
+      assert.equal(adapter.parseContextPercent('some output\n45% context remaining').contextPct, 45);
+    });
+
+    it('should report nothing when the banner is truncated before the ctx field', () => {
+      // Nothing to parse — not a pattern failure. These agents are structurally
+      // invisible to the net until their displayed path shortens.
+      const pane = '  ~/.claude/projects/-Users-colm-murphy-dev-SFCC-webapp/memory  Opus 5 (1M con';
+      const result = adapter.parseContextPercent(pane);
+      assert.equal(result.contextPct, null);
+      assert.equal(result.confident, false);
+    });
+
     it('should report nothing for a token count when the window is unknowable', () => {
       // Deliberately not a 200k guess: over-reporting occupancy would recycle a
       // healthy agent. No window means no reading, so no recycle.
