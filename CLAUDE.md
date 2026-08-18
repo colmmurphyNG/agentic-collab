@@ -6,7 +6,7 @@ Zero-dependency orchestrator for AI coding agents via tmux. Node 24 native TypeS
 
 ```bash
 ./start.sh          # orchestrator (host :8001 → container :3000) + proxy (host :3100)
-node --test 'src/**/*.test.ts'  # ~875 tests
+node --test 'src/**/*.test.ts'  # 1308 tests (measured 2026-08-18)
 npx tsc --noEmit    # type check
 ```
 
@@ -97,7 +97,7 @@ Changes:
 ## Known Issues / Gotchas
 
 <!-- AUTO-MANAGED: git-insights -->
-- **AppleDouble wedge (2026-06-29)** — macOS `._*` metadata files in a pages bundle directory cause a CPU-pinning event-loop wedge. `routes.ts` page handler uses `readdirSync` + `*.md` glob; `._index.md` ends in `.md`, its binary AppleDouble header triggers pathological behaviour in the markdown parser (CPU 100%, log silence, HTTP timeouts from inside and outside the container). **Fix needed in `routes.ts`**: skip dotfiles (`name.startsWith('.')`) or match only `index.md` literally. **Fix needed in `POST /api/pages` tar handler**: strip `._*` and `.DS_Store` before writing to `PAGES_DIR`. Diagnostic: CPU 100%, Node state `R wchan=0`, FD count stable, all background loop logs stop. Full incident: `scratch/brain/wedge-2026-06-29/index.md`.
+- **AppleDouble wedge (2026-06-29)** — macOS `._*` metadata files in a pages bundle directory cause a CPU-pinning event-loop wedge. `routes.ts` page handler uses `readdirSync` + `*.md` glob; `._index.md` ends in `.md`, its binary AppleDouble header triggers pathological behaviour in the markdown parser (CPU 100%, log silence, HTTP timeouts from inside and outside the container). **Both fixes have landed** (verified 2026-08-18) — this entry is kept for the diagnostic signature, not as outstanding work. `isJunkFile()` (`routes.ts`) rejects `._*` and `.DS_Store`, and is wired into the tar-extract path, the single-file store path and the file-read path; the page-directory listing separately filters all dotfiles. Diagnostic: CPU 100%, Node state `R wchan=0`, FD count stable, all background loop logs stop. Full incident: `scratch/brain/wedge-2026-06-29/index.md`.
 - **~~`lastActivity` hydration corruption on restart~~ — FIXED 2026-08-18, and the diagnosis above was wrong.** The absurd `grace elapsed=~1.78e12 ms` came from `lastActivityDetected`, an **in-memory `Map`** on the health monitor that is empty after a restart by construction — read with `?? 0`, which turned the "never observed" sentinel into an epoch timestamp. It was never a DB field and nothing in the DB was corrupt. The guarded transition was already correct (no observed activity ⇒ nothing holding the agent active ⇒ idle is right); only the arithmetic and the log line were wrong. `undefined` is now kept distinct from a timestamp and the line reads `no activity observed since restart`. Lesson worth keeping: an alarming number that appears every boot and resolves to nothing each time trains readers to discount that log line, which is how a real signal on it would be missed — and it survived a week of edits to the same file for exactly that reason.
 <!-- END AUTO-MANAGED -->
 
