@@ -660,14 +660,22 @@ export class HealthMonitor {
       // Enforce grace period — don't transition to idle if recent activity was detected
       const detection = this.compiledDetection.get(agent.engine);
       const graceMs = detection?.config.activeGraceMs ?? HealthMonitor.ACTIVE_GRACE_MS;
-      const lastActivity = this.lastActivityDetected.get(agent.name) ?? 0;
-      const elapsed = Date.now() - lastActivity;
-      if (elapsed < graceMs) {
+      // `lastActivityDetected` is in-memory and empty after an orchestrator
+      // restart, so "never observed" must stay distinct from a timestamp.
+      // Defaulting it to 0 made the sentinel arithmetic as a 1970 date and
+      // logged `grace elapsed=1787067671828ms` (~56,000 years) on the first
+      // pass after every boot — alarming, and it hid the real meaning: there is
+      // no observed activity to hold the agent active against.
+      const lastActivity = this.lastActivityDetected.get(agent.name);
+      if (lastActivity !== undefined && Date.now() - lastActivity < graceMs) {
         return; // Still within grace period, stay active
       }
       const current = this.db.getAgent(agent.name);
       if (current && current.state === 'active') {
-        console.log(`[health] ${agent.name}: active → idle (unchanged=${this.unchangedCount.get(agent.name) ?? 0}, grace elapsed=${elapsed}ms)`);
+        const graceNote = lastActivity === undefined
+          ? 'no activity observed since restart'
+          : `grace elapsed=${Date.now() - lastActivity}ms`;
+        console.log(`[health] ${agent.name}: active → idle (unchanged=${this.unchangedCount.get(agent.name) ?? 0}, ${graceNote})`);
         this.db.updateAgentState(agent.name, 'idle', current.version, {
           lastActivity: new Date().toISOString(),
         });
