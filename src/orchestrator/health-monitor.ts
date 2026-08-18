@@ -561,10 +561,14 @@ export class HealthMonitor {
             // Already a percentage against the model's real window — use directly.
             contextPct = Math.min(100, rawValue);
           } else {
-            // Token count: divide by the window the pane declares, not a
-            // hardcoded 200k (Opus 5 runs 1M — see shared/context-window.ts).
+            // Token count: needs a known window. When it is unknown we leave
+            // contextPct null so nothing is recorded and no recycle fires —
+            // guessing small would over-report and destroy a healthy agent
+            // (see shared/context-window.ts).
             const maxTokens = parseContextWindow(paneOutput);
-            contextPct = Math.min(100, Math.round((rawValue / maxTokens) * 100));
+            if (maxTokens !== null) {
+              contextPct = Math.min(100, Math.round((rawValue / maxTokens) * 100));
+            }
           }
           break;
         }

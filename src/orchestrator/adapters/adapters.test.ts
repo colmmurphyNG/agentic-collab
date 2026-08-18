@@ -235,13 +235,15 @@ describe('Engine Adapters', () => {
     });
 
     it('parses context percent from token count format', () => {
-      const result = adapter.parseContextPercent('some output\n                                                                  15048 tokens');
+      // The window must be knowable to convert a token count, so the banner
+      // declares it — same arithmetic as before against 200k.
+      const result = adapter.parseContextPercent('(200k context)\n                                                                  15048 tokens');
       assert.equal(result.contextPct, 8); // 15048/200000 ≈ 7.5% rounds to 8%
       assert.equal(result.confident, true);
     });
 
     it('parses context percent from large token count', () => {
-      const result = adapter.parseContextPercent('  160000 tokens');
+      const result = adapter.parseContextPercent('(200k context)\n  160000 tokens');
       assert.equal(result.contextPct, 80);
       assert.equal(result.confident, true);
     });
@@ -637,8 +639,16 @@ describe('Engine Adapters', () => {
       assert.equal(adapter.parseContextPercent(pane).contextPct, 50);
     });
 
-    it('should still assume 200k for a token count when no window is declared', () => {
-      assert.equal(adapter.parseContextPercent('  160000 tokens').contextPct, 80);
+    it('should report nothing for a token count when the window is unknowable', () => {
+      // Deliberately not a 200k guess: over-reporting occupancy would recycle a
+      // healthy agent. No window means no reading, so no recycle.
+      const result = adapter.parseContextPercent('  160000 tokens');
+      assert.equal(result.contextPct, null);
+      assert.equal(result.confident, false);
+    });
+
+    it('should convert a token count using the window implied by the model', () => {
+      assert.equal(adapter.parseContextPercent('Opus 5\n  500000 tokens').contextPct, 50);
     });
 
     it('should not be tripped into a low reading by the spinner token counter', () => {

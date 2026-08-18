@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseContextWindow, DEFAULT_CONTEXT_WINDOW_TOKENS } from './context-window.ts';
+import { parseContextWindow } from './context-window.ts';
 
 describe('parseContextWindow', () => {
   test('should read a 1M window from the Claude Code status banner', () => {
@@ -25,20 +25,19 @@ describe('parseContextWindow', () => {
     assert.equal(parseContextWindow('(128K context)'), 128_000);
   });
 
-  test('should fall back to the default when neither a window nor a known model is present', () => {
-    // A recognised model name is enough on its own, so this case needs a banner
-    // carrying neither — see the model-name suite for the "Opus 5, no
-    // declaration" case, which resolves to 1M by design.
-    assert.equal(parseContextWindow('  ~/dev/conductor  SomeFutureModel  ctx: 12% used'), DEFAULT_CONTEXT_WINDOW_TOKENS);
-    assert.equal(parseContextWindow(''), DEFAULT_CONTEXT_WINDOW_TOKENS);
+  test('should return null when neither a window nor a known model is present', () => {
+    // Deliberately not a default. Guessing small over-reports occupancy and
+    // would recycle a healthy agent; null means no reading, so no recycle.
+    assert.equal(parseContextWindow('  ~/dev/conductor  SomeFutureModel  ctx: 12% used'), null);
+    assert.equal(parseContextWindow(''), null);
   });
 
-  test('should fall back when the declared value is zero or unparseable', () => {
-    assert.equal(parseContextWindow('(0M context)'), DEFAULT_CONTEXT_WINDOW_TOKENS);
+  test('should return null when the declared value is zero or unparseable', () => {
+    assert.equal(parseContextWindow('(0M context)'), null);
   });
 
   test('should not treat a token count as a window declaration', () => {
-    assert.equal(parseContextWindow('· Pontificating… (2m 14s · ↓ 4.0k tokens)'), DEFAULT_CONTEXT_WINDOW_TOKENS);
+    assert.equal(parseContextWindow('· Pontificating… (2m 14s · ↓ 4.0k tokens)'), null);
   });
 });
 
@@ -64,8 +63,9 @@ describe('parseContextWindow — model-name source', () => {
     assert.equal(parseContextWindow('OPUS5  ctx: 10% used'), 1_000_000);
   });
 
-  test('should fall back to the default for an unmeasured model', () => {
-    // Haiku's window has not been measured here, so it must not be guessed.
-    assert.equal(parseContextWindow('  ~/dev  Haiku  ctx: 73% used'), DEFAULT_CONTEXT_WINDOW_TOKENS);
+  test('should return null for an unmeasured model rather than guessing', () => {
+    // Haiku's window has not been measured here. Unmonitored is the correct
+    // outcome for an unmeasured model; mis-monitored is not.
+    assert.equal(parseContextWindow('  ~/dev  Haiku  ctx: 73% used'), null);
   });
 });

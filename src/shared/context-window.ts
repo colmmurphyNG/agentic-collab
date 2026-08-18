@@ -11,7 +11,7 @@
  * Sources, in precedence order:
  *   1. An explicit `(1M context)` declaration, when the banner carries one.
  *   2. The model name, which the banner always carries.
- *   3. DEFAULT_CONTEXT_WINDOW_TOKENS.
+ *   3. Nothing — returns null rather than guessing.
  *
  * The model name is the load-bearing source. The declaration is printed
  * inconsistently — measured 2026-08-18 across three `claude-opus-5` agents, all
@@ -25,8 +25,22 @@
  * and pwa and reintroduce the same 5x error it was meant to fix.
  */
 
-/** Fallback when neither a declaration nor a known model is present. */
-export const DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000;
+/**
+ * Returns null for an unrecognised model rather than assuming a default, and
+ * the direction matters because the consumer's action is destructive.
+ *
+ * The usual fail-safe instinct — a bad value keeps the guard ON — inverts here:
+ * the guard firing IS the destructive act (destroy + respawn), so "on" is not
+ * the safe default. The asymmetry comes from the action, not from the value.
+ *
+ * Guessing small is the actively unsafe direction: assuming 200k for a model
+ * that actually holds 1M over-reports occupancy 5x and recycles an agent at a
+ * fifth of real usage — the exact failure this module was written to remove —
+ * and nothing surfaces it, because the reading looks plausible and the recycle
+ * looks legitimate. Returning null means no reading, so no recycle: an
+ * unmeasured model is left unmonitored rather than mis-monitored, which is the
+ * status quo we have already lived with rather than a new harm.
+ */
 
 /**
  * Windows keyed on the model name as the status banner prints it. Add entries
@@ -58,10 +72,9 @@ function parseModelWindow(paneOutput: string): number | null {
 
 /**
  * Returns the agent's context window in tokens, preferring an explicit
- * declaration, then the model name, then DEFAULT_CONTEXT_WINDOW_TOKENS.
+ * declaration over the model name, or **null** when neither is available.
+ * Callers must treat null as "no context reading", never as a default.
  */
-export function parseContextWindow(paneOutput: string): number {
-  return parseDeclaredWindow(paneOutput)
-    ?? parseModelWindow(paneOutput)
-    ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
+export function parseContextWindow(paneOutput: string): number | null {
+  return parseDeclaredWindow(paneOutput) ?? parseModelWindow(paneOutput);
 }

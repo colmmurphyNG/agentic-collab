@@ -144,12 +144,13 @@ export class ClaudeAdapter implements EngineAdapter {
         return { contextPct: parseInt(pctMatch[1]!, 10), confident: true };
       }
 
-      // Token count format: "NNNNN tokens" — derive the percentage from the
-      // window the pane itself declares, NOT a hardcoded 200k. Opus 5 runs a
-      // 1M window; assuming 200k overstates usage 5x and can trip the
-      // auto-recycle threshold at roughly a fifth of real usage.
+      // Token count format: "NNNNN tokens" — needs a known window to convert.
+      // If the window is unknown we report nothing rather than guessing: a
+      // guessed-small window over-reports occupancy and would recycle an agent
+      // that was fine. See shared/context-window.ts on why the fail-safe
+      // direction inverts for a destructive consumer.
       const tokenMatch = line.match(/(\d[\d,]*)\s*tokens/);
-      if (tokenMatch) {
+      if (tokenMatch && maxTokens !== null) {
         const tokens = parseInt(tokenMatch[1]!.replace(/,/g, ''), 10);
         const pct = Math.min(100, Math.round((tokens / maxTokens) * 100));
         return { contextPct: pct, confident: true };
