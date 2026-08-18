@@ -119,6 +119,16 @@ describe('tmux prefix-collision safety (real tmux)', { skip: !tmuxAvailable() },
     assert.equal(hasSession(parent), false, 'parent must not resolve to the child by prefix');
   });
 
+  it('should create the session wide enough for the full status bar', () => {
+    // Detached tmux defaults to 80 columns, which truncates the Claude Code
+    // status bar mid-line and silently drops the "ctx: NN% used" reading that
+    // the auto-recycle threshold depends on. Measured live: four agents
+    // unreadable at 80 columns, one of them at 83%.
+    createSession(child, process.cwd());
+    const width = execFileSync('tmux', ['display-message', '-p', '-t', `=${child}:`, '#{window_width}'], { encoding: 'utf8' }).trim();
+    assert.ok(Number(width) >= 120, `window width ${width} must fit the status bar (>=120)`);
+  });
+
   it('should leave the child alive when killing an absent parent', () => {
     createSession(child, process.cwd());
     killSession(parent);
