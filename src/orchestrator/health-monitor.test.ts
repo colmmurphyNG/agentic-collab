@@ -74,6 +74,52 @@ describe('HealthMonitor', () => {
     monitor.stop(); // idempotent
   });
 
+  it('should treat never-observed activity as no grace rather than a 1970 timestamp', () => {
+    // `lastActivityDetected` is in-memory and empty after a restart. Defaulting
+    // it to 0 made the sentinel arithmetic as an epoch date and logged
+    // "grace elapsed=1787067671828ms" (~56,000 years) on the first pass after
+    // every boot. The transition itself is correct — there is no observed
+    // activity to hold the agent active — but the number was nonsense.
+    db.createAgent({ name: 'grace-fresh', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    const a0 = db.getAgent('grace-fresh')!;
+    db.updateAgentState('grace-fresh', 'active', a0.version, { tmuxSession: 'agent-grace-fresh', proxyId: 'p1' });
+
+    const monitor = makeMonitor();
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.join(' ')); };
+    try {
+      const a = db.getAgent('grace-fresh')!;
+      (monitor as unknown as { handleIdleTransitions(agent: typeof a, isIdle: boolean): void })
+        .handleIdleTransitions(a, true);
+    } finally {
+      console.log = realLog;
+    }
+
+    assert.equal(db.getAgent('grace-fresh')!.state, 'idle', 'should still transition with no observed activity');
+    const line = lines.find(l => l.includes('grace-fresh')) ?? '';
+    assert.match(line, /no activity observed since restart/, 'should say why, not print a sentinel age');
+    assert.doesNotMatch(line, /\d{12,}/, 'must not log an epoch-derived elapsed');
+  });
+
+  it('should still hold an agent active while inside the grace period', () => {
+    // The regression guard for the fix above: when activity WAS observed
+    // recently, grace must still suppress the transition.
+    db.createAgent({ name: 'grace-held', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    const a0 = db.getAgent('grace-held')!;
+    db.updateAgentState('grace-held', 'active', a0.version, { tmuxSession: 'agent-grace-held', proxyId: 'p1' });
+
+    const monitor = makeMonitor();
+    (monitor as unknown as { lastActivityDetected: Map<string, number> })
+      .lastActivityDetected.set('grace-held', Date.now());
+
+    const a = db.getAgent('grace-held')!;
+    (monitor as unknown as { handleIdleTransitions(agent: typeof a, isIdle: boolean): void })
+      .handleIdleTransitions(a, true);
+
+    assert.equal(db.getAgent('grace-held')!.state, 'active', 'recent activity must keep it active');
+  });
+
   it('auto-recycle (Z) triggers on idle + ctx >= 92%, defers when active', () => {
     db.createAgent({ name: 'z-test', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
     let a = db.getAgent('z-test')!;
