@@ -1190,12 +1190,32 @@ ${bodyHtml}
 }
 
 /** Render a .md file as a full HTML page using the existing renderMarkdown utility. */
-function serveMarkdownAsHtml(res: ServerResponse, filePath: string, title: string, baseHref?: string): void {
+function serveMarkdownAsHtml(res: ServerResponse, filePath: string, title: string, baseHref?: string, extraHtml = ''): void {
   const md = readFileSync(filePath, 'utf-8');
-  const bodyHtml = renderMarkdown(md);
+  const bodyHtml = renderMarkdown(md) + extraHtml;
   const html = wrapMarkdownPage(title, bodyHtml, baseHref);
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(html);
+}
+
+/**
+ * Render a bundle directory as a list of links.
+ *
+ * Subdirectories get a trailing slash so they list in turn — nested bundle
+ * content is otherwise unreachable by browsing, even though the file route
+ * serves it correctly by direct URL.
+ */
+function bundleListingHtml(slug: string, relDir: string, absDir: string, exclude: ReadonlySet<string> = new Set()): string {
+  const prefix = relDir ? `${relDir.replace(/\/$/, '')}/` : '';
+  const entries = readdirSync(absDir, { withFileTypes: true })
+    .filter(e => !e.name.startsWith('.') && !exclude.has(e.name))
+    .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+  const items = entries.map(e => {
+    const href = `/pages/${slug}/${prefix}${e.name}${e.isDirectory() ? '/' : ''}`;
+    const label = e.isDirectory() ? `${e.name}/` : e.name;
+    return `<li><a href="${href}">${label}</a></li>`;
+  }).join('');
+  return `<ul>${items}</ul>`;
 }
 
 /** Recursively count files and total bytes in a directory. */
@@ -1330,7 +1350,16 @@ route('GET', '/pages/:slug', async (_req, res, match, ctx) => {
   // the same bundle) resolve correctly when the user is browsing
   // `/pages/<slug>` without a trailing slash.
   if (existsSync(indexMdPath)) {
-    serveMarkdownAsHtml(res, indexMdPath, slug, `/pages/${slug}/`);
+    // A bundle routinely carries supplementary files alongside index.md. Serving
+    // index.md alone left them published, reachable by direct URL, and entirely
+    // undiscoverable — 41 of 551 bundles were in that state when this was found.
+    // Listing them costs one line of nav and makes the bundle browsable.
+    const siblings = readdirSync(pageDir, { withFileTypes: true })
+      .filter(e => !e.name.startsWith('.') && e.name !== 'index.md');
+    const nav = siblings.length === 0
+      ? ''
+      : `<hr><p><strong>Also in this bundle</strong></p>${bundleListingHtml(slug, '', pageDir, new Set(['index.md']))}`;
+    serveMarkdownAsHtml(res, indexMdPath, slug, `/pages/${slug}/`, nav);
     return;
   }
   // No index — list files (or single-file fallback).
@@ -1349,9 +1378,8 @@ route('GET', '/pages/:slug', async (_req, res, match, ctx) => {
     res.end(readFileSync(filePath));
     return;
   }
-  const links = visibleFiles.map(f => `<li><a href="/pages/${slug}/${f}">${f}</a></li>`).join('');
-  res.writeHead(200, { 'Content-Type': 'text/html' });
-  res.end(`<!DOCTYPE html><html><head><title>${slug}</title></head><body><h1>${slug}</h1><ul>${links}</ul></body></html>`);
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(`<!DOCTYPE html><html><head><title>${slug}</title></head><body><h1>${slug}</h1>${bundleListingHtml(slug, '', pageDir)}</body></html>`);
 });
 
 // ── Scratch render (item R) ──
@@ -1661,6 +1689,17 @@ route('GET', '/pages/:slug/:path+', async (_req, res, match, ctx) => {
   if (isJunkFile(basename(filePath))) return json(res, 404, { error: 'File not found' });
   const fullPath = join(ctx.pagesDir, slug, filePath);
   if (!existsSync(fullPath)) return json(res, 404, { error: 'File not found' });
+
+  // A path can resolve to a directory. It passes existsSync, is not `.md`, and
+  // then reached readFileSync below — which throws EISDIR. Nothing caught it, so
+  // no response was ever written and the client hung until it gave up (verified
+  // on two live bundles; the orchestrator itself stayed responsive). List it
+  // instead: nested files already serve correctly, they were just unbrowsable.
+  if (statSync(fullPath).isDirectory()) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<!DOCTYPE html><html><head><title>${slug}/${filePath}</title></head><body><h1>${slug}/${filePath}</h1>${bundleListingHtml(slug, filePath, fullPath)}</body></html>`);
+    return;
+  }
 
   // Render .md files as HTML so they display in the browser (instead of downloading).
   // baseHref is the directory of this file so relative links to siblings
