@@ -2,7 +2,7 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Database } from './database.ts';
 import { createRouter, routeTelegramMessage, pruneJunkFiles, isJunkFile, type RouteContext } from './routes.ts';
@@ -1230,6 +1230,70 @@ describe('API Routes — Pages archive', () => {
   function seed(slug: string, agent = 'tl'): void {
     db.createPage({ slug, agent, fileCount: 1, totalBytes: 100 });
   }
+
+  /** Helper: write real files into the bundle dir so the HTML routes have something to serve. */
+  function seedBundle(slug: string, files: Record<string, string>): void {
+    for (const [rel, body] of Object.entries(files)) {
+      const full = join(tmpDir, 'pages', slug, rel);
+      mkdirSync(dirname(full), { recursive: true });
+      writeFileSync(full, body);
+    }
+  }
+
+  async function html(path: string): Promise<{ status: number; body: string }> {
+    const resp = await fetch(`http://localhost:${port}${path}`);
+    return { status: resp.status, body: await resp.text() };
+  }
+
+  it('should list sibling files alongside index.md instead of hiding them', async () => {
+    // A bundle routinely carries supplementary docs. Serving index.md alone left
+    // them published, reachable by direct URL and undiscoverable — 41 of 551
+    // live bundles were in that state.
+    seedBundle('multi-doc', {
+      'index.md': '# Main',
+      'qa-notes.md': '# QA',
+      'answers.md': '# Answers',
+    });
+    const { status, body } = await html('/pages/multi-doc');
+    assert.equal(status, 200);
+    assert.match(body, /Main/, 'index.md content should still render');
+    assert.match(body, /qa-notes\.md/, 'sibling must be linked');
+    assert.match(body, /answers\.md/, 'sibling must be linked');
+  });
+
+  it('should not advertise a sibling list when index.md is the only file', async () => {
+    seedBundle('solo-doc', { 'index.md': '# Only' });
+    const { body } = await html('/pages/solo-doc');
+    assert.doesNotMatch(body, /Also in this bundle/, 'no nav when there is nothing to navigate to');
+  });
+
+  it('should list a subdirectory rather than hanging the request', async () => {
+    // Previously: the path passed existsSync, was not `.md`, and reached
+    // readFileSync on a directory. EISDIR was uncaught, so no response was ever
+    // written and the client hung until it gave up. Verified live on two bundles.
+    seedBundle('nested', {
+      'index.md': '# Root',
+      'runbooks/one.md': '# One',
+      'runbooks/two.md': '# Two',
+    });
+    const { status, body } = await html('/pages/nested/runbooks');
+    assert.equal(status, 200, 'a directory URL must respond, not hang');
+    assert.match(body, /one\.md/);
+    assert.match(body, /two\.md/);
+  });
+
+  it('should mark subdirectories with a trailing slash so they list in turn', async () => {
+    seedBundle('nested-mark', { 'index.md': '# R', 'sub/inner.md': '# I' });
+    const { body } = await html('/pages/nested-mark');
+    assert.match(body, /href="\/pages\/nested-mark\/sub\/"/, 'dir link needs the trailing slash');
+  });
+
+  it('should still serve a file inside a subdirectory', async () => {
+    seedBundle('nested-file', { 'index.md': '# R', 'runbooks/one.md': '# One deep' });
+    const { status, body } = await html('/pages/nested-file/runbooks/one.md');
+    assert.equal(status, 200);
+    assert.match(body, /One deep/);
+  });
 
   it('GET /api/pages defaults to active pages only (archived hidden)', async () => {
     seed('default-active');
