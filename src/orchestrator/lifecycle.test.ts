@@ -11,7 +11,7 @@ import {
   spawnAgent, resumeAgent, suspendAgent, destroyAgent,
   reloadAgent, interruptAgent, compactAgent, killAgent, startWatchdog,
   executeCustomButton, executeIndicatorAction, normalizePipelineSteps,
-  claudeAddDirFlags, withLaunchEnv,
+  claudeAddDirFlags, withLaunchEnv, composeHandoffBody,
   _resetLitellmKeysCacheForTesting,
   type LifecycleContext,
 } from './lifecycle.ts';
@@ -2693,5 +2693,37 @@ describe('normalizePipelineSteps (T1)', () => {
       { type: 'keystroke', key: 'Escape' },
       { type: 'shell', command: 'echo hi' },
     ]);
+  });
+});
+
+describe('composeHandoffBody — session pointer', () => {
+  const base = {
+    name: 'pwa-2611', state: 'idle', engine: 'claude',
+    cwd: '/Users/someone/dev/project-a',
+  } as unknown as Parameters<typeof composeHandoffBody>[0];
+
+  it('should record the session id and derived transcript path', () => {
+    // A handoff is a summary by construction, so the successor sometimes needs
+    // detail it did not carry. The session id is the only route back, and it was
+    // previously only in the event log, which no agent reads.
+    const agent = { ...base, currentSessionId: 'abc-123' } as typeof base;
+    const body = composeHandoffBody(agent, 'pwa', 'pane text', [], new Date('2026-08-21T09:00:00Z'));
+    assert.match(body, /\*\*Session id:\*\* `abc-123`/);
+    assert.match(body, /~\/\.claude\/projects\/-Users-someone-dev-project-a\/abc-123\.jsonl/);
+  });
+
+  it('should tell the reader to grep the transcript rather than open it', () => {
+    const agent = { ...base, currentSessionId: 'abc-123' } as typeof base;
+    const body = composeHandoffBody(agent, 'pwa', '', [], new Date());
+    assert.match(body, /Grep that transcript/);
+  });
+
+  it('should omit the pointer entirely when no session was ever captured', () => {
+    // The regression guard: an agent destroyed before its session id was captured
+    // must not emit a transcript path that resolves to nothing.
+    const agent = { ...base, currentSessionId: null } as unknown as typeof base;
+    const body = composeHandoffBody(agent, 'pwa', '', [], new Date());
+    assert.doesNotMatch(body, /Session id/);
+    assert.doesNotMatch(body, /\.jsonl/);
   });
 });
