@@ -1366,7 +1366,9 @@ function mirrorHandoffToProjectMemory(
  * so the operator (and any master persona reading the page) can see what the
  * agent was doing at the moment of teardown.
  */
-function composeHandoffBody(
+// Exported for tests: the session-pointer branches are conditional on fields a
+// destroyed agent may lack, and driving them directly beats simulating a destroy.
+export function composeHandoffBody(
   agent: AgentRecord,
   master: string,
   tmuxCapture: string,
@@ -1386,6 +1388,20 @@ function composeHandoffBody(
   lines.push(`**State at destroy:** ${agent.state}`);
   lines.push(`**Engine:** ${agent.engine}`);
   if (agent.cwd) lines.push(`**cwd:** \`${agent.cwd}\``);
+  // Point at the outgoing transcript. A handoff is a summary by construction, so
+  // the successor will sometimes need detail this note did not carry — and the
+  // session id is the only way back to it. Recorded here rather than left in the
+  // event log, because a successor has to already suspect it needs the id before
+  // it would think to go looking, and by then it does not know what to look for.
+  if (agent.currentSessionId) {
+    lines.push(`**Session id:** \`${agent.currentSessionId}\``);
+    const slug = agent.cwd ? projectMemorySlug(agent.cwd) : null;
+    if (slug) {
+      lines.push(`**Transcript:** \`~/.claude/projects/${slug}/${agent.currentSessionId}.jsonl\``);
+      lines.push('');
+      lines.push('_Grep that transcript for the topic you are missing. Do not open it whole — these run to thousands of lines and will fill a fresh context faster than this handoff saves._');
+    }
+  }
   lines.push('');
   lines.push('## Last tmux pane capture');
   lines.push('');
