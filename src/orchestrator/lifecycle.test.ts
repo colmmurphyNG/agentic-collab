@@ -748,6 +748,65 @@ describe('Lifecycle', () => {
       }
     });
 
+    it('never indexes handoff snapshots in MEMORY.md, however many destroys happen', async () => {
+      // The mirror used to append one pointer row per destroy, forever, to the END of a file the
+      // memory loader truncates from the END. 68 such rows had accumulated across 10 of 12 indexes.
+      const pagesDir = mkdtempSync(join(tmpdir(), 'pages-mem-'));
+      const personasDir = mkdtempSync(join(tmpdir(), 'personas-mem-'));
+      const projectsDir = mkdtempSync(join(tmpdir(), 'projects-mem-'));
+      const origPagesDir = process.env['PAGES_DIR'];
+      const origPersonasDir = process.env['PERSONAS_DIR'];
+      const origProjectsDir = process.env['CLAUDE_PROJECTS_DIR'];
+      process.env['PAGES_DIR'] = pagesDir;
+      process.env['PERSONAS_DIR'] = personasDir;
+      process.env['CLAUDE_PROJECTS_DIR'] = projectsDir;
+
+      try {
+        writeFileSync(join(personasDir, 'memmaster.md'), '---\nengine: claude\ncwd: /tmp/memmaster\n---\n');
+        const memoryDir = join(projectsDir, '-tmp-memmaster', 'memory');
+
+        const sizes: number[] = [];
+        for (const name of ['memmaster-a', 'memmaster-b', 'memmaster-c']) {
+          db.createAgent({ name, engine: 'claude', cwd: `/tmp/${name}`, proxyId: 'p1' });
+          const a = db.getAgent(name)!;
+          db.updateAgentState(name, 'active', a.version, { tmuxSession: `agent-${name}`, proxyId: 'p1' });
+          await destroyAgent(ctx, name);
+          sizes.push(readFileSync(join(memoryDir, 'MEMORY.md'), 'utf-8').length);
+        }
+
+        // FIRST: prove the mirror actually ran. Without this the assertions below pass trivially
+        // whenever the mirror no-ops, which is the whole family of test that cannot fail.
+        const snapshots = readdirSync(memoryDir).filter((f) => f.startsWith('handoff_') && f.endsWith('.md'));
+        assert.equal(snapshots.length, 3, `expected 3 snapshots on disk, got: ${readdirSync(memoryDir).join(', ')}`);
+
+        // The index must not grow with them, and must not link them.
+        const index = readFileSync(join(memoryDir, 'MEMORY.md'), 'utf-8');
+        assert.ok(
+          !/destroy-time snapshot for master/.test(index),
+          `no per-destroy pointer may be written; index was:\n${index}`,
+        );
+        for (const snap of snapshots) {
+          assert.ok(!index.includes(snap), `${snap} must not be linked from the index`);
+        }
+        assert.deepEqual(
+          new Set(sizes).size,
+          1,
+          `index must be byte-identical after every destroy, got sizes ${sizes.join(', ')}`,
+        );
+
+        // And it should tell a reader how to find them instead.
+        assert.match(index, /handoff_<agent>_\*\.md/, 'the index should say how to locate snapshots');
+      } finally {
+        process.env['PAGES_DIR'] = origPagesDir;
+        process.env['PERSONAS_DIR'] = origPersonasDir;
+        if (origProjectsDir === undefined) delete process.env['CLAUDE_PROJECTS_DIR'];
+        else process.env['CLAUDE_PROJECTS_DIR'] = origProjectsDir;
+        rmSync(pagesDir, { recursive: true, force: true });
+        rmSync(personasDir, { recursive: true, force: true });
+        rmSync(projectsDir, { recursive: true, force: true });
+      }
+    });
+
     it('treats singleton agents as their own master (no master persona detected)', async () => {
       const pagesDir = mkdtempSync(join(tmpdir(), 'pages-singleton-'));
       const personasDir = mkdtempSync(join(tmpdir(), 'personas-singleton-'));
@@ -937,10 +996,16 @@ describe('Lifecycle', () => {
         assert.match(mirroredBody, /^name: Handoff from agent-a-b$/m);
         assert.match(mirroredBody, /# Handoff: agent-a-b → agent-a/);
 
-        // MEMORY.md should have a pointer entry.
+        // MEMORY.md is created once with a hint, and never carries a per-destroy pointer.
+        // Inverted 2026-09-02: it used to require the pointer, which grew the index without bound
+        // and landed below the loader's truncation cut on any index large enough to matter.
         const memoryIndex = readFileSync(join(expectedMemoryDir, 'MEMORY.md'), 'utf-8');
-        assert.match(memoryIndex, /Handoff: agent-a-b/);
-        assert.match(memoryIndex, new RegExp(memoryFiles[0]!.replace('.', '\\.')));
+        assert.doesNotMatch(memoryIndex, /Handoff: agent-a-b/, 'no per-destroy pointer row');
+        assert.ok(
+          !memoryIndex.includes(memoryFiles[0]!),
+          'the snapshot filename must not be linked from the index',
+        );
+        assert.match(memoryIndex, /handoff_<agent>_\*\.md/, 'a fresh index says how to find snapshots');
       } finally {
         process.env['PAGES_DIR'] = origPagesDir;
         process.env['PERSONAS_DIR'] = origPersonasDir;
@@ -952,7 +1017,7 @@ describe('Lifecycle', () => {
       }
     });
 
-    it('appends to existing MEMORY.md instead of overwriting (item Q v2)', async () => {
+    it('leaves an existing MEMORY.md byte-identical (item Q v2, revised 2026-09-02)', async () => {
       const pagesDir = mkdtempSync(join(tmpdir(), 'pages-append-'));
       const personasDir = mkdtempSync(join(tmpdir(), 'personas-append-'));
       const projectsDir = mkdtempSync(join(tmpdir(), 'claude-projects-append-'));
@@ -985,9 +1050,25 @@ describe('Lifecycle', () => {
 
         await destroyAgent(ctx, 'agent-c-x');
 
+        // The snapshot file must exist, or the assertions below are vacuous — the mirror no-ops
+        // silently on a missing persona cwd, and then "no pointer was written" is trivially true.
+        const snapshots = readdirSync(memoryDir).filter((f) => f.startsWith('handoff_agent-c-x_'));
+        assert.equal(snapshots.length, 1, `expected the snapshot on disk, got: ${readdirSync(memoryDir).join(', ')}`);
+
+        // This assertion was inverted on 2026-09-02. It used to require the pointer to be appended.
+        // Appending one row per destroy grew the index without bound, in a file the memory loader
+        // truncates from the END — so the row was also below the load cut on any index large enough
+        // for the budget to matter. 68 rows had accumulated across 10 of the 12 indexes.
         const memoryIndex = readFileSync(join(memoryDir, 'MEMORY.md'), 'utf-8');
-        assert.ok(memoryIndex.includes(preexisting), 'pre-existing MEMORY.md entries must be preserved');
-        assert.match(memoryIndex, /Handoff: agent-c-x/, 'new pointer must be appended');
+        assert.equal(
+          memoryIndex,
+          preexisting,
+          'an existing index must be left byte-identical — no pointer row, nothing appended',
+        );
+        assert.ok(
+          !memoryIndex.includes(snapshots[0]!),
+          'the snapshot must not be linked from the index; it is found by directory listing',
+        );
       } finally {
         process.env['PAGES_DIR'] = origPagesDir;
         process.env['PERSONAS_DIR'] = origPersonasDir;
