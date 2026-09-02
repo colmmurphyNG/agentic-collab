@@ -103,6 +103,31 @@ function pasteEnterDelay(textLength: number): number {
 }
 
 /**
+ * Flags on the paste. **Each one fixes a DIFFERENT observed fault, and none is decorative.**
+ * Spelled out because the one that looks most droppable is the one holding up the worst failure.
+ *
+ * `-p`  Bracketed paste, so the application ingests the block as a paste rather than as typed
+ *       input. **This is what stops messages being truncated.** Measured across four independently
+ *       reported truncations: the receiving input line consumed text in 1,022-byte chunks and kept
+ *       only the final partial chunk, so a message of N bytes arrived as its last `N mod 1022`.
+ *       All four fitted that exactly — 2,592→548, 2,130→86, 2,068→24 and 1,766→744 bytes received.
+ *       1022 is 1024 − 2, i.e. a receiver-side buffer, which nothing else here can influence.
+ * `-r`  Keep LF as LF. Without it tmux replaces every LF with CR, and CR is Enter to a terminal
+ *       application, so line breaks became submissions and the text either side of each one was
+ *       joined. Real corruption, but never the truncation.
+ * `-b`  Per-paste buffer name, set on the load as well. Without it a paste takes whatever is top of
+ *       the shared stack, which delivered one agent another agent's message.
+ * `-d`  Drop the buffer once pasted. Without it every message ever delivered stayed readable in a
+ *       server-wide clipboard; 50 buffers holding 95 KB when first measured.
+ *
+ * The truncation cannot be reproduced in a test here: any harness that reads raw bytes receives all
+ * of them, which is how the fault was localised to the receiving application in the first place. So
+ * `-p` has no behavioural test protecting it, and a test that only checks line breaks survive will
+ * pass without it. That is what the assertion on this constant is for.
+ */
+export const PASTE_FLAGS = '-d -p -r';
+
+/**
  * A buffer name unique to one paste, so a delivery can never paste another
  * delivery's text. The name must go on BOTH load-buffer and paste-buffer:
  * naming only the load is the intuitive fix and it changes nothing, because a
@@ -129,13 +154,8 @@ export async function pasteText(sessionName: string, text: string, pressEnter: b
   // Pass text via stdin (input option) to avoid all shell escaping issues
   const buffer = pasteBufferName(sessionName);
   execSync(`tmux load-buffer -b ${buffer} -`, { ...EXEC_OPTS, input: text });
-  // -p  bracketed paste: the receiving TUI inserts the text instead of acting on it.
-  // -r  keep LF as LF. Without it tmux replaces every LF with CR, and CR is Enter to a
-  //     terminal app — so a 39-line message arrived as 39 submits, losing all but the
-  //     last segment and joining the text either side of each break.
-  // -d  drop the buffer once pasted, so per-paste names cannot accumulate.
   try {
-    exec(`tmux paste-buffer -d -p -r -b ${buffer} -t '${esc(paneTarget(sessionName))}'`);
+    exec(`tmux paste-buffer ${PASTE_FLAGS} -b ${buffer} -t '${esc(paneTarget(sessionName))}'`);
   } catch (err) {
     // -d never ran, so remove it here; a failed paste must not leak a buffer.
     try {

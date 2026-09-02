@@ -14,6 +14,7 @@ import {
   listSessions,
   pasteText,
   sendKeysRaw,
+  PASTE_FLAGS,
 } from './tmux.ts';
 
 describe('tmux sendKeys validation', () => {
@@ -259,4 +260,23 @@ describe('pasteText delivers a message intact', () => {
   // proxy can never interleave. Keeping it would have implied a guarantee that the test
   // was not checking. The cross-talk risk is real but comes from OTHER tmux clients
   // pasting without -b, which is a property of those callers, not of this function.
+});
+
+describe('paste flags are load-bearing', () => {
+  // The truncation fault lives in the receiving application, so it cannot be reproduced here —
+  // any harness reading raw bytes gets every byte, which is how it was localised. That leaves -p
+  // with no behavioural test, and the line-break test passes without it. These assertions exist so
+  // that removing a flag fails the suite rather than silently reinstating a fault.
+
+  it('keeps bracketed paste, which is what stops messages being truncated', () => {
+    assert.match(PASTE_FLAGS, /(^|\s)-p(\s|$)/, 'removing -p reinstates the 1022-byte truncation');
+  });
+
+  it('keeps LF unreplaced, so line breaks are not delivered as Enter', () => {
+    assert.match(PASTE_FLAGS, /(^|\s)-r(\s|$)/, 'removing -r turns every line break into a submit');
+  });
+
+  it('keeps the buffer deletion, so delivered messages do not accumulate in a shared clipboard', () => {
+    assert.match(PASTE_FLAGS, /(^|\s)-d(\s|$)/, 'removing -d leaves every message readable server-wide');
+  });
 });
