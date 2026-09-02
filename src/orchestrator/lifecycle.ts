@@ -17,7 +17,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync, appendFileSync } from 'node:fs';
+import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Database } from './database.ts';
 import type { DashboardMessage } from '../shared/types.ts';
@@ -1303,9 +1303,11 @@ function projectMemorySlug(cwd: string): string | null {
  * project memory directory, where it can be picked up by future Claude
  * Code sessions of the master persona via that project's `MEMORY.md` index.
  *
- * Writes:
+ * Writes ONE file:
  *   - `<CLAUDE_PROJECTS_DIR>/<projectSlug>/memory/handoff_<name>_<ts>.md`
- *   - one-line pointer appended to `<CLAUDE_PROJECTS_DIR>/<projectSlug>/memory/MEMORY.md`
+ *
+ * It deliberately does NOT index that file in `MEMORY.md` — see the comment at the write site.
+ * The index is created once, with a hint on how to list snapshots, if it does not exist yet.
  *
  * Silently no-ops when:
  *   - `CLAUDE_PROJECTS_DIR` env is unset (test mode / operators who haven't
@@ -1345,14 +1347,41 @@ function mirrorHandoffToProjectMemory(
       `---\n\n`;
     writeFileSync(filePath, frontmatterHeader + body, 'utf-8');
 
-    // Append pointer to MEMORY.md (create if missing).
+    // Do NOT write a per-destroy pointer into MEMORY.md. It used to append one row per
+    // destroy, forever, and that was wrong twice over:
+    //
+    //  1. It never pruned. 68 such rows had accumulated across 10 of the 12 memory indexes by
+    //     2026-09-02, in a file with a hard byte budget. One index was 13 rows of pointer in a
+    //     1,486-byte file.
+    //  2. It appended to the END, and the memory loader truncates an over-budget index from the
+    //     END — so on exactly the large indexes where the budget bites, the pointer landed below
+    //     the cut and was invisible to the agent it was written for.
+    //
+    // Those combined into the real damage: because the rows were useless where they landed,
+    // agents tidied them up near the top to make them visible, which pushed real entries below
+    // the cut and evicted them. The eviction was caused by the tidying and the tidying by writing
+    // where nobody reads.
+    //
+    // Bounding the growth (replacing the previous row instead of appending) was considered and
+    // rejected: on a large index the row is still below the cut, so it would keep the cost and
+    // still deliver nothing. There is no position the orchestrator can safely write to — putting
+    // it near the top means rewriting a curated file and displacing entries, which is the damage.
+    //
+    // Discovery does not depend on the pointer. The snapshot filename carries the agent and the
+    // timestamp, so `handoff_<agent>_*.md` in this directory finds every one of them. When the
+    // index does not exist yet we create it once with that hint, and never append again.
     const indexPath = join(memoryDir, 'MEMORY.md');
-    const isoDate = timestamp.slice(0, 4) + '-' + timestamp.slice(4, 6) + '-' + timestamp.slice(6, 8);
-    const pointer = `- [Handoff: ${destroyedName}](${filename}) — ${isoDate} destroy-time snapshot for master \`${master}\`\n`;
-    if (existsSync(indexPath)) {
-      appendFileSync(indexPath, pointer);
-    } else {
-      writeFileSync(indexPath, pointer);
+    if (!existsSync(indexPath)) {
+      writeFileSync(
+        indexPath,
+        '> One line per memory, newest-relevant first. This index is truncated from the END when\n' +
+          '> it exceeds the loader budget, so position decides what a crossing costs.\n' +
+          '>\n' +
+          '> Destroy-time handoff snapshots are NOT indexed here — they would grow without bound.\n' +
+          '> Find them by listing `handoff_<agent>_*.md` in this directory; the date is in the\n' +
+          '> filename.\n',
+        'utf-8',
+      );
     }
     console.log(`[handoff] ${destroyedName}: mirrored to ${filePath}`);
   } catch (err) {
