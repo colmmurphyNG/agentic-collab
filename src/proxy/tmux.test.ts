@@ -1,6 +1,8 @@
 import { describe, it, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { readFileSync, existsSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import {
   sendKeys,
   sessionTarget,
@@ -10,6 +12,8 @@ import {
   killSession,
   capturePaneLines,
   listSessions,
+  pasteText,
+  sendKeysRaw,
 } from './tmux.ts';
 
 describe('tmux sendKeys validation', () => {
@@ -158,4 +162,101 @@ describe('tmux prefix-collision safety (real tmux)', { skip: !tmuxAvailable() },
       false,
     );
   });
+});
+
+// No timeout(1) on macOS, so every wait here is a bounded iteration count that
+// re-tests the condition itself rather than trusting a fixed sleep.
+async function settle(ms: number): Promise<void> {
+  await new Promise<void>((r) => setTimeout(r, ms));
+}
+
+/**
+ * A session whose COMMAND is the reader, so the pty is in raw mode before any
+ * paste can arrive. An earlier version of this test started a shell and typed
+ * `stty raw` at it; the paste raced the stty, the tty's icrnl quietly turned CR
+ * into LF, and the test passed against the broken code. Setting the command up
+ * front removes the race and is what makes the assertion mean anything.
+ */
+function rawReader(name: string, bytes: number, outFile: string): void {
+  execFileSync('tmux', [
+    'new-session', '-d', '-s', name, '-c', process.cwd(),
+    `stty raw -echo; head -c ${bytes} > ${outFile}`,
+  ]);
+}
+
+async function readWhenSized(file: string, bytes: number): Promise<string> {
+  for (let i = 0; i < 60; i++) {
+    if (existsSync(file) && readFileSync(file).length >= bytes) {
+      return readFileSync(file, 'utf-8');
+    }
+    await settle(100);
+  }
+  return existsSync(file) ? readFileSync(file, 'utf-8') : '';
+}
+
+describe('pasteText delivers a message intact', () => {
+  // Real tmux, and each test reads what actually landed in the pane or the buffer
+  // stack. Both assertions below were checked against the pre-fix command form and
+  // both fail there — a test that passes either way would have shipped the bug.
+  const made: string[] = [];
+  const files: string[] = [];
+
+  after(() => {
+    for (const s of made) { try { killSession(s); } catch { /* already gone */ } }
+    for (const f of files) { try { rmSync(f, { force: true }); } catch { /* fine */ } }
+  });
+
+  it('preserves line breaks instead of delivering each one as Enter', async () => {
+    const out = `${tmpdir()}/paste-lf-${process.pid}.bin`;
+    const name = `paste-lf-${process.pid}`;
+    const text = 'AAA\n\nBBB\nCCC';
+    files.push(out);
+    made.push(name);
+    rawReader(name, text.length, out);
+    await settle(400);
+
+    await pasteText(name, text, false);
+    const got = await readWhenSized(out, text.length);
+
+    // paste-buffer replaces LF with CR unless -r is given, and CR is Enter to a TUI.
+    // A 39-line message therefore arrived as 39 submits, keeping only the last segment
+    // and joining the text on either side of every break.
+    assert.ok(!got.includes('\r'), `no CR should reach the pane, got ${JSON.stringify(got)}`);
+    assert.equal(got, text, 'the pane must receive the text byte-for-byte');
+  });
+
+  it('does not leave the delivered message sitting in a shared tmux buffer', async () => {
+    const out = `${tmpdir()}/paste-clean-${process.pid}.bin`;
+    const name = `paste-clean-${process.pid}`;
+    const marker = `buffer-residue-marker-${process.pid}`;
+    files.push(out);
+    made.push(name);
+    rawReader(name, marker.length, out);
+    await settle(400);
+
+    await pasteText(name, marker, false);
+    await readWhenSized(out, marker.length);
+
+    // Pre-fix this used tmux's unnamed buffer and never deleted it, so every message
+    // ever delivered stayed readable in a clipboard shared by every agent — measured at
+    // 50 retained buffers holding 95 KB of inter-agent traffic. -b names it per paste
+    // and -d drops it.
+    const names = execFileSync('tmux', ['list-buffers', '-F', '#{buffer_name}'], { encoding: 'utf-8' })
+      .split('\n').filter(Boolean);
+    const residue = names.filter((b) => {
+      try {
+        return execFileSync('tmux', ['show-buffer', '-b', b], { encoding: 'utf-8' }).includes(marker);
+      } catch {
+        return false; // raced with another delete; it is not residue if it is gone
+      }
+    });
+    assert.deepEqual(residue, [], 'the delivered text must not remain in any tmux buffer');
+  });
+
+  // A third test asserting that two concurrent deliveries each get their own text was
+  // written and then deleted: it cannot fail. `exec` here wraps execSync and nothing
+  // yields between the load and the paste, so two pasteText calls in this single-threaded
+  // proxy can never interleave. Keeping it would have implied a guarantee that the test
+  // was not checking. The cross-talk risk is real but comes from OTHER tmux clients
+  // pasting without -b, which is a property of those callers, not of this function.
 });

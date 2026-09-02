@@ -102,6 +102,22 @@ function pasteEnterDelay(textLength: number): number {
   return Math.max(500, textLength);
 }
 
+/**
+ * A buffer name unique to one paste, so a delivery can never paste another
+ * delivery's text. The name must go on BOTH load-buffer and paste-buffer:
+ * naming only the load is the intuitive fix and it changes nothing, because a
+ * paste-buffer without -b takes whatever is top of the buffer stack.
+ *
+ * Only [A-Za-z0-9-] reaches the shell here — sessionName is already validated,
+ * and it is sanitised again because this value is interpolated into a command.
+ */
+let pasteSeq = 0;
+function pasteBufferName(sessionName: string): string {
+  pasteSeq = (pasteSeq + 1) % 1_000_000;
+  const safe = sessionName.replace(/[^A-Za-z0-9-]/g, '-').slice(0, 40);
+  return `collab-${safe}-${process.pid}-${Date.now().toString(36)}-${pasteSeq}`;
+}
+
 export async function pasteText(sessionName: string, text: string, pressEnter: boolean): Promise<void> {
   validateSessionName(sessionName);
   // Verify tmux is responsive before pasting — catches locked/overloaded sessions
@@ -111,8 +127,24 @@ export async function pasteText(sessionName: string, text: string, pressEnter: b
     throw new Error(`tmux session "${sessionName}" is not responsive (capture-pane timed out)`);
   }
   // Pass text via stdin (input option) to avoid all shell escaping issues
-  execSync('tmux load-buffer -', { ...EXEC_OPTS, input: text });
-  exec(`tmux paste-buffer -t '${esc(paneTarget(sessionName))}'`);
+  const buffer = pasteBufferName(sessionName);
+  execSync(`tmux load-buffer -b ${buffer} -`, { ...EXEC_OPTS, input: text });
+  // -p  bracketed paste: the receiving TUI inserts the text instead of acting on it.
+  // -r  keep LF as LF. Without it tmux replaces every LF with CR, and CR is Enter to a
+  //     terminal app — so a 39-line message arrived as 39 submits, losing all but the
+  //     last segment and joining the text either side of each break.
+  // -d  drop the buffer once pasted, so per-paste names cannot accumulate.
+  try {
+    exec(`tmux paste-buffer -d -p -r -b ${buffer} -t '${esc(paneTarget(sessionName))}'`);
+  } catch (err) {
+    // -d never ran, so remove it here; a failed paste must not leak a buffer.
+    try {
+      exec(`tmux delete-buffer -b ${buffer}`);
+    } catch {
+      // best-effort cleanup — surface the paste failure, not this one
+    }
+    throw err;
+  }
 
   if (pressEnter) {
     await new Promise<void>((r) => setTimeout(r, pasteEnterDelay(text.length)));
