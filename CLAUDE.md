@@ -103,6 +103,15 @@ Changes:
 
 ## Don't
 
+- **Run a bare `gh` command in this repo.** There are two remotes — `origin` is the fork, `upstream`
+  is `Sammons/agentic-collab` — and no default is committed, so `gh` picks `upstream`. A bare
+  `gh pr list` answers about the upstream project, and a bare `gh pr comment` or `gh pr create` would
+  post to a third party's repository. Fix a clone once with
+  `gh repo set-default colmmurphyNG/agentic-collab` (worktrees share the setting), or pass `--repo`
+  every time. **A wrong-repo answer is indistinguishable from a correct one**, and so is a negative:
+  `Could not resolve to a PullRequest with the number of 89` means "not in the repo gh chose", never
+  "does not exist". Two such negatives are not corroboration — they are one read through one wrong
+  lens. Caught 2026-09-02 after it nearly produced a report that a merged PR did not exist.
 - Add npm dependencies (zero-dep is a design constraint)
 - Skip the type check (`npx tsc --noEmit`)
 - Push directly to main (use worktree + PR)
