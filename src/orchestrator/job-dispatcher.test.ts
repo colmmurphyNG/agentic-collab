@@ -1,7 +1,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { Database } from './database.ts';
-import { JobDispatcher } from './job-dispatcher.ts';
+import { JobDispatcher, MAX_CONSECUTIVE_SKIPS } from './job-dispatcher.ts';
 import type { MessageDispatcher } from './message-dispatcher.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -137,6 +137,26 @@ describe('JobDispatcher', () => {
     // Job stays scheduled — next_fire_at NOT advanced on skip
     const after = db.getJob(job.id)!;
     assert.equal(after.lastFiredAt, null);
+
+    // ...but only for a bounded number of ticks. Added 2026-09-02 after an hourly job missed 24
+    // consecutive runs: the skip wrote no log line and did not advance next_fire_at, so it stayed
+    // permanently due and permanently skipped with no signal anywhere.
+    // The tick above was already skip #1, so take it to MAX-1 and no further.
+    for (let i = 2; i < MAX_CONSECUTIVE_SKIPS; i++) dispatcher.tick();
+    assert.equal(
+      mock.deliverCalls.length,
+      0,
+      `should still be deferring below the cap (${MAX_CONSECUTIVE_SKIPS})`,
+    );
+
+    dispatcher.tick();
+    assert.equal(
+      mock.deliverCalls.length,
+      1,
+      `must fire once the cap is reached, even though the agent is still active`,
+    );
+    const fired = db.getJob(job.id)!;
+    assert.ok(fired.lastFiredAt, 'the clock must advance once it fires, so it cannot re-stall');
 
     db.deleteJob(job.id);
     {

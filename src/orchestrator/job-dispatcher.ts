@@ -29,8 +29,17 @@ export type JobDispatcherOptions = {
 };
 
 
+/**
+ * How many consecutive `skipIfActive` skips to tolerate before firing anyway. At the default
+ * 60-second tick that is roughly ten minutes of deferring to a busy agent, after which a missed
+ * run costs more than a queued message does.
+ */
+export const MAX_CONSECUTIVE_SKIPS = 10;
+
 export class JobDispatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
+  /** Consecutive skipIfActive skips per job id. Reset when the job actually fires. */
+  private consecutiveSkips = new Map<number, number>();
   private readonly db: Database;
   private readonly messageDispatcher: MessageDispatcher;
   private readonly onQueueUpdate: ((message: PendingMessage) => void) | undefined;
@@ -66,7 +75,30 @@ export class JobDispatcher {
       if (job.skipIfActive) {
         const agent = this.db.getAgent(job.agentName);
         if (agent && agent.state === 'active') {
-          continue;
+          const skips = (this.consecutiveSkips.get(job.id) ?? 0) + 1;
+          this.consecutiveSkips.set(job.id, skips);
+          if (skips < MAX_CONSECUTIVE_SKIPS) {
+            // Log the FIRST skip and then sparsely. A silent skip is what let an hourly job miss
+            // 24 consecutive runs on 2026-09-01/02 with no signal anywhere: the skip wrote no line
+            // AND did not advance next_fire_at, so the job stayed permanently due and permanently
+            // skipped. Silence is also the expected output of these jobs on success, so a stalled
+            // schedule and a healthy quiet one looked identical.
+            if (skips === 1 || skips % 5 === 0) {
+              console.log(
+                `[jobs] Skipping job #${job.id}: ${job.agentName} is active (${skips} consecutive; ` +
+                  `firing anyway at ${MAX_CONSECUTIVE_SKIPS})`,
+              );
+            }
+            continue;
+          }
+          // Deferring has stopped being politeness and become a stall. Fire regardless: delivery is
+          // queued and the message dispatcher already waits for a deliverable state, so enqueueing
+          // to a busy agent costs a delay rather than an interruption. An unbounded skip costs the
+          // run entirely, which is strictly worse.
+          console.warn(
+            `[jobs] Job #${job.id} has been skipped ${skips} times because ${job.agentName} is ` +
+              `active. Firing anyway — an unbounded skip silently drops every run.`,
+          );
         }
       }
 
@@ -99,6 +131,7 @@ export class JobDispatcher {
         continue;
       }
       this.db.updateJobFire(job.id, nextIso);
+      this.consecutiveSkips.delete(job.id);
 
       if (this.onDashboardMessage) {
         this.onDashboardMessage(dashMsg);
