@@ -10,6 +10,50 @@ import { sleep } from '../shared/utils.ts';
 import { resumeAgent, type LifecycleContext } from './lifecycle.ts';
 
 const RESTORE_STAGGER_MS = 3_000;
+// Observed ~50s between the HTTP server listening and the proxy registering on
+// a cold start, so this has to be generous to be worth having.
+const PROXY_WAIT_TIMEOUT_MS = 120_000;
+const PROXY_WAIT_POLL_MS = 500;
+/** Session name used only to ask a proxy whether it is alive. Never created. */
+export const PROXY_PROBE_SESSION = '__agentic_liveness_probe__';
+
+/**
+ * Restore can outrun proxy startup, and a registration row is not evidence of a
+ * live proxy: startup deliberately refreshes stale rows so a slow rebuild does
+ * not reap them, so a row can outlive the process it describes by up to the 45s
+ * reaper window. Restoring against one fails every agent with "Proxy
+ * unreachable", recorded as an agent fault that nothing retries.
+ *
+ * So probe rather than count rows. The probe asks whether a sentinel session
+ * exists: read-only, and a command any proxy able to serve a restore at all
+ * already supports, so it cannot fail merely because a proxy predates it.
+ */
+async function waitForLiveProxy(ctx: LifecycleContext, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let waitLogged = false;
+
+  for (;;) {
+    for (const proxy of ctx.db.listProxies()) {
+      const probe = await ctx.proxyDispatch(proxy.proxyId, {
+        action: 'has_session',
+        sessionName: PROXY_PROBE_SESSION,
+      });
+      if (probe.ok) {
+        if (waitLogged) console.log(`[network] Proxy ${proxy.proxyId} answering - proceeding with restore`);
+        return true;
+      }
+    }
+
+    // Checked after probing so a single slow probe cannot skip the deadline.
+    if (Date.now() >= deadline) return false;
+
+    if (!waitLogged) {
+      console.log(`[network] No proxy answering yet - waiting up to ${Math.round(timeoutMs / 1000)}s before restore`);
+      waitLogged = true;
+    }
+    await sleep(PROXY_WAIT_POLL_MS);
+  }
+}
 
 /**
  * Graceful shutdown: save current state for all running agents, then exit.
@@ -50,9 +94,23 @@ export function shutdownAgents(ctx: LifecycleContext): number {
  * 1. Graceful: agents have stateBeforeShutdown set → resume them
  * 2. Crash: agents in active/idle state but tmux session missing → resume them
  *
- * Staggers restarts by 3s to avoid proxy overload.
+ * Waits for a proxy that actually answers before doing anything, then staggers
+ * restarts by 3s to avoid proxy overload. If none answers, nothing is restored
+ * and nothing is marked failed.
  */
-export async function restoreAllAgents(ctx: LifecycleContext): Promise<number> {
+export async function restoreAllAgents(
+  ctx: LifecycleContext,
+  opts: { proxyWaitMs?: number } = {},
+): Promise<number> {
+  const proxyWaitMs = opts.proxyWaitMs ?? PROXY_WAIT_TIMEOUT_MS;
+  if (!(await waitForLiveProxy(ctx, proxyWaitMs))) {
+    console.warn(
+      `[network] No proxy answering after ${Math.round(proxyWaitMs / 1000)}s - skipping restore. `
+      + 'Agents were left in their recorded state so a later restore can still pick them up.',
+    );
+    return 0;
+  }
+
   const agents = ctx.db.listAgents();
   const toReadopt: AgentRecord[] = [];
   const toRestore: AgentRecord[] = [];
