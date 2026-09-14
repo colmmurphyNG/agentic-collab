@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { Database } from './database.ts';
 import { LockManager } from '../shared/lock.ts';
 import type { ProxyCommand, ProxyResponse } from '../shared/types.ts';
-import { shutdownAgents, restoreAllAgents } from './network.ts';
+import { shutdownAgents, restoreAllAgents, PROXY_PROBE_SESSION } from './network.ts';
 import type { LifecycleContext } from './lifecycle.ts';
 
 describe('Network', () => {
@@ -146,7 +146,7 @@ describe('Network', () => {
       assert.equal(agent!.state, 'active');
     });
 
-    it('skips agents with no proxy and logs warning', async () => {
+    it('skips restore entirely when no proxy is registered', async () => {
       // Move all other agents to non-restorable states so only our test agent is eligible
       for (const a of db.listAgents()) {
         if (a.stateBeforeShutdown || a.state === 'active' || a.state === 'idle'
@@ -167,8 +167,10 @@ describe('Network', () => {
       const savedProxy = db.getProxy('p1');
       db.removeProxy('p1');
 
-      const count = await restoreAllAgents(ctx);
-      // Should not crash — just skip the agent (no proxies available)
+      // proxyWaitMs: 0 so the readiness gate gives up immediately instead of
+      // spending its 30s default waiting for a proxy this test just removed.
+      const count = await restoreAllAgents(ctx, { proxyWaitMs: 0 });
+      // Should not crash — the readiness gate declines to restore anything.
       assert.equal(count, 0);
 
       // Re-register proxy for subsequent tests
@@ -289,6 +291,119 @@ describe('Network', () => {
       // Healthy active agent should NOT be restored
       const agent = db.getAgent('net-healthy')!;
       assert.equal(agent.state, 'active');
+    });
+  });
+
+  describe('proxy readiness gate', () => {
+    // A registration row is not evidence of a live proxy: startup refreshes
+    // stale heartbeats, so a row can outlive its process by up to the reaper
+    // window. Restoring against one fails every agent for no fault of its own.
+    function makeIsolatedCtx(dbPath: string, opts: { answering: () => boolean }) {
+      const isoDb = new Database(dbPath);
+      const commands: ProxyCommand[] = [];
+      let proxyAnsweringAtFirstNonProbe: boolean | null = null;
+
+      const isoCtx: LifecycleContext = {
+        db: isoDb,
+        locks: new LockManager(isoDb.rawDb),
+        proxyDispatch: async (_proxyId: string, command: ProxyCommand): Promise<ProxyResponse> => {
+          if (!opts.answering()) {
+            return { ok: false, error: 'Proxy unreachable after 3 attempts: fetch failed' };
+          }
+          const isProbe = command.action === 'has_session'
+            && command.sessionName === PROXY_PROBE_SESSION;
+          if (!isProbe && proxyAnsweringAtFirstNonProbe === null) {
+            proxyAnsweringAtFirstNonProbe = true;
+          }
+          if (!isProbe) commands.push(command);
+          if (command.action === 'has_session') return { ok: true, data: false };
+          return { ok: true };
+        },
+        orchestratorHost: 'http://localhost:3000',
+      };
+
+      return {
+        db: isoDb,
+        ctx: isoCtx,
+        commands,
+        restoreWorkStarted: () => proxyAnsweringAtFirstNonProbe === true,
+      };
+    }
+
+    it('does not mark agents failed when a registered proxy is not answering', async () => {
+      // This is the shape of the real incident: the row was there, the process
+      // was not, and every agent was recorded as failed.
+      const { db: isoDb, ctx: isoCtx, restoreWorkStarted } =
+        makeIsolatedCtx(join(tmpDir, 'dead-proxy.db'), { answering: () => false });
+      try {
+        isoDb.registerProxy('p-dead', 'tok', 'localhost:3100');
+        isoDb.createAgent({ name: 'stranded', engine: 'claude', cwd: '/tmp', proxyId: 'p-dead' });
+        const a = isoDb.getAgent('stranded')!;
+        isoDb.updateAgentState('stranded', 'active', a.version, {
+          tmuxSession: 'agent-stranded',
+          proxyId: 'p-dead',
+        });
+
+        const count = await restoreAllAgents(isoCtx, { proxyWaitMs: 50 });
+
+        assert.equal(count, 0, 'restore should report nothing restored');
+        const after = isoDb.getAgent('stranded')!;
+        assert.equal(after.state, 'active', 'a dead proxy is not the agent\'s fault');
+        assert.equal(after.failureReason, null, 'no failure should be recorded');
+        assert.equal(restoreWorkStarted(), false, 'restore must not begin against a dead proxy');
+      } finally {
+        isoDb.close();
+      }
+    });
+
+    it('does not mark agents failed when no proxy has registered', async () => {
+      const { db: isoDb, ctx: isoCtx, commands } =
+        makeIsolatedCtx(join(tmpDir, 'no-proxy.db'), { answering: () => false });
+      try {
+        isoDb.createAgent({ name: 'gated', engine: 'claude', cwd: '/tmp', proxyId: 'p-ghost' });
+        const a = isoDb.getAgent('gated')!;
+        isoDb.updateAgentState('gated', 'active', a.version, {
+          tmuxSession: 'agent-gated',
+          proxyId: 'p-ghost',
+        });
+
+        const count = await restoreAllAgents(isoCtx, { proxyWaitMs: 50 });
+
+        assert.equal(count, 0);
+        const after = isoDb.getAgent('gated')!;
+        assert.equal(after.state, 'active', 'agent must not be marked failed');
+        assert.equal(after.failureReason, null);
+        assert.equal(commands.length, 0, 'nothing should be dispatched before a proxy exists');
+      } finally {
+        isoDb.close();
+      }
+    });
+
+    it('proceeds once a proxy starts answering during the wait', async () => {
+      let answering = false;
+      const { db: isoDb, ctx: isoCtx, commands, restoreWorkStarted } =
+        makeIsolatedCtx(join(tmpDir, 'late-proxy.db'), { answering: () => answering });
+      try {
+        isoDb.registerProxy('p-late', 'tok', 'localhost:3100');
+        isoDb.createAgent({ name: 'late', engine: 'claude', cwd: '/tmp', proxyId: 'p-late' });
+        const a = isoDb.getAgent('late')!;
+        isoDb.updateAgentState('late', 'suspended', a.version, {
+          stateBeforeShutdown: 'idle',
+          tmuxSession: 'agent-late',
+          proxyId: 'p-late',
+        });
+
+        // The proxy comes up after the gate has already started waiting.
+        const timer = setTimeout(() => { answering = true; }, 150);
+        const count = await restoreAllAgents(isoCtx, { proxyWaitMs: 5_000 });
+        clearTimeout(timer);
+
+        assert.equal(count, 1, 'the late-answering proxy should still get its agent restored');
+        assert.ok(commands.some(c => c.action === 'has_session'), 'restore should have run');
+        assert.equal(restoreWorkStarted(), true);
+      } finally {
+        isoDb.close();
+      }
     });
   });
 });
