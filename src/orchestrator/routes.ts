@@ -33,7 +33,7 @@ import { UsageAggregator, renderUsageMarkdown } from './usage-aggregator.ts';
 import { DroneAuditAggregator, renderAuditMarkdown } from './drone-audit.ts';
 import { sessionName } from '../shared/agent-entity.ts';
 import { paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
-import { recordTelegramInbound, getActiveTelegramRoute, maybeAutoClearOnCommPref, isCommPrefDirective, clearTelegramRoute, listTelegramRoutes, _resetTelegramRoutes } from './telegram-routing.ts';
+import { recordTelegramInbound, getActiveTelegramRoute, maybeAutoClearOnCommPref, isCommPrefDirective, isQuietCommand, clearAllTelegramRoutes, clearTelegramRoute, listTelegramRoutes, _resetTelegramRoutes } from './telegram-routing.ts';
 import type { MessageDispatcher } from './message-dispatcher.ts';
 import type { UsagePoller } from './usage-poller.ts';
 
@@ -3571,6 +3571,23 @@ export function routeTelegramMessage(
 ): void {
   const botToken = dest.config['botToken'] as string;
   console.log(`[telegram] Inbound from chat ${incomingChatId}: ${text.slice(0, 100)}`);
+
+  // The explicit off switch, handled before anything else so it is never
+  // delivered to an agent as a message and never arms a route. The phrase
+  // matching below is a guess at wording and will always be one phrasing
+  // behind; this is the spelling that is guaranteed to work.
+  if (isQuietCommand(text)) {
+    const cleared = clearAllTelegramRoutes();
+    console.log(`[telegram] /quiet from chat ${incomingChatId}: cleared ${cleared} route(s)`);
+    ctx.telegramDispatcher.send(
+      botToken,
+      incomingChatId,
+      cleared > 0
+        ? `Quiet. Stopped forwarding replies for ${cleared} agent(s). Message an agent from here to turn it back on.`
+        : 'Quiet already - nothing was being forwarded.',
+    ).catch(() => {});
+    return;
+  }
 
   // Comm-preference auto-clear: if this Telegram inbound is the operator
   // signalling "I'm at the dashboard now / stop notify", clear any active
