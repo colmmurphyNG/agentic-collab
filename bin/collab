@@ -482,6 +482,63 @@ cmd('tmux', 'tmux <agent> -- <tmux args...>', 'Run a constrained tmux command ag
   }
 });
 
+// ── Decisions ──
+
+cmd('decide', 'decide --topic <t> "<question>" --option <key>="<label>" ... [--recommend <key>] [--blocking]  |  decide list [--all]  |  decide withdraw <id>',
+  'Raise a decision for the operator to answer from the Decisions tab', async (args) => {
+  const me = agentName();
+  if (args[0] === 'list') {
+    const all = args.includes('--all');
+    for (const a of args.slice(1)) rejectUnknownFlag(a, new Set(['--all']), 'decide list');
+    if (!me) { console.error('error: COLLAB_AGENT is not set'); process.exit(1); }
+    const rows = await api('GET', `/api/decisions?status=${all ? 'all' : 'open'}&agent=${encodeURIComponent(me)}`);
+    if (!rows.length) { console.log(all ? 'no decisions' : 'no open decisions'); return; }
+    for (const d of rows) console.log(`#${d.id} [${d.status}${d.blocking ? ', blocking' : ''}] ${d.topic}: ${d.question}${d.answer ? `\n    answer: ${d.answer}` : ''}`);
+    return;
+  }
+  if (args[0] === 'withdraw') {
+    const id = parseInt(args[1], 10);
+    if (!args[1] || isNaN(id)) { console.error('usage: collab decide withdraw <id>'); process.exit(1); }
+    if (!me) { console.error('error: COLLAB_AGENT is not set'); process.exit(1); }
+    await api('POST', `/api/decisions/${id}/withdraw`, { agentName: me });
+    console.log(`withdrew decision #${id}`);
+    return;
+  }
+  const FLAGS = new Set(['--topic', '--option', '--recommend', '--blocking']);
+  let topic = null, recommended = null, blocking = false;
+  const options = [];
+  const positional = [];
+  let endOfOptions = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (!endOfOptions && a === '--') { endOfOptions = true; continue; }
+    if (endOfOptions) { positional.push(a); continue; }
+    if (a === '--topic' && args[i + 1]) topic = args[++i];
+    else if (a === '--recommend' && args[i + 1]) recommended = args[++i];
+    else if (a === '--blocking') blocking = true;
+    else if (a === '--option' && args[i + 1]) {
+      const m = args[++i].match(/^([A-Za-z0-9]{1,8})[=:](.+)$/s);
+      if (!m) { console.error('error: --option must look like a="label" (key is 1-8 letters or digits)'); process.exit(2); }
+      options.push({ key: m[1], label: m[2].trim() });
+    } else {
+      rejectUnknownFlag(a, FLAGS, 'decide');
+      positional.push(a);
+    }
+  }
+  const question = positional.join(' ').trim();
+  if (!topic || !question) {
+    console.error('usage: collab decide --topic <t> "<question>" --option a="<label>" --option b="<label>" [--recommend a] [--blocking]');
+    process.exit(1);
+  }
+  if (recommended && !options.some((o) => o.key === recommended)) {
+    console.error(`error: --recommend ${recommended} is not one of the option keys`);
+    process.exit(2);
+  }
+  if (!me) { console.error('error: COLLAB_AGENT is not set'); process.exit(1); }
+  const d = await api('POST', '/api/decisions', { agentName: me, topic, question, options, recommended, blocking });
+  console.log(`raised decision #${d.id} (${d.blocking ? 'blocking' : 'non-blocking'}). The answer arrives as a message on topic ${d.topic}.`);
+});
+
 // ── Reminders ──
 
 cmd('reminder', 'reminder <sub> [args...]', 'Manage reminders (add|list|done|cancel|swap)', async (args) => {
