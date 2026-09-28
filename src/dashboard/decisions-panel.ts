@@ -10,6 +10,7 @@
 
 import { state, authHeaders } from '/dashboard/assets/state.ts';
 import { esc, timeAgo, showToast } from '/dashboard/assets/utils.ts';
+import { captureFocus, restoreDrafts } from '/dashboard/assets/decision-drafts.ts';
 
 function optionButtons(d) {
   return d.options.map((o) => {
@@ -42,8 +43,16 @@ export function renderDecisionCard(d) {
 }
 
 export class DecisionsPanel extends HTMLElement {
+  // Typed replies by decision id. A render rebuilds the list from scratch, and one happens every time
+  // any agent raises or answers a decision, so drafts and the caret must survive it.
+  _drafts = new Map();
+
   connectedCallback() {
     this.addEventListener('click', (e) => this._onClick(e));
+    this.addEventListener('input', (e) => {
+      const t = e.target;
+      if (t.classList && t.classList.contains('decision-text')) this._drafts.set(t.dataset.id, t.value);
+    });
     this.addEventListener('keydown', (e) => {
       const t = e.target;
       if (e.key === 'Enter' && t.classList && t.classList.contains('decision-text')) this._answer(t.dataset.id, null);
@@ -59,7 +68,10 @@ export class DecisionsPanel extends HTMLElement {
     const body = open.length
       ? open.map(renderDecisionCard).join('')
       : '<div class="decision-empty">Nothing is waiting on you.</div>';
+    const isReplyBox = (el) => el.classList && el.classList.contains('decision-text') && this.contains(el);
+    const focus = captureFocus(document.activeElement, isReplyBox);
     this.innerHTML = header + `<div class="decisions-list">${body}</div>`;
+    restoreDrafts(this.querySelectorAll('.decision-text'), this._drafts, new Set(open.map((d) => String(d.id))), focus);
   }
 
   _onClick(e) {
@@ -90,6 +102,7 @@ export class DecisionsPanel extends HTMLElement {
         return;
       }
       // The decision_update broadcast re-renders the list; remove locally so it feels immediate.
+      this._drafts.delete(String(id));
       state.decisions = (state.decisions || []).filter((d) => String(d.id) !== String(id));
       this.render();
     } catch (err) {
