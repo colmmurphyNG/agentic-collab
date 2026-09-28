@@ -363,6 +363,8 @@ wss.onConnect((client) => {
   const pages = db.listPages();
   const stores = db.listStores();
   const destinations = db.listDestinations();
+  const decisions = db.listDecisions({ status: 'open' });
+  const openDecisionsByAgent = db.countOpenDecisionsByAgent();
   wss.send(client, JSON.stringify({
     type: 'init',
     agents,
@@ -375,6 +377,8 @@ wss.onConnect((client) => {
     pages,
     stores,
     destinations,
+    decisions,
+    openDecisionsByAgent,
   }));
 });
 

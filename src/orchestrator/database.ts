@@ -19,6 +19,9 @@ import type {
   ProxyRegistration,
   Reminder,
   ReminderStatus,
+  Decision,
+  DecisionOption,
+  DecisionStatus,
   Job,
   JobStatus,
   PageRecord,
@@ -291,6 +294,23 @@ export class Database {
     if (!reminderColumns.some((c) => c['name'] === 'skip_if_active')) {
       this.db.exec('ALTER TABLE reminders ADD COLUMN skip_if_active INTEGER NOT NULL DEFAULT 0');
     }
+
+    // Decisions raised by agents for the operator to answer from one list.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        question TEXT NOT NULL,
+        options_json TEXT NOT NULL DEFAULT '[]',
+        recommended TEXT,
+        blocking INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'open',
+        answer TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        answered_at TEXT
+      )
+    `);
 
     // Create jobs table (JJ — recurring cron-scheduled prompts; fire-and-continue, no manual completion)
     this.db.exec(`
@@ -820,6 +840,53 @@ export class Database {
       ORDER BY proxy_id
     `).all(thresholdSeconds) as Array<Record<string, unknown>>;
     return rows.map(mapProxyRow);
+  }
+
+  // ── Decisions ──
+
+  createDecision(opts: { agentName: string; topic: string; question: string; options: DecisionOption[]; recommended?: string | null; blocking?: boolean }): Decision {
+    if (opts.recommended && !opts.options.some((o) => o.key === opts.recommended)) {
+      throw new Error(`recommended "${opts.recommended}" is not one of the option keys`);
+    }
+    this.db.prepare(`
+      INSERT INTO decisions (agent_name, topic, question, options_json, recommended, blocking)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(opts.agentName, opts.topic, opts.question, JSON.stringify(opts.options), opts.recommended ?? null, opts.blocking ? 1 : 0);
+    const row = this.db.prepare('SELECT * FROM decisions WHERE id = last_insert_rowid()').get() as Record<string, unknown>;
+    return mapDecisionRow(row);
+  }
+
+  /** Open decisions: blocking first, then oldest first. Closed ones: most recent first, capped. */
+  listDecisions(opts: { status?: DecisionStatus | 'all'; agentName?: string; limit?: number } = {}): Decision[] {
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    const status = opts.status ?? 'open';
+    if (status !== 'all') { where.push('status = ?'); params.push(status); }
+    if (opts.agentName) { where.push('agent_name = ?'); params.push(opts.agentName); }
+    const order = status === 'open' ? 'blocking DESC, id ASC' : 'COALESCE(answered_at, created_at) DESC, id DESC';
+    const sql = `SELECT * FROM decisions ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${order} LIMIT ?`;
+    params.push(opts.limit ?? 200);
+    return (this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>).map(mapDecisionRow);
+  }
+
+  getDecision(id: number): Decision | undefined {
+    const row = this.db.prepare('SELECT * FROM decisions WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? mapDecisionRow(row) : undefined;
+  }
+
+  /** Close an open decision. Returns undefined if it was not open, so two answers cannot both win. */
+  closeDecision(id: number, status: 'answered' | 'withdrawn', answer: string | null): Decision | undefined {
+    const result = this.db.prepare(`
+      UPDATE decisions SET status = ?, answer = ?, answered_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+      WHERE id = ? AND status = 'open'
+    `).run(status, answer, id);
+    if (result.changes === 0) return undefined;
+    return this.getDecision(id);
+  }
+
+  countOpenDecisionsByAgent(): Record<string, number> {
+    const rows = this.db.prepare("SELECT agent_name, COUNT(*) AS n FROM decisions WHERE status = 'open' GROUP BY agent_name").all() as Array<Record<string, unknown>>;
+    return Object.fromEntries(rows.map((r) => [r['agent_name'] as string, r['n'] as number]));
   }
 
   // ── Reminders ──
@@ -1384,6 +1451,29 @@ function mapPendingMessageRow(row: Record<string, unknown>): PendingMessage {
     nextAttemptAt: row['next_attempt_at'] as string | null,
     createdAt: row['created_at'] as string,
     deliveredAt: row['delivered_at'] as string | null,
+  };
+}
+
+function mapDecisionRow(row: Record<string, unknown>): Decision {
+  let options: DecisionOption[] = [];
+  try {
+    const parsed = JSON.parse((row['options_json'] as string) || '[]');
+    if (Array.isArray(parsed)) options = parsed as DecisionOption[];
+  } catch {
+    // A corrupt options column shows as no options rather than hiding the decision.
+  }
+  return {
+    id: row['id'] as number,
+    agentName: row['agent_name'] as string,
+    topic: row['topic'] as string,
+    question: row['question'] as string,
+    options,
+    recommended: (row['recommended'] as string | null) ?? null,
+    blocking: (row['blocking'] as number) === 1,
+    status: row['status'] as DecisionStatus,
+    answer: (row['answer'] as string | null) ?? null,
+    createdAt: row['created_at'] as string,
+    answeredAt: (row['answered_at'] as string | null) ?? null,
   };
 }
 

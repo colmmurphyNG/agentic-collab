@@ -280,6 +280,26 @@ export type Reminder = {
   createdAt: string;
 };
 
+// ── Decisions ──
+
+export type DecisionStatus = 'open' | 'answered' | 'withdrawn';
+
+export type DecisionOption = { key: string; label: string };
+
+export type Decision = {
+  id: number;
+  agentName: string;
+  topic: string;
+  question: string;
+  options: DecisionOption[];
+  recommended: string | null;
+  blocking: boolean;
+  status: DecisionStatus;
+  answer: string | null;
+  createdAt: string;
+  answeredAt: string | null;
+};
+
 // ── Jobs (JJ) ──
 // Recurring cron-scheduled prompts fired at agents as if inbound messages.
 // Distinct from Reminders: fire-and-continue (no manual completion).

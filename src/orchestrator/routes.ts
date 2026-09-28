@@ -2859,6 +2859,118 @@ route('GET', '/api/orchestrator/status', async (_req, res, _match, ctx) => {
 
 // ── Reminders ──
 
+// ── Decisions ──
+// Agents raise a decision instead of burying a question in a report; the operator answers
+// it from one list and the answer arrives back as an ordinary dashboard message.
+
+const DECISION_KEY_RE = /^[A-Za-z0-9]{1,8}$/;
+
+route('POST', '/api/decisions', async (req, res, _match, ctx) => {
+  const body = await readJson<{
+    agentName?: unknown; topic?: unknown; question?: unknown; options?: unknown; recommended?: unknown; blocking?: unknown;
+  }>(req);
+  if (typeof body.agentName !== 'string' || !body.agentName) return json(res, 400, { error: 'agentName required' });
+  if (typeof body.topic !== 'string' || !body.topic.trim() || body.topic.length > 80) {
+    return json(res, 400, { error: 'topic required, at most 80 characters' });
+  }
+  if (typeof body.question !== 'string' || !body.question.trim() || body.question.length > 2000) {
+    return json(res, 400, { error: 'question required, at most 2000 characters' });
+  }
+  const rawOptions = body.options === undefined ? [] : body.options;
+  if (!Array.isArray(rawOptions) || rawOptions.length > 8) return json(res, 400, { error: 'options must be a list of at most 8' });
+  const options: Array<{ key: string; label: string }> = [];
+  for (const o of rawOptions) {
+    const key = (o as { key?: unknown })?.key;
+    const label = (o as { label?: unknown })?.label;
+    if (typeof key !== 'string' || !DECISION_KEY_RE.test(key)) return json(res, 400, { error: 'each option key must be 1-8 letters or digits' });
+    if (typeof label !== 'string' || !label.trim() || label.length > 300) return json(res, 400, { error: `option "${key}" needs a label of at most 300 characters` });
+    if (options.some((x) => x.key === key)) return json(res, 400, { error: `duplicate option key "${key}"` });
+    options.push({ key, label: sanitizeMessage(label) });
+  }
+  let recommended: string | null = null;
+  if (body.recommended !== undefined && body.recommended !== null) {
+    if (typeof body.recommended !== 'string' || !options.some((o) => o.key === body.recommended)) {
+      return json(res, 400, { error: 'recommended must be one of the option keys' });
+    }
+    recommended = body.recommended;
+  }
+  const agent = ctx.db.getAgent(body.agentName);
+  if (!agent) return json(res, 404, { error: `Agent "${body.agentName}" not found` });
+
+  const decision = ctx.db.createDecision({
+    agentName: body.agentName,
+    topic: body.topic.trim(),
+    question: sanitizeMessage(body.question),
+    options,
+    recommended,
+    blocking: body.blocking === true,
+  });
+
+  // Also show it in the agent's thread, so the conversation history stays complete.
+  const summary = `[decision #${decision.id}${decision.blocking ? ', blocking' : ''}] ${decision.question}` +
+    decision.options.map((o) => `\n  (${o.key}) ${o.label}${o.key === decision.recommended ? '  ← recommended' : ''}`).join('');
+  const msg = ctx.db.addDashboardMessage(decision.agentName, 'from_agent', summary, { topic: decision.topic });
+  ctx.wss.broadcast(JSON.stringify({ type: 'message', msg }));
+
+  broadcastDecisionUpdate(ctx);
+  json(res, 201, decision);
+});
+
+route('GET', '/api/decisions', async (req, res, _match, ctx) => {
+  const url = new URL(req.url!, `http://${req.headers.host}`);
+  const status = url.searchParams.get('status') ?? 'open';
+  if (!['open', 'answered', 'withdrawn', 'all'].includes(status)) return json(res, 400, { error: 'invalid status' });
+  const agent = url.searchParams.get('agent') ?? undefined;
+  json(res, 200, ctx.db.listDecisions({ status: status as 'open', agentName: agent }));
+});
+
+route('POST', '/api/decisions/:id/answer', async (req, res, match, ctx) => {
+  const id = parseInt(match.pathname.groups['id']!, 10);
+  if (isNaN(id)) return json(res, 400, { error: 'Invalid decision ID' });
+  const body = await readJson<{ choice?: unknown; text?: unknown }>(req);
+  const existing = ctx.db.getDecision(id);
+  if (!existing) return json(res, 404, { error: 'Decision not found' });
+  if (existing.status !== 'open') return json(res, 409, { error: `Decision is already ${existing.status}` });
+
+  let chosen: { key: string; label: string } | undefined;
+  if (body.choice !== undefined && body.choice !== null) {
+    chosen = existing.options.find((o) => o.key === body.choice);
+    if (!chosen) return json(res, 400, { error: 'choice must be one of the option keys' });
+  }
+  const text = typeof body.text === 'string' ? sanitizeMessage(body.text.trim()) : '';
+  if (!chosen && !text) return json(res, 400, { error: 'choose an option or write a reply' });
+
+  const answer = [chosen ? `(${chosen.key}) ${chosen.label}` : '', text].filter(Boolean).join(' — ');
+  const closed = ctx.db.closeDecision(id, 'answered', answer);
+  if (!closed) return json(res, 409, { error: 'Decision was answered elsewhere just now' });
+
+  const reply = `DECISION #${closed.id} answered: ${answer}\n(Your question: ${closed.question})`;
+  enqueueAndDeliver(ctx, {
+    agentName: closed.agentName,
+    displayMessage: reply,
+    envelope: buildReplyEnvelope('dashboard', closed.topic, reply),
+    topic: closed.topic,
+    sourceAgent: 'dashboard',
+    targetAgent: closed.agentName,
+    queueSourceAgent: null,
+  });
+  broadcastDecisionUpdate(ctx);
+  json(res, 200, closed);
+});
+
+route('POST', '/api/decisions/:id/withdraw', async (req, res, match, ctx) => {
+  const id = parseInt(match.pathname.groups['id']!, 10);
+  if (isNaN(id)) return json(res, 400, { error: 'Invalid decision ID' });
+  const body = await readJson<{ agentName?: unknown }>(req);
+  const existing = ctx.db.getDecision(id);
+  if (!existing) return json(res, 404, { error: 'Decision not found' });
+  if (body.agentName !== existing.agentName) return json(res, 403, { error: 'only the agent that raised a decision can withdraw it' });
+  const closed = ctx.db.closeDecision(id, 'withdrawn', null);
+  if (!closed) return json(res, 409, { error: `Decision is already ${existing.status}` });
+  broadcastDecisionUpdate(ctx);
+  json(res, 200, closed);
+});
+
 route('POST', '/api/reminders', async (req, res, _match, ctx) => {
   const body = await readJson<{
     agentName?: string;
@@ -3481,6 +3593,10 @@ function enqueueAndDeliver(
   });
 
   return { msg, pending, linkedMsg };
+}
+
+function broadcastDecisionUpdate(ctx: RouteContext): void {
+  ctx.wss.broadcast(JSON.stringify({ type: 'decision_update', decisions: ctx.db.listDecisions({ status: 'open' }), openDecisionsByAgent: ctx.db.countOpenDecisionsByAgent() }));
 }
 
 function broadcastReminderUpdate(ctx: RouteContext): void {
