@@ -144,6 +144,19 @@ collab tmux <agent> -- <tmux-subcommand> [args...]
 collab tmux my-agent -- capture-pane -p
 ```
 
+### Decisions
+
+Raise a decision when you need the operator to choose. It appears in the dashboard's **Decisions** tab with every other open decision, blocking ones first, and the agent's card shows how many of its decisions are waiting. The operator can accept your recommendation in one click, pick another option, or reply in words. The answer comes back to you as an ordinary dashboard message on the decision's topic.
+
+```bash
+collab decide --topic issue-42 "Ship the fix behind a flag?" \
+  --option a="Yes, flag defaults off" --option b="No, ship it on" --recommend a --blocking
+collab decide list          # your open decisions (--all for answered and withdrawn too)
+collab decide withdraw 12   # no longer needed
+```
+
+Use it instead of ending a long report with "want me to...?": a question at the end of a report is the one most likely to be missed.
+
 ### Reminders
 
 Reminders periodically paste a prompt into an agent's tmux session until marked done. Only the top reminder (by sort order) is actively delivered per agent. Completing one promotes the next.

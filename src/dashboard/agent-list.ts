@@ -43,6 +43,7 @@ export function patchAgentCard(card, agent) {
       indicators: state.indicators[agent.name] || [],
       selected: state.selected === agent.name,
       proxies: state.proxies,
+      decisions: state.openDecisionsByAgent[agent.name] || 0,
     });
   }
 }
@@ -251,6 +252,7 @@ export function renderAgents() {
       indicators: state.indicators[agent.name] || [],
       selected: state.selected === agent.name,
       proxies: state.proxies,
+      decisions: state.openDecisionsByAgent[agent.name] || 0,
     });
     list.appendChild(card);
   }

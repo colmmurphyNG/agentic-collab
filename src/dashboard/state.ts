@@ -28,6 +28,9 @@ export const state = {
   // Values: 'all' (default), 'operator', 'team', or a specific agent name.
   // Lets the operator separate "tl ↔ me" from "tl ↔ specialists" in tl's thread.
   counterpartyPerAgent: {},
+  // Open decisions raised by agents (Decisions tab), and the per-agent count for card badges.
+  decisions: [],
+  openDecisionsByAgent: {},
   editingPersona: false,
   indicators: {},
   pages: [],

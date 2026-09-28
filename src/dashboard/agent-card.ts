@@ -102,6 +102,11 @@ function buildMetaHtml(agent, proxies) {
   return `<span>${esc(modelStr)}</span>${accountSpan}${agent.proxyId ? `<span title="proxy: ${esc(agent.proxyId)}">${esc(agent.proxyId)}${proxyWarning(agent.proxyId, proxies)}</span>` : ''}`;
 }
 
+function decisionBadgeHtml(count) {
+  const n = count || 0;
+  return n > 0 ? `<span class="decision-badge" title="${n} decision${n === 1 ? '' : 's'} waiting on you">${n} waiting</span>` : '';
+}
+
 // ── Component ──
 
 export class AgentCard extends HTMLElement {
@@ -114,6 +119,7 @@ export class AgentCard extends HTMLElement {
 
     const unreadCount = ctx.unread || 0;
     const unreadBadge = unreadCount > 0 ? `<span class="unread-badge">${unreadCount}</span>` : '';
+    const decisionBadge = decisionBadgeHtml(ctx.decisions);
     const failureInfo = agent.state === 'failed' && agent.failureReason
       ? `<div class="agent-failure" title="${esc(agent.failureReason)}">${esc(agent.failureReason)}</div>` : '';
 
@@ -131,7 +137,7 @@ export class AgentCard extends HTMLElement {
           ${isStarred ? icon.starFilled(14) : icon.star(14)}
         </button>
         ${agent.icon ? `<span class="agent-icon">${esc(agent.icon)}</span>` : ''}
-        <span class="agent-name">${esc(agent.name)}${unreadBadge}</span>
+        <span class="agent-name">${esc(agent.name)}${unreadBadge}${decisionBadge}</span>
         <span class="agent-badges"><span class="state-badge state-${agent.state}">${agent.state}</span>${indicatorBadges}</span>
       </div>
       <div class="agent-meta">${buildMetaHtml(agent, ctx.proxies)}</div>
@@ -174,7 +180,7 @@ export class AgentCard extends HTMLElement {
     if (nameEl) {
       const unreadCount = ctx.unread || 0;
       const unreadBadge = unreadCount > 0 ? `<span class="unread-badge">${unreadCount}</span>` : '';
-      nameEl.innerHTML = `${esc(agent.name)}${unreadBadge}`;
+      nameEl.innerHTML = `${esc(agent.name)}${unreadBadge}${decisionBadgeHtml(ctx.decisions)}`;
     }
     // Meta
     const meta = this.querySelector('.agent-meta');
