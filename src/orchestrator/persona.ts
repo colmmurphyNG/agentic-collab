@@ -1079,6 +1079,11 @@ Reminders:
   collab reminder list
   collab reminder done <id>
 
+Decisions (anything you need the operator to decide goes here, not at the end of a report):
+  collab decide --topic <t> "question" --option a="label" --option b="label" --recommend a [--blocking]
+  collab decide list
+  The answer arrives as a normal dashboard message on that topic.
+
 Run \`collab help\` for full command reference.`);
 
   if (opts.peers && opts.peers.length > 0) {

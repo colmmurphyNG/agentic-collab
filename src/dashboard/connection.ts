@@ -16,6 +16,15 @@ import { esc } from '/dashboard/assets/utils.ts';
 
 // ── Dependencies injected via setup() ──
 let _renderAgents = () => {};
+
+/** Update the header count and re-render the Decisions panel if it is open. */
+function _refreshDecisions() {
+  const n = (state.decisions || []).length;
+  const count = document.getElementById('decisionsCount');
+  if (count) { count.textContent = n ? String(n) : ''; count.style.display = n ? '' : 'none'; }
+  const panel = document.getElementById('decisionsPanel');
+  if (panel && panel.style.display !== 'none' && panel.render) panel.render();
+}
 let _renderThread = () => {};
 let _updatePageTitle = () => {};
 let _updateAgent = () => {};
@@ -150,6 +159,9 @@ export function connect() {
         state.pages = data.pages || [];
         state.stores = data.stores || [];
         state.destinations = data.destinations || [];
+        state.decisions = data.decisions || [];
+        state.openDecisionsByAgent = data.openDecisionsByAgent || {};
+        _refreshDecisions();
         // Restore unread counts from server, preserving any live increments
         if (data.unreadCounts) {
           for (const [agent, count] of Object.entries(data.unreadCounts)) {
@@ -240,6 +252,12 @@ export function connect() {
         state.destinations = data.destinations || [];
         { const sp = document.getElementById('settingsPanel');
           if (sp && sp.style.display !== 'none' && sp.render) sp.render(); }
+        break;
+      case 'decision_update':
+        state.decisions = data.decisions || [];
+        state.openDecisionsByAgent = data.openDecisionsByAgent || {};
+        _renderAgents();
+        _refreshDecisions();
         break;
       case 'reminder_update':
         if (state.threadView === 'reminders') {
