@@ -131,3 +131,46 @@ describe('collab — bare -- token (POSIX end-of-options)', () => {
     assert.doesNotMatch(r.stderr, /unknown flag/);
   });
 });
+
+describe('collab decide', () => {
+  it('rejects bad input before touching the network', () => {
+    assert.equal(runCollab(['decide', '--topic', 't', 'q', '--bogus']).status, 2);
+    assert.match(runCollab(['decide', '--topic', 't', 'q', '--option', 'bad key=x']).stderr, /--option must look like/);
+    assert.equal(runCollab(['decide', '--topic', 't', 'q', '--option', 'a=x', '--recommend', 'b']).status, 2);
+    assert.match(runCollab(['decide', 'q', '--option', 'a=x']).stderr, /usage: collab decide/);
+    assert.match(runCollab(['decide', 'withdraw']).stderr, /usage: collab decide withdraw/);
+  });
+
+  it('sends the parsed decision to the orchestrator', async () => {
+    const { createServer } = await import('node:http');
+    const { spawn } = await import('node:child_process');
+    let received: { method?: string; url?: string; body?: any } = {};
+    const server = createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        received = { method: req.method, url: req.url, body: raw ? JSON.parse(raw) : undefined };
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 7, blocking: true, topic: 'issue-1' }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, r));
+    const port = (server.address() as { port: number }).port;
+    const child = spawn(COLLAB_BIN, ['decide', '--topic', 'issue-1', 'Ship it?', '--option', 'a=Yes, behind a flag', '--option', 'b:No', '--recommend', 'a', '--blocking'], {
+      env: { ...process.env, ORCHESTRATOR_URL: `http://127.0.0.1:${port}`, COLLAB_AGENT: 'frontend' },
+    });
+    let out = '';
+    child.stdout.on('data', (c) => { out += c; });
+    const code = await new Promise((r) => child.on('close', r));
+    server.close();
+    assert.equal(code, 0, out);
+    assert.equal(received.method, 'POST');
+    assert.equal(received.url, '/api/decisions');
+    assert.deepEqual(received.body, {
+      agentName: 'frontend', topic: 'issue-1', question: 'Ship it?',
+      options: [{ key: 'a', label: 'Yes, behind a flag' }, { key: 'b', label: 'No' }],
+      recommended: 'a', blocking: true,
+    });
+    assert.match(out, /raised decision #7 \(blocking\)/);
+  });
+});

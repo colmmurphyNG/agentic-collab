@@ -13,6 +13,7 @@
 <link rel="stylesheet" href="/dashboard/assets/styles/modals.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/settings.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/files-panel.css">
+<link rel="stylesheet" href="/dashboard/assets/styles/decisions.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/responsive.css">
 </head>
 <body>
@@ -28,6 +29,7 @@
     <a href="/docs" target="_blank" class="header-btn">Docs</a>
     <a href="/scratch" target="_blank" class="header-btn">Scratch</a>
     <a href="/usage" target="_blank" class="header-btn">Usage</a>
+    <button id="decisionsBtn" class="header-btn" title="Decisions waiting on you">Decisions <span id="decisionsCount" class="decisions-count" style="display:none"></span></button>
     <button id="settingsBtn" class="header-btn">Settings</button>
     <div class="conn-status">
       <div class="conn-dot" id="connDot"></div>
@@ -71,6 +73,7 @@
     <span class="voice-partial" id="voicePartial" style="display:none"></span>
   </div>
   <settings-panel id="settingsPanel" style="display:none" class="thread-panel"></settings-panel>
+  <decisions-panel id="decisionsPanel" style="display:none" class="thread-panel decisions-panel"></decisions-panel>
 </div>
 
 <script type="module">
@@ -83,6 +86,7 @@ import '/dashboard/assets/watch-panel.ts';
 import '/dashboard/assets/reminder-panel.ts';
 import '/dashboard/assets/jobs-panel.ts';
 import '/dashboard/assets/files-panel.ts';
+import '/dashboard/assets/decisions-panel.ts';
 import { loadServerPrefs } from '/dashboard/assets/settings.ts';
 import '/dashboard/assets/settings.ts';
 import { agentAction, openCreateAgentModal, setup as setupLifecycle } from '/dashboard/assets/agent-lifecycle.ts';
@@ -257,6 +261,33 @@ import { pushUrlState, restorePendingAgent, setup as setupUrlState } from '/dash
   // Close settings when selecting an agent
   document.getElementById('agentList').addEventListener('click', () => {
     if (settingsPanel.style.display !== 'none') closeSettings();
+  });
+
+  // ── Decisions toggle ──
+  const decisionsBtn = document.getElementById('decisionsBtn');
+  const decisionsPanel = document.getElementById('decisionsPanel');
+  function closeDecisions() {
+    decisionsPanel.style.display = 'none';
+    // Leave the thread hidden if Settings is what replaced this panel.
+    if (settingsPanel.style.display === 'none') threadPanel.style.display = '';
+    decisionsBtn.style.color = 'var(--text-dim)';
+    decisionsBtn.style.borderColor = 'var(--border)';
+  }
+  function openDecisions() {
+    if (settingsPanel.style.display !== 'none') closeSettings();
+    decisionsPanel.style.display = 'flex';
+    threadPanel.style.display = 'none';
+    decisionsBtn.style.color = 'var(--accent)';
+    decisionsBtn.style.borderColor = 'var(--accent)';
+    decisionsPanel.render();
+  }
+  decisionsBtn.addEventListener('click', () => {
+    if (decisionsPanel.style.display !== 'none') closeDecisions(); else openDecisions();
+  });
+  decisionsPanel.addEventListener('close-decisions', closeDecisions);
+  settingsBtn.addEventListener('click', () => { if (decisionsPanel.style.display !== 'none') closeDecisions(); });
+  document.getElementById('agentList').addEventListener('click', () => {
+    if (decisionsPanel.style.display !== 'none') closeDecisions();
   });
 
   // ── URL State (History API) ──
