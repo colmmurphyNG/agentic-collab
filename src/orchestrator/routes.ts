@@ -29,6 +29,7 @@ import {
 } from './lifecycle.ts';
 import { getAdapter } from './adapters/index.ts';
 import { shutdownAgents, restoreAllAgents } from './network.ts';
+import { markProxyAlive } from './proxy-liveness.ts';
 import { UsageAggregator, renderUsageMarkdown } from './usage-aggregator.ts';
 import { DroneAuditAggregator, renderAuditMarkdown } from './drone-audit.ts';
 import { sessionName } from '../shared/agent-entity.ts';
@@ -930,6 +931,7 @@ route('POST', '/api/proxy/register', async (req, res, _match, ctx) => {
 
   const proxyVersion = typeof body.version === 'string' ? body.version : undefined;
   const proxy = ctx.db.registerProxy(body.proxyId, body.token, body.host, proxyVersion);
+  markProxyAlive(body.proxyId);
 
   // Compute version match and enrich the response
   const orchestratorVersion = getVersion();
@@ -955,6 +957,7 @@ route('POST', '/api/proxy/heartbeat', async (req, res, _match, ctx) => {
 
   const updated = ctx.db.updateProxyHeartbeat(body.proxyId);
   if (!updated) return json(res, 404, { error: 'Proxy not registered' });
+  markProxyAlive(body.proxyId);
 
   json(res, 200, { ok: true });
 });
