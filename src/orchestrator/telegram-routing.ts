@@ -93,6 +93,16 @@ export function clearTelegramRoute(agentName: string): boolean {
 }
 
 /**
+ * Clear every active route. Returns how many were live at the time, so the
+ * caller can tell the operator whether anything was actually being forwarded.
+ */
+export function clearAllTelegramRoutes(): number {
+  const live = listTelegramRoutes().length;
+  routes.clear();
+  return live;
+}
+
+/**
  * Snapshot of all active routes for diagnostics. The returned array is
  * not live — mutating it does not affect the internal map. Expired
  * entries are filtered out and removed.
@@ -125,9 +135,11 @@ export function _resetTelegramRoutes(): void {
  *
  * Matched signals (case-insensitive):
  *   - "turn off --notify" / "stop notify" / "no notify" / "stop notifying"
- *   - "I'm at the dashboard" / "I am at the dashboard" / "back at dashboard"
- *   - "still notifying me" (complaint form)
+ *   - "silence the notify" / "mute notifications" / "quiet the pings"
+ *   - "I'm at the dashboard" / "back at dashboard" / "I'm at my desk"
+ *   - "still notifying me" / "still pinging me" / "still getting pings"
  *   - "dashboard-quiet" / "dashboard quiet"
+ *   - a message that is nothing but "silence" / "quiet" / "mute" / "shh"
  *
  * Used by /api/dashboard/send + routeTelegramMessage to AUTO-CLEAR the
  * Telegram routes when one of these is detected, pairing _default.md §12
@@ -135,17 +147,49 @@ export function _resetTelegramRoutes(): void {
  * action. Avoids the 2026-06-12 incident where every Telegram complaint
  * refreshed the TTL and extended the noise window.
  *
- * False-positive guard: bare "notify" without "stop/turn off/no/still"
+ * That incident recurred on 2026-09-15 because this list is a vocabulary and
+ * the operator's words were outside it: "silence on the notify, Im at desk",
+ * then "Silence". Neither matched, so nothing cleared, and because a
+ * non-matching inbound still arms a route, each complaint bought another
+ * 30 minutes of the noise it was complaining about. Hence `isQuietCommand`
+ * below — a phrase list is always one phrasing behind, so there has to be one
+ * spelling that is guaranteed to work.
+ *
+ * False-positive guard: bare "notify" without a "stop/turn off/no/still"
  * prefix does NOT match — e.g. "we should notify the team" stays inactive.
+ * The single-word forms match only when they are the WHOLE message, so
+ * "the log silence was the diagnostic" stays inactive too.
  */
 const COMM_PREF_DIRECTIVE_PATTERNS: RegExp[] = [
-  /\b(turn[- ]off|stop|no|disable)\s+(?:the\s+)?(--?notify|notify|notifying|notification)/i,
-  /\bstop\s+notifying\b/i,
-  /\b(i'?m|i\s+am)\s+(at|back\s+at|back\s+on)\s+(?:the\s+)?dashboard\b/i,
-  /\bback\s+(at|on)\s+(?:the\s+)?dashboard\b/i,
-  /\bstill\s+notifying\s+me\b/i,
+  /\b(turn[- ]off|stop|no|disable|silence|mute|kill)\s+(?:the\s+)?(--?notify|notify|notifying|notification|notifications|ping|pings|pinging)/i,
+  /\b(silence|mute|quiet)\s+on\s+(?:the\s+)?(--?notify|notify|notification|notifications|ping|pings)/i,
+  /\bstop\s+(notifying|pinging)\b/i,
+  /\b(i'?m|i\s+am)\s+(at|back\s+at|back\s+on)\s+(?:the\s+)?(dashboard|desk|my\s+desk)\b/i,
+  /\bback\s+(at|on)\s+(?:the\s+)?(dashboard|desk|my\s+desk)\b/i,
+  /\bat\s+(my\s+)?desk\b/i,
+  /\bstill\s+(notifying|pinging)\b/i,
+  /\bstill\s+getting\s+(the\s+)?(notification|notifications|ping|pings|notifcations)\b/i,
   /\bdashboard[- ]quiet\b/i,
+  // Whole-message single words only, so ordinary prose using "silence" or
+  // "quiet" does not trip the guard.
+  /^\s*(silence|quiet|mute|hush|shh+)\s*[.!]*\s*$/i,
 ];
+
+/**
+ * The explicit off switch: a Telegram message that is exactly `/quiet` (or
+ * `/silence`, `/mute`), optionally with the `@botname` suffix Telegram adds in
+ * groups.
+ *
+ * This exists because `isCommPrefDirective` is a guess at phrasing and will
+ * keep being one phrasing behind. One spelling has to work every time, and be
+ * documentable, so the operator is never reduced to rewording a complaint.
+ */
+const QUIET_COMMAND = /^\s*\/(quiet|silence|mute)(@[A-Za-z0-9_]+)?\s*$/i;
+
+export function isQuietCommand(text: string): boolean {
+  if (!text) return false;
+  return QUIET_COMMAND.test(text);
+}
 
 export function isCommPrefDirective(text: string): boolean {
   if (!text) return false;
@@ -159,8 +203,7 @@ export function isCommPrefDirective(text: string): boolean {
  */
 export function maybeAutoClearOnCommPref(text: string, source: string): number {
   if (!isCommPrefDirective(text)) return 0;
-  const before = listTelegramRoutes().length;
-  routes.clear();
-  console.log(`[telegram-routing] auto-cleared ${before} routes (comm-pref directive detected in ${source})`);
-  return before;
+  const cleared = clearAllTelegramRoutes();
+  console.log(`[telegram-routing] auto-cleared ${cleared} routes (comm-pref directive detected in ${source})`);
+  return cleared;
 }

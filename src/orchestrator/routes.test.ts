@@ -6,6 +6,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Database } from './database.ts';
 import { createRouter, routeTelegramMessage, pruneJunkFiles, isJunkFile, type RouteContext } from './routes.ts';
+import { recordTelegramInbound, listTelegramRoutes, _resetTelegramRoutes } from './telegram-routing.ts';
 import type { TelegramDispatcher } from './telegram.ts';
 import { WebSocketServer } from '../shared/websocket-server.ts';
 
@@ -1084,6 +1085,7 @@ describe('routeTelegramMessage — inbound routing', () => {
   }
 
   beforeEach(() => {
+    _resetTelegramRoutes();
     tmpDir = mkdtempSync(join(tmpdir(), 'agentic-route-tg-test-'));
     db = new Database(join(tmpDir, 'test.db'));
     wss = new WebSocketServer();
@@ -1106,6 +1108,33 @@ describe('routeTelegramMessage — inbound routing', () => {
       storesDir: join(tmpDir, 'stores'),
       filesDir: join(tmpDir, 'files'),
     };
+  });
+
+  it('treats /quiet as a command: clears forwarding, delivers nothing, arms nothing', () => {
+    // The operator's escape hatch. It must not reach an agent as a message,
+    // and above all must not arm a route - that was the original defect, where
+    // each request for quiet bought another TTL window of forwarding.
+    db.createAgent({ name: 'dev', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    db.registerProxy('p1', 'tok', 'localhost:3100');
+    recordTelegramInbound('dev', 'tg', '12345');
+    assert.equal(listTelegramRoutes().length, 1, 'precondition: a route is armed');
+
+    const sent: string[] = [];
+    const ctxWithCapture: RouteContext = {
+      ...ctx,
+      telegramDispatcher: {
+        startPolling: () => {},
+        stopPolling: () => {},
+        send: async (_t: string, _c: string, text: string) => { sent.push(text); return true; },
+      } as unknown as typeof ctx.telegramDispatcher,
+    };
+
+    routeTelegramMessage(ctxWithCapture, makeDest({ defaultAgent: 'dev' }), '12345', '/quiet');
+
+    assert.deepEqual(listTelegramRoutes(), [], 'forwarding must be off');
+    assert.equal(db.listPendingMessages('dev').length, 0, '/quiet is not a message for an agent');
+    assert.equal(sent.length, 1, 'the operator gets one confirmation');
+    assert.match(sent[0]!, /quiet/i);
   });
 
   it('routes an @-prefixed message to the named agent', () => {

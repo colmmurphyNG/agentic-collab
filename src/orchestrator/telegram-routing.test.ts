@@ -8,6 +8,8 @@ import {
   _resetTelegramRoutes,
   isCommPrefDirective,
   maybeAutoClearOnCommPref,
+  isQuietCommand,
+  clearAllTelegramRoutes,
 } from './telegram-routing.ts';
 
 describe('telegram-routing (auto-forward state map)', () => {
@@ -160,6 +162,69 @@ describe('telegram-routing (auto-forward state map)', () => {
       recordTelegramInbound('tl', 'cmCollab', '1');
       assert.equal(maybeAutoClearOnCommPref("I'm at the dashboard now", 'test'), 1);
       assert.equal(maybeAutoClearOnCommPref("I'm at the dashboard now", 'test'), 0);
+    });
+  });
+
+  describe('the 2026-09-15 silencing failure', () => {
+    // The operator asked for quiet three times and kept being pinged. Each
+    // phrasing sat outside the vocabulary, and a non-matching inbound still
+    // arms a route, so every complaint bought another TTL window of the noise
+    // it was complaining about.
+    const OPERATOR_WORDS = [
+      'silence on the notify, Im at desk',
+      'Silence',
+      'why still notifying?',
+      'still getting notifcations',   // operator's own typo, verbatim
+    ];
+
+    for (const words of OPERATOR_WORDS) {
+      it(`should recognise ${JSON.stringify(words)} as a request for quiet`, () => {
+        assert.equal(isCommPrefDirective(words), true);
+      });
+    }
+
+    it('should still ignore ordinary prose that merely mentions notifying', () => {
+      // The guard's action is to go silent, so a false positive costs the
+      // operator a forward they wanted. These must stay inactive.
+      for (const innocent of [
+        'we should notify the team',
+        'the log silence was the diagnostic',
+        'it went quiet after the deploy',
+        'I muted the alert channel last week',
+      ]) {
+        assert.equal(isCommPrefDirective(innocent), false, innocent);
+      }
+    });
+  });
+
+  describe('isQuietCommand', () => {
+    it('should accept the documented spellings', () => {
+      for (const cmd of ['/quiet', '/silence', '/mute', '  /quiet  ', '/QUIET']) {
+        assert.equal(isQuietCommand(cmd), true, cmd);
+      }
+    });
+
+    it('should accept the @botname suffix Telegram adds in groups', () => {
+      assert.equal(isQuietCommand('/quiet@cmCollabBot'), true);
+    });
+
+    it('should not fire on a message that merely contains the word', () => {
+      for (const notCmd of ['/quiet please', 'quiet', 'be /quiet now', '/quietly', '']) {
+        assert.equal(isQuietCommand(notCmd), false, JSON.stringify(notCmd));
+      }
+    });
+  });
+
+  describe('clearAllTelegramRoutes', () => {
+    it('should report how many routes were live', () => {
+      recordTelegramInbound('tl', 'cmCollab', '1');
+      recordTelegramInbound('pwa', 'cmCollab', '1');
+      assert.equal(clearAllTelegramRoutes(), 2);
+      assert.deepEqual(listTelegramRoutes(), []);
+    });
+
+    it('should report zero when nothing was being forwarded', () => {
+      assert.equal(clearAllTelegramRoutes(), 0);
     });
   });
 });
