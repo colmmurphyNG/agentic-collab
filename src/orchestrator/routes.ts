@@ -34,6 +34,7 @@ import { DroneAuditAggregator, renderAuditMarkdown } from './drone-audit.ts';
 import { sessionName } from '../shared/agent-entity.ts';
 import { paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
 import { recordTelegramInbound, getActiveTelegramRoute, maybeAutoClearOnCommPref, isCommPrefDirective, clearTelegramRoute, listTelegramRoutes, _resetTelegramRoutes } from './telegram-routing.ts';
+import { updateLinkError } from './update-link.ts';
 import type { MessageDispatcher } from './message-dispatcher.ts';
 import type { UsagePoller } from './usage-poller.ts';
 
@@ -2971,6 +2972,95 @@ route('POST', '/api/decisions/:id/withdraw', async (req, res, match, ctx) => {
   json(res, 200, closed);
 });
 
+// ── Updates ──
+// Finished work (a page, a PR, a report) an agent hands to the operator as a link. Nothing to
+// answer: the operator opens it from one list and marks it done.
+
+function optionalText(value: unknown, max: number): string | null | false {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || value.length > max) return false;
+  return value.trim() ? sanitizeMessage(value.trim()) : null;
+}
+
+route('POST', '/api/updates', async (req, res, _match, ctx) => {
+  const body = await readJson<{
+    agent?: unknown; agentName?: unknown; title?: unknown; summary?: unknown; link?: unknown; topic?: unknown;
+  }>(req);
+  const agentName = body.agent ?? body.agentName;
+  if (typeof agentName !== 'string' || !agentName) return json(res, 400, { error: 'agent required' });
+  if (typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 200) {
+    return json(res, 400, { error: 'title required, at most 200 characters' });
+  }
+  const summary = optionalText(body.summary, 500);
+  if (summary === false) return json(res, 400, { error: 'summary must be one line of at most 500 characters' });
+  if (summary && summary.includes('\n')) return json(res, 400, { error: 'summary must be one line of at most 500 characters' });
+  const topic = optionalText(body.topic, 80);
+  if (topic === false) return json(res, 400, { error: 'topic must be at most 80 characters' });
+  const linkError = updateLinkError(body.link);
+  if (linkError) return json(res, 400, { error: linkError });
+  if (!ctx.db.getAgent(agentName)) return json(res, 404, { error: `Agent "${agentName}" not found` });
+
+  const update = ctx.db.createUpdate({
+    agentName,
+    title: sanitizeMessage(body.title.trim()),
+    summary,
+    link: (body.link as string).trim(),
+    topic,
+  });
+
+  // Also show it in the agent's thread, so the conversation history stays complete.
+  const line = `[update #${update.id}] ${update.title}\n${update.link}${update.summary ? `\n${update.summary}` : ''}`;
+  const msg = ctx.db.addDashboardMessage(update.agentName, 'from_agent', line, update.topic ? { topic: update.topic } : undefined);
+  ctx.wss.broadcast(JSON.stringify({ type: 'message', msg }));
+
+  broadcastUpdatesChange(ctx);
+  json(res, 201, update);
+});
+
+route('GET', '/api/updates', async (req, res, _match, ctx) => {
+  const url = new URL(req.url!, `http://${req.headers.host}`);
+  const status = url.searchParams.get('status') ?? 'open';
+  if (!['open', 'done', 'all'].includes(status)) return json(res, 400, { error: 'status must be open, done or all' });
+  const agent = url.searchParams.get('agent');
+  json(res, 200, ctx.db.listUpdates({ status: status as 'open', ...(agent ? { agentName: agent } : {}) }));
+});
+
+function updateIdFrom(match: URLPatternResult): number | null {
+  const raw = match.pathname.groups['id'] ?? '';
+  return /^\d+$/.test(raw) ? parseInt(raw, 10) : null;
+}
+
+route('POST', '/api/updates/:id/seen', async (_req, res, match, ctx) => {
+  const id = updateIdFrom(match);
+  if (id === null) return json(res, 400, { error: 'Invalid update ID' });
+  if (!ctx.db.getUpdate(id)) return json(res, 404, { error: 'Update not found' });
+  // Seeing it twice is not an error, and only the first time changes anything worth broadcasting.
+  if (ctx.db.markUpdateSeen(id)) broadcastUpdatesChange(ctx);
+  json(res, 200, ctx.db.getUpdate(id));
+});
+
+route('POST', '/api/updates/:id/done', async (_req, res, match, ctx) => {
+  const id = updateIdFrom(match);
+  if (id === null) return json(res, 400, { error: 'Invalid update ID' });
+  const existing = ctx.db.getUpdate(id);
+  if (!existing) return json(res, 404, { error: 'Update not found' });
+  const done = ctx.db.markUpdateDone(id);
+  if (!done) return json(res, 409, { error: 'Update is already done' });
+  broadcastUpdatesChange(ctx);
+  json(res, 200, done);
+});
+
+route('POST', '/api/updates/:id/reopen', async (_req, res, match, ctx) => {
+  const id = updateIdFrom(match);
+  if (id === null) return json(res, 400, { error: 'Invalid update ID' });
+  const existing = ctx.db.getUpdate(id);
+  if (!existing) return json(res, 404, { error: 'Update not found' });
+  const reopened = ctx.db.reopenUpdate(id);
+  if (!reopened) return json(res, 409, { error: 'Update is already open' });
+  broadcastUpdatesChange(ctx);
+  json(res, 200, reopened);
+});
+
 route('POST', '/api/reminders', async (req, res, _match, ctx) => {
   const body = await readJson<{
     agentName?: string;
@@ -3597,6 +3687,10 @@ function enqueueAndDeliver(
 
 function broadcastDecisionUpdate(ctx: RouteContext): void {
   ctx.wss.broadcast(JSON.stringify({ type: 'decision_update', decisions: ctx.db.listDecisions({ status: 'open' }), openDecisionsByAgent: ctx.db.countOpenDecisionsByAgent() }));
+}
+
+function broadcastUpdatesChange(ctx: RouteContext): void {
+  ctx.wss.broadcast(JSON.stringify({ type: 'updates_change', updates: ctx.db.listUpdates({ status: 'open' }), unseenUpdates: ctx.db.countUnseenOpenUpdates() }));
 }
 
 function broadcastReminderUpdate(ctx: RouteContext): void {

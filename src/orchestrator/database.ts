@@ -22,6 +22,8 @@ import type {
   Decision,
   DecisionOption,
   DecisionStatus,
+  Update,
+  UpdateStatus,
   Job,
   JobStatus,
   PageRecord,
@@ -309,6 +311,22 @@ export class Database {
         answer TEXT,
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         answered_at TEXT
+      )
+    `);
+
+    // Finished work agents hand to the operator, kept as a list he can come back to.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS updates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT,
+        link TEXT NOT NULL,
+        topic TEXT,
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        seen_at TEXT,
+        done_at TEXT
       )
     `);
 
@@ -887,6 +905,64 @@ export class Database {
   countOpenDecisionsByAgent(): Record<string, number> {
     const rows = this.db.prepare("SELECT agent_name, COUNT(*) AS n FROM decisions WHERE status = 'open' GROUP BY agent_name").all() as Array<Record<string, unknown>>;
     return Object.fromEntries(rows.map((r) => [r['agent_name'] as string, r['n'] as number]));
+  }
+
+  // ── Updates ──
+
+  createUpdate(opts: { agentName: string; title: string; summary?: string | null; link: string; topic?: string | null }): Update {
+    this.db.prepare(`
+      INSERT INTO updates (agent_name, title, summary, link, topic) VALUES (?, ?, ?, ?, ?)
+    `).run(opts.agentName, opts.title, opts.summary ?? null, opts.link, opts.topic ?? null);
+    const row = this.db.prepare('SELECT * FROM updates WHERE id = last_insert_rowid()').get() as Record<string, unknown>;
+    return mapUpdateRow(row);
+  }
+
+  /** Newest first. Done ones are ordered by when they were marked done. */
+  listUpdates(opts: { status?: UpdateStatus | 'all'; agentName?: string; limit?: number } = {}): Update[] {
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    const status = opts.status ?? 'open';
+    if (status !== 'all') { where.push('status = ?'); params.push(status); }
+    if (opts.agentName) { where.push('agent_name = ?'); params.push(opts.agentName); }
+    const order = status === 'done' ? 'done_at DESC, id DESC' : 'id DESC';
+    const sql = `SELECT * FROM updates ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${order} LIMIT ?`;
+    params.push(opts.limit ?? 200);
+    return (this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>).map(mapUpdateRow);
+  }
+
+  getUpdate(id: number): Update | undefined {
+    const row = this.db.prepare('SELECT * FROM updates WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? mapUpdateRow(row) : undefined;
+  }
+
+  /** Returns true only when the row changed, so callers broadcast real changes and nothing else. */
+  markUpdateSeen(id: number): boolean {
+    return this.db.prepare(`
+      UPDATE updates SET seen_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ? AND seen_at IS NULL
+    `).run(id).changes > 0;
+  }
+
+  /** Done implies seen. Returns undefined if it was not open. */
+  markUpdateDone(id: number): Update | undefined {
+    const result = this.db.prepare(`
+      UPDATE updates SET status = 'done', done_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+        seen_at = COALESCE(seen_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      WHERE id = ? AND status = 'open'
+    `).run(id);
+    return result.changes === 0 ? undefined : this.getUpdate(id);
+  }
+
+  /** Returns undefined if it was not done. Keeps seen_at: the operator has already seen it. */
+  reopenUpdate(id: number): Update | undefined {
+    const result = this.db.prepare(`
+      UPDATE updates SET status = 'open', done_at = NULL WHERE id = ? AND status = 'done'
+    `).run(id);
+    return result.changes === 0 ? undefined : this.getUpdate(id);
+  }
+
+  countUnseenOpenUpdates(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM updates WHERE status = 'open' AND seen_at IS NULL").get() as Record<string, unknown>;
+    return row['n'] as number;
   }
 
   // ── Reminders ──
@@ -1474,6 +1550,21 @@ function mapDecisionRow(row: Record<string, unknown>): Decision {
     answer: (row['answer'] as string | null) ?? null,
     createdAt: row['created_at'] as string,
     answeredAt: (row['answered_at'] as string | null) ?? null,
+  };
+}
+
+function mapUpdateRow(row: Record<string, unknown>): Update {
+  return {
+    id: row['id'] as number,
+    agentName: row['agent_name'] as string,
+    title: row['title'] as string,
+    summary: (row['summary'] as string | null) ?? null,
+    link: row['link'] as string,
+    topic: (row['topic'] as string | null) ?? null,
+    status: row['status'] as UpdateStatus,
+    createdAt: row['created_at'] as string,
+    seenAt: (row['seen_at'] as string | null) ?? null,
+    doneAt: (row['done_at'] as string | null) ?? null,
   };
 }
 
