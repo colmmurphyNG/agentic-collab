@@ -1084,6 +1084,10 @@ Decisions (anything you need the operator to decide goes here, not at the end of
   collab decide list
   The answer arrives as a normal dashboard message on that topic.
 
+Updates (finished work the operator should look at: a review page, a PR, a report):
+  collab update "title" --link <https://... or /pages/...> [--summary "one line"] [--topic <t>]
+  It stays in the operator's Updates tab until marked done; nothing to answer.
+
 Run \`collab help\` for full command reference.`);
 
   if (opts.peers && opts.peers.length > 0) {
