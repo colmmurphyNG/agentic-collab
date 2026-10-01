@@ -539,6 +539,61 @@ cmd('decide', 'decide --topic <t> "<question>" --option <key>="<label>" ... [--r
   console.log(`raised decision #${d.id} (${d.blocking ? 'blocking' : 'non-blocking'}). The answer arrives as a message on topic ${d.topic}.`);
 });
 
+// ── Updates ──
+
+const UPDATE_USAGE = 'usage: collab update "<title>" --link <url-or-/pages/path> [--summary "<one line>"] [--topic <t>]  |  collab update list [--all]  |  collab update done <id>';
+
+cmd('update', 'update "<title>" --link <url-or-/pages/path> [--summary "<one line>"] [--topic <t>]  |  update list [--all]  |  update done <id>',
+  'Hand the operator a finished page, PR or report from the Updates tab', async (args) => {
+  const me = agentName();
+  if (args[0] === 'list') {
+    const all = args.includes('--all');
+    for (const a of args.slice(1)) rejectUnknownFlag(a, new Set(['--all']), 'update list');
+    // An agent sees its own; without COLLAB_AGENT (the operator's shell) every agent's.
+    const query = `status=${all ? 'all' : 'open'}${me ? `&agent=${encodeURIComponent(me)}` : ''}`;
+    const rows = await api('GET', `/api/updates?${query}`);
+    if (!rows.length) { console.log(all ? 'no updates' : 'no open updates'); return; }
+    for (const u of rows) {
+      console.log(`#${u.id} [${u.status}${u.status === 'open' && !u.seenAt ? ', unseen' : ''}] ${me ? '' : `${u.agentName}: `}${u.title}\n    ${u.link}${u.summary ? `\n    ${u.summary}` : ''}`);
+    }
+    return;
+  }
+  if (args[0] === 'done') {
+    if (args.length !== 2 || !/^\d+$/.test(args[1])) { console.error('usage: collab update done <id>'); process.exit(2); }
+    await api('POST', `/api/updates/${args[1]}/done`);
+    console.log(`marked update #${args[1]} done`);
+    return;
+  }
+  const FLAGS = new Set(['--link', '--summary', '--topic']);
+  const values = { '--link': null, '--summary': null, '--topic': null };
+  const positional = [];
+  let endOfOptions = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (!endOfOptions && a === '--') { endOfOptions = true; continue; }
+    if (endOfOptions) { positional.push(a); continue; }
+    if (FLAGS.has(a)) {
+      if (args[i + 1] === undefined) { console.error(`error: ${a} needs a value`); console.error(UPDATE_USAGE); process.exit(2); }
+      values[a] = args[++i];
+    } else {
+      rejectUnknownFlag(a, FLAGS, 'update');
+      positional.push(a);
+    }
+  }
+  const title = positional.join(' ').trim();
+  if (!title || !values['--link']) {
+    console.error(!title ? 'error: a title is required' : 'error: --link is required');
+    console.error(UPDATE_USAGE);
+    process.exit(2);
+  }
+  if (!me) { console.error('error: COLLAB_AGENT is not set'); process.exit(1); }
+  const body = { agent: me, title, link: values['--link'] };
+  if (values['--summary'] !== null) body.summary = values['--summary'];
+  if (values['--topic'] !== null) body.topic = values['--topic'];
+  const u = await api('POST', '/api/updates', body);
+  console.log(`posted update #${u.id}. It stays in the operator's Updates tab until it is marked done.`);
+});
+
 // ── Reminders ──
 
 cmd('reminder', 'reminder <sub> [args...]', 'Manage reminders (add|list|done|cancel|swap)', async (args) => {

@@ -174,3 +174,55 @@ describe('collab decide', () => {
     assert.match(out, /raised decision #7 \(blocking\)/);
   });
 });
+
+describe('collab update', () => {
+  it('rejects bad input with exit 2 and a usage line, before touching the network', () => {
+    const cases: string[][] = [
+      ['update', 'Review ready'],
+      ['update', 'Review ready', '--summary', 's'],
+      ['update', '--link', '/pages/x'],
+      ['update', 'Review ready', '--link', '/pages/x', '--bogus'],
+      ['update', 'Review ready', '--link'],
+      ['update', 'done'],
+      ['update', 'done', 'abc'],
+      ['update', 'list', '--bogus'],
+    ];
+    for (const args of cases) {
+      const r = runCollab(args);
+      assert.equal(r.status, 2, `${args.join(' ')}: ${r.stderr}`);
+      assert.match(r.stderr, /usage: collab update|unknown flag/, args.join(' '));
+      // The unreachable orchestrator would print a fetch failure had a request been attempted.
+      assert.doesNotMatch(r.stderr, /fetch failed|ECONNREFUSED/, args.join(' '));
+    }
+    assert.match(runCollab(['update', 'Review ready']).stderr, /--link is required/);
+  });
+
+  it('sends the parsed update to the orchestrator', async () => {
+    const { createServer } = await import('node:http');
+    const { spawn } = await import('node:child_process');
+    let received: { method?: string | undefined; url?: string | undefined; body?: any } = {};
+    const server = createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        received = { method: req.method, url: req.url, body: raw ? JSON.parse(raw) : undefined };
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 5 }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, r));
+    const port = (server.address() as { port: number }).port;
+    const child = spawn(COLLAB_BIN, ['update', 'Review', 'page', '--link', '/pages/review', '--summary', 'Two findings', '--topic', 'issue-1'], {
+      env: { ...process.env, ORCHESTRATOR_URL: `http://127.0.0.1:${port}`, COLLAB_AGENT: 'frontend' },
+    });
+    let out = '';
+    child.stdout.on('data', (c) => { out += c; });
+    const code = await new Promise((r) => child.on('close', r));
+    server.close();
+    assert.equal(code, 0, out);
+    assert.equal(received.method, 'POST');
+    assert.equal(received.url, '/api/updates');
+    assert.deepEqual(received.body, { agent: 'frontend', title: 'Review page', link: '/pages/review', summary: 'Two findings', topic: 'issue-1' });
+    assert.match(out, /posted update #5/);
+  });
+});

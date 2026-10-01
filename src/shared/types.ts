@@ -300,6 +300,24 @@ export type Decision = {
   answeredAt: string | null;
 };
 
+// ── Updates ──
+// Finished work an agent hands to the operator (a page, a PR, a report). Nothing to answer.
+
+export type UpdateStatus = 'open' | 'done';
+
+export type Update = {
+  id: number;
+  agentName: string;
+  title: string;
+  summary: string | null;
+  link: string;
+  topic: string | null;
+  status: UpdateStatus;
+  createdAt: string;
+  seenAt: string | null;
+  doneAt: string | null;
+};
+
 // ── Jobs (JJ) ──
 // Recurring cron-scheduled prompts fired at agents as if inbound messages.
 // Distinct from Reminders: fire-and-continue (no manual completion).
