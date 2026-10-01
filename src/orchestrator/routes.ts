@@ -994,6 +994,16 @@ route('GET', '/api/queue', async (req, res, _match, ctx) => {
   json(res, 200, messages);
 });
 
+// One message in full. The list above is for scanning; this is for checking what a cited message
+// actually said, so a relayed instruction can be verified against the sender's own words.
+route('GET', '/api/queue/:id', async (_req, res, match, ctx) => {
+  const raw = match.pathname.groups['id']!;
+  if (!/^\d+$/.test(raw)) return json(res, 400, { error: 'id must be a number' });
+  const message = ctx.db.getPendingMessageById(Number(raw));
+  if (!message) return json(res, 404, { error: 'Message not found' });
+  json(res, 200, message);
+});
+
 // ── Agent Files ──
 
 route('GET', '/api/agents/:name/files', async (_req, res, match, ctx) => {
