@@ -31,6 +31,9 @@ export const state = {
   // Open decisions raised by agents (Decisions tab), and the per-agent count for card badges.
   decisions: [],
   openDecisionsByAgent: {},
+  // Open updates (finished work agents posted for the Updates tab), and how many are unseen.
+  updates: [],
+  unseenUpdates: 0,
   editingPersona: false,
   indicators: {},
   pages: [],

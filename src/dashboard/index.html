@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="/dashboard/assets/styles/settings.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/files-panel.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/decisions.css">
+<link rel="stylesheet" href="/dashboard/assets/styles/updates.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/responsive.css">
 </head>
 <body>
@@ -30,6 +31,7 @@
     <a href="/scratch" target="_blank" class="header-btn">Scratch</a>
     <a href="/usage" target="_blank" class="header-btn">Usage</a>
     <button id="decisionsBtn" class="header-btn" title="Decisions waiting on you">Decisions <span id="decisionsCount" class="decisions-count" style="display:none"></span></button>
+    <button id="updatesBtn" class="header-btn" title="Finished work from agents">Updates <span id="updatesCount" class="updates-count" style="display:none"></span></button>
     <button id="settingsBtn" class="header-btn">Settings</button>
     <div class="conn-status">
       <div class="conn-dot" id="connDot"></div>
@@ -74,6 +76,7 @@
   </div>
   <settings-panel id="settingsPanel" style="display:none" class="thread-panel"></settings-panel>
   <decisions-panel id="decisionsPanel" style="display:none" class="thread-panel decisions-panel"></decisions-panel>
+  <updates-panel id="updatesPanel" style="display:none" class="thread-panel updates-panel"></updates-panel>
 </div>
 
 <script type="module">
@@ -87,6 +90,7 @@ import '/dashboard/assets/reminder-panel.ts';
 import '/dashboard/assets/jobs-panel.ts';
 import '/dashboard/assets/files-panel.ts';
 import '/dashboard/assets/decisions-panel.ts';
+import '/dashboard/assets/updates-panel.ts';
 import { loadServerPrefs } from '/dashboard/assets/settings.ts';
 import '/dashboard/assets/settings.ts';
 import { agentAction, openCreateAgentModal, setup as setupLifecycle } from '/dashboard/assets/agent-lifecycle.ts';
@@ -288,6 +292,36 @@ import { pushUrlState, restorePendingAgent, setup as setupUrlState } from '/dash
   settingsBtn.addEventListener('click', () => { if (decisionsPanel.style.display !== 'none') closeDecisions(); });
   document.getElementById('agentList').addEventListener('click', () => {
     if (decisionsPanel.style.display !== 'none') closeDecisions();
+  });
+
+  // ── Updates toggle ──
+  const updatesBtn = document.getElementById('updatesBtn');
+  const updatesPanel = document.getElementById('updatesPanel');
+  function closeUpdates() {
+    updatesPanel.style.display = 'none';
+    // Leave the thread hidden if Settings or Decisions is what replaced this panel.
+    if (settingsPanel.style.display === 'none' && decisionsPanel.style.display === 'none') threadPanel.style.display = '';
+    updatesBtn.style.color = 'var(--text-dim)';
+    updatesBtn.style.borderColor = 'var(--border)';
+  }
+  function openUpdates() {
+    if (settingsPanel.style.display !== 'none') closeSettings();
+    if (decisionsPanel.style.display !== 'none') closeDecisions();
+    updatesPanel.style.display = 'flex';
+    threadPanel.style.display = 'none';
+    updatesBtn.style.color = 'var(--accent)';
+    updatesBtn.style.borderColor = 'var(--accent)';
+    updatesPanel.render();
+    updatesPanel.markAllSeen();
+  }
+  updatesBtn.addEventListener('click', () => {
+    if (updatesPanel.style.display !== 'none') closeUpdates(); else openUpdates();
+  });
+  updatesPanel.addEventListener('close-updates', closeUpdates);
+  settingsBtn.addEventListener('click', () => { if (updatesPanel.style.display !== 'none') closeUpdates(); });
+  decisionsBtn.addEventListener('click', () => { if (updatesPanel.style.display !== 'none') closeUpdates(); });
+  document.getElementById('agentList').addEventListener('click', () => {
+    if (updatesPanel.style.display !== 'none') closeUpdates();
   });
 
   // ── URL State (History API) ──

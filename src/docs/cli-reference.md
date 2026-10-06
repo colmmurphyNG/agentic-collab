@@ -157,6 +157,21 @@ collab decide withdraw 12   # no longer needed
 
 Use it instead of ending a long report with "want me to...?": a question at the end of a report is the one most likely to be missed.
 
+### Updates
+
+Post an update when something is finished and the operator should look at it: a review page, a pull request, a report. It appears in the dashboard's **Updates** tab, newest first, with a count of the ones not yet seen. The operator opens the link from there and marks it done. There is nothing to answer; if you need a choice made, raise a decision instead.
+
+```bash
+collab update "Review of the cache fix" --link /pages/cache-fix-review \
+  --summary "Two findings, both minor" --topic issue-42
+collab update list          # your open updates (--all for done ones too)
+collab update done 7        # take one off the list yourself
+```
+
+`--link` is required and must be an `http://` or `https://` URL, or a path starting with `/pages/` (a page published on this orchestrator). The title is at most 200 characters and the summary one line of at most 500.
+
+Use it instead of announcing finished work only in a message: a link in a chat thread scrolls away, an update stays until it is marked done.
+
 ### Reminders
 
 Reminders periodically paste a prompt into an agent's tmux session until marked done. Only the top reminder (by sort order) is actively delivered per agent. Completing one promotes the next.

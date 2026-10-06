@@ -25,6 +25,15 @@ function _refreshDecisions() {
   const panel = document.getElementById('decisionsPanel');
   if (panel && panel.style.display !== 'none' && panel.render) panel.render();
 }
+
+/** Update the header's unseen count and re-render the Updates panel if it is open. */
+function _refreshUpdates() {
+  const n = state.unseenUpdates || 0;
+  const count = document.getElementById('updatesCount');
+  if (count) { count.textContent = n ? String(n) : ''; count.style.display = n ? '' : 'none'; }
+  const panel = document.getElementById('updatesPanel');
+  if (panel && panel.style.display !== 'none' && panel.render) panel.render();
+}
 let _renderThread = () => {};
 let _updatePageTitle = () => {};
 let _updateAgent = () => {};
@@ -162,6 +171,9 @@ export function connect() {
         state.decisions = data.decisions || [];
         state.openDecisionsByAgent = data.openDecisionsByAgent || {};
         _refreshDecisions();
+        state.updates = data.updates || [];
+        state.unseenUpdates = data.unseenUpdates || 0;
+        _refreshUpdates();
         // Restore unread counts from server, preserving any live increments
         if (data.unreadCounts) {
           for (const [agent, count] of Object.entries(data.unreadCounts)) {
@@ -258,6 +270,11 @@ export function connect() {
         state.openDecisionsByAgent = data.openDecisionsByAgent || {};
         _renderAgents();
         _refreshDecisions();
+        break;
+      case 'updates_change':
+        state.updates = data.updates || [];
+        state.unseenUpdates = data.unseenUpdates || 0;
+        _refreshUpdates();
         break;
       case 'reminder_update':
         if (state.threadView === 'reminders') {
