@@ -216,6 +216,22 @@ describe('Engine Adapters', () => {
       assert.equal(adapter.detectIdleState(pane), 'waiting_for_input');
     });
 
+    it('detects idle state skipping the cwd/model/ctx status line', () => {
+      // Real Claude Code v2.1.289 footer: the status line under the prompt names
+      // the cwd, model and context, with "ctx: --" before the first turn.
+      for (const ctx of ['ctx: --', 'ctx: 45% used']) {
+        const pane = [
+          '                                         ✔ Update installed · Restart to update',
+          '────────────────────────────────────────',
+          '❯ ',
+          '────────────────────────────────────────',
+          `  /private/tmp  Opus 5.5 (1M context)  ${ctx}`,
+          '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+        ].join('\n');
+        assert.equal(adapter.detectIdleState(pane), 'waiting_for_input', ctx);
+      }
+    });
+
     it('detects running state from spinner', () => {
       assert.equal(adapter.detectIdleState('some output\n⠋ Running task...'), 'running_tool');
     });

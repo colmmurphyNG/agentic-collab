@@ -26,6 +26,38 @@ describe('parseClaudeUsage', () => {
     assert.equal(buckets[1]!.resetsAt, 'Mar 13, 12am (America/Chicago)');
   });
 
+  it('parses the v2.1.289 Usage tab, ignoring the contributors breakdown', () => {
+    // Captured from a live pane 2026-10-06. The "% of your usage" lines below the
+    // buckets are a breakdown, not limits, and must not become buckets.
+    const output = [
+      '   Plugin skill-listing footprint',
+      '   stripe                      2 skills · ~59 tok/turn',
+      '   Current session',
+      '   ███████                                            14% used',
+      '   Resets 11:20am (Europe/Dublin)',
+      '   Current week (all models)',
+      '   █▌                                                 3% used',
+      '   Resets Oct 13 at 6am (Europe/Dublin)',
+      '   Current week (Fable)',
+      '                                                      0% used',
+      '   Resets Oct 13 at 6am (Europe/Dublin)',
+      "   What's contributing to your limits usage?",
+      '   95% of your usage was at >150k context',
+      '   56% of your usage was while 4+ sessions ran in parallel',
+      '   Usage credits',
+      '   ███████████████████████████████████████████        86% used',
+      '   $559.92 / $650.00 spent · Resets Nov 1 (Europe/Dublin)',
+    ].join('\n');
+
+    const buckets = parseClaudeUsage(output);
+    const week = buckets.find(b => b.label === 'Current week (all models)');
+    assert.ok(week, JSON.stringify(buckets));
+    assert.equal(week.pctUsed, 3);
+    assert.equal(week.resetsAt, 'Oct 13 at 6am (Europe/Dublin)');
+    assert.equal(buckets.find(b => b.label === 'Current session')?.pctUsed, 14);
+    assert.ok(!buckets.some(b => b.pctUsed === 95 || b.pctUsed === 56), JSON.stringify(buckets));
+  });
+
   it('parses three buckets including Sonnet-only', () => {
     const output = [
       '  Current session',
