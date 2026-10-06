@@ -148,6 +148,21 @@ export class HealthMonitor {
    * Default 30 min — set to 0 in tests.
    */
   static readonly AUTO_RECYCLE_COOLDOWN_MS = parseInt(process.env['AUTO_RECYCLE_COOLDOWN_MS'] ?? String(30 * 60 * 1000), 10);
+  /**
+   * Idle reset: recycle an agent that has sat idle this long with a large
+   * conversation. The prompt cache lasts an hour, so after that the next wake
+   * re-sends the whole conversation at the cache-write price anyway; a fresh
+   * session re-sends far less. 0 disables it.
+   */
+  static readonly IDLE_RESET_AFTER_MS = parseInt(process.env['IDLE_RESET_AFTER_MS'] ?? String(60 * 60 * 1000), 10);
+  /** Conversation size below which an idle reset is not worth a fresh start-up. */
+  static readonly IDLE_RESET_MIN_TOKENS = parseInt(process.env['IDLE_RESET_MIN_TOKENS'] ?? '150000', 10);
+  /** Activity this soon after an idle reset is the new session starting up, not work. */
+  static readonly IDLE_RESET_STARTUP_MS = 10 * 60 * 1000;
+  /** When each agent was first seen idle in its current idle spell. */
+  private readonly idleSince = new Map<string, number>();
+  /** Agents reset while idle, with the time; cleared once they do real work again. */
+  private readonly idleResetAt = new Map<string, number>();
   private readonly db: Database;
   private readonly locks: LockManager;
   private readonly proxyDispatch: (proxyId: string, command: ProxyCommand) => Promise<ProxyResponse>;
@@ -605,6 +620,44 @@ export class HealthMonitor {
     // already has its own three-phase locking — concurrent invocations are
     // safe (subsequent calls just see state ≠ idle and skip).
     this.maybeTriggerAutoRecycle(latest, contextPct);
+    this.maybeTriggerIdleReset(latest, contextPct, parseContextWindow(paneOutput));
+  }
+
+  /**
+   * Recycle an agent that has been idle for IDLE_RESET_AFTER_MS with at least
+   * IDLE_RESET_MIN_TOKENS of conversation. An unknown window does nothing: a
+   * guess could recycle a healthy agent. After a reset it stays disarmed until
+   * the agent does real work, so a quiet agent is reset once, not every hour.
+   */
+  maybeTriggerIdleReset(agent: AgentRecord, contextPct: number, windowTokens: number | null, now: number = Date.now()): void {
+    if (HealthMonitor.IDLE_RESET_AFTER_MS <= 0) return;
+    if (agent.state !== 'idle') return;
+    if (!this.idleSince.has(agent.name)) this.idleSince.set(agent.name, now);
+    if (this.idleResetAt.has(agent.name)) return;
+    if (windowTokens === null) return;
+    const tokens = (contextPct / 100) * windowTokens;
+    if (tokens < HealthMonitor.IDLE_RESET_MIN_TOKENS) return;
+    const idleMs = now - this.idleSince.get(agent.name)!;
+    if (idleMs < HealthMonitor.IDLE_RESET_AFTER_MS) return;
+    if (now - (this.lastAutoRecycleAt.get(agent.name) ?? 0) < HealthMonitor.AUTO_RECYCLE_COOLDOWN_MS) return;
+
+    this.idleResetAt.set(agent.name, now);
+    this.idleSince.delete(agent.name);
+    this.lastAutoRecycleAt.set(agent.name, now);
+    console.log(
+      `[health] ${agent.name}: idle reset triggered (idle ${Math.round(idleMs / 60_000)}min, ~${Math.round(tokens / 1000)}k tokens)`,
+    );
+    this.db.logEvent(agent.name, 'idle_reset_triggered', undefined, { contextPct, idleMinutes: Math.round(idleMs / 60_000) });
+    void this.runAutoRecycle(agent.name);
+  }
+
+  /** Record that an agent became active: ends its idle spell, and re-arms idle reset once it is real work. */
+  noteActive(agentName: string, now: number = Date.now()): void {
+    this.idleSince.delete(agentName);
+    const resetAt = this.idleResetAt.get(agentName);
+    if (resetAt !== undefined && now - resetAt >= HealthMonitor.IDLE_RESET_STARTUP_MS) {
+      this.idleResetAt.delete(agentName);
+    }
   }
 
   /**
@@ -687,6 +740,7 @@ export class HealthMonitor {
       const current = this.db.getAgent(agent.name);
       if (current && current.state === 'idle') {
         console.log(`[health] ${agent.name}: idle → active (screen changed)`);
+        this.noteActive(agent.name);
         this.db.updateAgentState(agent.name, 'active', current.version, {
           lastActivity: new Date().toISOString(),
         });

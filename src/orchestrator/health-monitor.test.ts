@@ -163,6 +163,82 @@ describe('HealthMonitor', () => {
     assert.equal(recycleCalls, 0, 'active state should NOT trigger recycle');
   });
 
+  describe('idle reset', () => {
+    const MIN = 60_000;
+    const WINDOW = 1_000_000;
+
+    function idleAgent(name: string) {
+      db.createAgent({ name, engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      const a = db.getAgent(name)!;
+      db.updateAgentState(name, 'idle', a.version, { tmuxSession: `agent-${name}`, proxyId: 'p1' });
+      return db.getAgent(name)!;
+    }
+
+    function monitorCountingRecycles() {
+      const monitor = makeMonitor({});
+      const calls: string[] = [];
+      (monitor as unknown as { runAutoRecycle(name: string): Promise<void> }).runAutoRecycle = async (name) => { calls.push(name); };
+      return { monitor, calls };
+    }
+
+    it('should recycle an agent idle for an hour with 150k+ tokens, and not before the hour', () => {
+      const a = idleAgent('ir-hour');
+      const { monitor, calls } = monitorCountingRecycles();
+      monitor.maybeTriggerIdleReset(a, 30, WINDOW, 0);
+      monitor.maybeTriggerIdleReset(a, 30, WINDOW, 59 * MIN);
+      assert.equal(calls.length, 0, '59 minutes idle is too soon');
+      monitor.maybeTriggerIdleReset(a, 30, WINDOW, 60 * MIN);
+      assert.deepEqual(calls, ['ir-hour']);
+    });
+
+    it('should leave a small conversation alone however long it idles', () => {
+      const a = idleAgent('ir-small');
+      const { monitor, calls } = monitorCountingRecycles();
+      monitor.maybeTriggerIdleReset(a, 14, WINDOW, 0);
+      monitor.maybeTriggerIdleReset(a, 14, WINDOW, 600 * MIN);
+      assert.equal(calls.length, 0, '140k tokens is under the 150k floor');
+    });
+
+    it('should do nothing when the context window is unknown', () => {
+      const a = idleAgent('ir-unknown');
+      const { monitor, calls } = monitorCountingRecycles();
+      monitor.maybeTriggerIdleReset(a, 90, null, 0);
+      monitor.maybeTriggerIdleReset(a, 90, null, 600 * MIN);
+      assert.equal(calls.length, 0, 'a guessed window could recycle a healthy agent');
+    });
+
+    it('should never recycle an active agent, and restart the idle clock after activity', () => {
+      const a = idleAgent('ir-active');
+      const { monitor, calls } = monitorCountingRecycles();
+      monitor.maybeTriggerIdleReset(a, 30, WINDOW, 0);
+      monitor.noteActive('ir-active', 50 * MIN);
+      monitor.maybeTriggerIdleReset({ ...a, state: 'active' }, 30, WINDOW, 70 * MIN);
+      monitor.maybeTriggerIdleReset(a, 30, WINDOW, 80 * MIN);
+      monitor.maybeTriggerIdleReset(a, 30, WINDOW, 139 * MIN);
+      assert.equal(calls.length, 0, 'the idle clock restarted at 80 minutes');
+      monitor.maybeTriggerIdleReset(a, 30, WINDOW, 140 * MIN);
+      assert.equal(calls.length, 1);
+    });
+
+    it('should not reset again until the agent has done real work after the last reset', () => {
+      const a = idleAgent('ir-loop');
+      const { monitor, calls } = monitorCountingRecycles();
+      monitor.maybeTriggerIdleReset(a, 30, WINDOW, 0);
+      monitor.maybeTriggerIdleReset(a, 30, WINDOW, 60 * MIN);
+      assert.equal(calls.length, 1);
+      // The fresh session's own start-up turn is not real work.
+      monitor.noteActive('ir-loop', 62 * MIN);
+      monitor.maybeTriggerIdleReset(a, 16, WINDOW, 63 * MIN);
+      monitor.maybeTriggerIdleReset(a, 16, WINDOW, 300 * MIN);
+      assert.equal(calls.length, 1, 'start-up alone must not re-arm it');
+      // Work that arrives later does re-arm it.
+      monitor.noteActive('ir-loop', 400 * MIN);
+      monitor.maybeTriggerIdleReset(a, 30, WINDOW, 410 * MIN);
+      monitor.maybeTriggerIdleReset(a, 30, WINDOW, 470 * MIN);
+      assert.equal(calls.length, 2);
+    });
+  });
+
   it('polls active agents and captures pane output', async () => {
     db.createAgent({ name: 'health-a1', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
     const a = db.getAgent('health-a1')!;
