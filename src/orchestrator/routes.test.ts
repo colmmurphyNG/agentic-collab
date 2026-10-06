@@ -412,6 +412,24 @@ describe('API Routes', () => {
     assert.ok((data as Array<Record<string, unknown>>).length > 0);
   });
 
+  it('GET /api/queue/:id returns one message in full, with its sender', async () => {
+    const long = 'Relay check. ' + 'x'.repeat(400) + ' END-OF-BODY';
+    const sent = await api('POST', '/api/agents/send', { from: 'api-agent-2', to: 'api-agent-1', message: long, topic: 'relay' });
+    const queueId = (sent.data as Record<string, unknown>).queueId as number;
+    const { status, data } = await api('GET', `/api/queue/${queueId}`);
+    assert.equal(status, 200);
+    const m = data as Record<string, unknown>;
+    assert.equal(m.id, queueId);
+    assert.equal(m.sourceAgent, 'api-agent-2');
+    assert.equal(m.targetAgent, 'api-agent-1');
+    assert.match(m.envelope as string, /END-OF-BODY/);
+  });
+
+  it('GET /api/queue/:id is 404 for an unknown id and 400 for a non-number', async () => {
+    assert.equal((await api('GET', '/api/queue/99999999')).status, 404);
+    assert.equal((await api('GET', '/api/queue/abc')).status, 400);
+  });
+
   it('POST /api/agents/:name/tmux maps send-keys through the proxy', async () => {
     proxyCommands = [];
     const { status, data } = await api('POST', '/api/agents/api-agent-1/tmux', {
