@@ -18,10 +18,10 @@ import { UsagePoller } from './usage-poller.ts';
 import { ReminderDispatcher } from './reminder-dispatcher.ts';
 import { JobDispatcher } from './job-dispatcher.ts';
 import { shutdownAgents, restoreAllAgents } from './network.ts';
+import { reapStaleProxies } from './proxy-liveness.ts';
 import type { LifecycleContext } from './lifecycle.ts';
 import { syncPersonasToDb, syncPersonasWithDiff, getPersonasDir } from './persona.ts';
 import { AccountStore } from './accounts.ts';
-import { isRunning } from '../shared/agent-entity.ts';
 import { resolveSecret, getSecretPath, resolveDataDirs } from '../shared/config.ts';
 import type { ProxyCommand, ProxyResponse, ProxyRegistration } from '../shared/types.ts';
 import { getVersion } from '../shared/version.ts';
@@ -409,26 +409,7 @@ if (touchedProxies > 0) {
 }
 
 const staleProxyTimer = setInterval(() => {
-  const stale = db.listStaleProxies(45); // 45s = 3 missed heartbeats
-  for (const proxy of stale) {
-    console.log(`[proxy] Removing stale proxy: ${proxy.proxyId} (last heartbeat: ${proxy.lastHeartbeat})`);
-    db.removeProxy(proxy.proxyId);
-
-    // Mark agents on this proxy as failed
-    const agents = db.listAgents().filter((a) => a.proxyId === proxy.proxyId);
-    for (const agent of agents) {
-      if (isRunning(agent)) {
-        const now = new Date().toISOString();
-        db.updateAgentState(agent.name, 'failed', agent.version, {
-          failedAt: now,
-          failureReason: 'Proxy disconnected',
-          lastFailedAt: now,
-          lastFailureReason: 'Proxy disconnected',
-        });
-        db.logEvent(agent.name, 'proxy_disconnected', undefined, { proxyId: proxy.proxyId });
-      }
-    }
-  }
+  reapStaleProxies(db);
 }, 30_000);
 
 // ── Graceful Shutdown ──

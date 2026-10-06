@@ -29,11 +29,12 @@ import {
 } from './lifecycle.ts';
 import { getAdapter } from './adapters/index.ts';
 import { shutdownAgents, restoreAllAgents } from './network.ts';
+import { markProxyAlive } from './proxy-liveness.ts';
 import { UsageAggregator, renderUsageMarkdown } from './usage-aggregator.ts';
 import { DroneAuditAggregator, renderAuditMarkdown } from './drone-audit.ts';
 import { sessionName } from '../shared/agent-entity.ts';
 import { paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
-import { recordTelegramInbound, getActiveTelegramRoute, maybeAutoClearOnCommPref, isCommPrefDirective, clearTelegramRoute, listTelegramRoutes, _resetTelegramRoutes } from './telegram-routing.ts';
+import { recordTelegramInbound, getActiveTelegramRoute, maybeAutoClearOnCommPref, isCommPrefDirective, isQuietCommand, clearAllTelegramRoutes, clearTelegramRoute, listTelegramRoutes, _resetTelegramRoutes } from './telegram-routing.ts';
 import { updateLinkError } from './update-link.ts';
 import type { MessageDispatcher } from './message-dispatcher.ts';
 import type { UsagePoller } from './usage-poller.ts';
@@ -931,6 +932,7 @@ route('POST', '/api/proxy/register', async (req, res, _match, ctx) => {
 
   const proxyVersion = typeof body.version === 'string' ? body.version : undefined;
   const proxy = ctx.db.registerProxy(body.proxyId, body.token, body.host, proxyVersion);
+  markProxyAlive(body.proxyId);
 
   // Compute version match and enrich the response
   const orchestratorVersion = getVersion();
@@ -956,6 +958,7 @@ route('POST', '/api/proxy/heartbeat', async (req, res, _match, ctx) => {
 
   const updated = ctx.db.updateProxyHeartbeat(body.proxyId);
   if (!updated) return json(res, 404, { error: 'Proxy not registered' });
+  markProxyAlive(body.proxyId);
 
   json(res, 200, { ok: true });
 });
@@ -993,6 +996,16 @@ route('GET', '/api/queue', async (req, res, _match, ctx) => {
   const limit = parseInt(url.searchParams.get('limit') ?? '', 10) || undefined;
   const messages = ctx.db.listPendingMessages(agent, status, limit);
   json(res, 200, messages);
+});
+
+// One message in full. The list above is for scanning; this is for checking what a cited message
+// actually said, so a relayed instruction can be verified against the sender's own words.
+route('GET', '/api/queue/:id', async (_req, res, match, ctx) => {
+  const raw = match.pathname.groups['id']!;
+  if (!/^\d+$/.test(raw)) return json(res, 400, { error: 'id must be a number' });
+  const message = ctx.db.getPendingMessageById(Number(raw));
+  if (!message) return json(res, 404, { error: 'Message not found' });
+  json(res, 200, message);
 });
 
 // ── Agent Files ──
@@ -3781,6 +3794,23 @@ export function routeTelegramMessage(
 ): void {
   const botToken = dest.config['botToken'] as string;
   console.log(`[telegram] Inbound from chat ${incomingChatId}: ${text.slice(0, 100)}`);
+
+  // The explicit off switch, handled before anything else so it is never
+  // delivered to an agent as a message and never arms a route. The phrase
+  // matching below is a guess at wording and will always be one phrasing
+  // behind; this is the spelling that is guaranteed to work.
+  if (isQuietCommand(text)) {
+    const cleared = clearAllTelegramRoutes();
+    console.log(`[telegram] /quiet from chat ${incomingChatId}: cleared ${cleared} route(s)`);
+    ctx.telegramDispatcher.send(
+      botToken,
+      incomingChatId,
+      cleared > 0
+        ? `Quiet. Stopped forwarding replies for ${cleared} agent(s). Message an agent from here to turn it back on.`
+        : 'Quiet already - nothing was being forwarded.',
+    ).catch(() => {});
+    return;
+  }
 
   // Comm-preference auto-clear: if this Telegram inbound is the operator
   // signalling "I'm at the dashboard now / stop notify", clear any active
