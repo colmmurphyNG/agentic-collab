@@ -194,7 +194,7 @@ async function dispatchHookResult(
   proxyId: string,
   tmuxSession: string,
   result: HookResult,
-  opts?: { pressEnter?: boolean; keyDelay?: number; agentName?: string },
+  opts?: { pressEnter?: boolean; keyDelay?: number; agentName?: string; typedPrefix?: string },
 ): Promise<Record<string, string>> {
   const capturedNow: Record<string, string> = {};
   if (result.mode === 'skip') return capturedNow;
@@ -347,6 +347,7 @@ async function dispatchHookResult(
     sessionName: tmuxSession,
     text: result.text,
     pressEnter: false,
+    ...(opts?.typedPrefix ? { typedPrefix: opts.typedPrefix } : {}),
   });
   if (shouldEnter) {
     // Short texts (messages) need minimal delay; large texts (personas/prompts)
@@ -2398,6 +2399,15 @@ export async function executeIndicatorAction(
  * delivery (Race 3). The passed `agent` parameter is only used for the
  * agent name — all other fields are read fresh inside the lock.
  */
+/**
+ * Typed ahead of every message pasted into a Claude agent. Claude Code will not act on
+ * instructions inside a paste unless the user's own typed words ask it to, and a long message
+ * arrives as a paste with nothing typed around it. The sender check in the persona rules
+ * still applies; this only says the paste is a delivered message rather than copied text.
+ */
+export const DELIVERY_TYPED_PREFIX =
+  'Message delivered by conductor. The pasted text below is from the sender named in its from: header; handle it under your persona rules. ';
+
 export async function deliverToAgent(
   ctx: LifecycleContext,
   agent: AgentRecord,
@@ -2431,7 +2441,10 @@ export async function deliverToAgent(
           return result;
         },
       };
-      await dispatchHookResult(throwingCtx, proxyId, sessionName(currentAgent), hookResult, { agentName: currentAgent.name });
+      await dispatchHookResult(throwingCtx, proxyId, sessionName(currentAgent), hookResult, {
+        agentName: currentAgent.name,
+        ...(effectiveAgent.engine === 'claude' ? { typedPrefix: DELIVERY_TYPED_PREFIX } : {}),
+      });
     } catch (err) {
       error = (err as Error).message ?? 'Unknown delivery error';
     }

@@ -143,13 +143,29 @@ function pasteBufferName(sessionName: string): string {
   return `collab-${safe}-${process.pid}-${Date.now().toString(36)}-${pasteSeq}`;
 }
 
-export async function pasteText(sessionName: string, text: string, pressEnter: boolean): Promise<void> {
+/**
+ * `typedPrefix` is typed as keystrokes, not pasted, so the receiving application sees it as the
+ * user's own words. Claude Code treats a bracketed paste as text copied in from elsewhere and
+ * will not act on instructions inside one unless typed words around it ask it to, so a long
+ * message pasted on its own was being held for the operator instead of handled.
+ * Line breaks are removed from the prefix: typed, each one would be an Enter.
+ */
+export async function pasteText(
+  sessionName: string,
+  text: string,
+  pressEnter: boolean,
+  typedPrefix?: string,
+): Promise<void> {
   validateSessionName(sessionName);
   // Verify tmux is responsive before pasting — catches locked/overloaded sessions
   try {
     execSync(`tmux capture-pane -t '${esc(paneTarget(sessionName))}' -p -S -1`, { ...EXEC_OPTS, timeout: 5000 });
   } catch {
     throw new Error(`tmux session "${sessionName}" is not responsive (capture-pane timed out)`);
+  }
+  const prefix = typedPrefix?.replace(/[\r\n]+/g, ' ');
+  if (prefix) {
+    execFileSync('tmux', ['send-keys', '-l', '-t', paneTarget(sessionName), prefix], EXEC_OPTS);
   }
   // Pass text via stdin (input option) to avoid all shell escaping issues
   const buffer = pasteBufferName(sessionName);
