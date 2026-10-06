@@ -239,3 +239,24 @@ describe('collab reminder queue warnings', () => {
     });
   });
 });
+
+describe('collab queue --id', () => {
+  it('should refuse a non-numeric id before any network call', () => {
+    const r = runCollab(['queue', '--id', 'abc']);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /usage: collab queue --id <N>/);
+  });
+
+  it('should refuse a missing id', () => {
+    const r = runCollab(['queue', '--id']);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /usage: collab queue --id <N>/);
+  });
+
+  it('should reach the server for a numeric id', () => {
+    // The endpoint is unreachable in tests, so a fetch failure proves the id passed validation.
+    const r = runCollab(['queue', '--id', '42']);
+    assert.notEqual(r.status, 2);
+    assert.doesNotMatch(r.stderr, /usage: collab queue --id/);
+  });
+});

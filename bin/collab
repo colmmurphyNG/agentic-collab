@@ -405,7 +405,23 @@ cmd('destroy', 'destroy <name>', 'Permanently destroy an agent', async (args) =>
   console.log(`${name} destroyed`);
 });
 
-cmd('queue', 'queue [--agent <name>] [--all] [--status pending|delivered|failed] [--limit N]', 'Message history (defaults to current agent)', async (args) => {
+cmd('queue', 'queue [--agent <name>] [--all] [--status pending|delivered|failed] [--limit N] | queue --id <N>', 'Message history (defaults to current agent); --id prints one message in full', async (args) => {
+  const idAt = args.indexOf('--id');
+  if (idAt !== -1) {
+    const id = args[idAt + 1];
+    if (!id || !/^\d+$/.test(id)) { console.error('usage: collab queue --id <N>  (N is the queue id, a number)'); process.exit(2); }
+    const m = await api('GET', `/api/queue/${id}`);
+    // No source agent means the dashboard, a reminder, a job or a delivery notice; the text's first line says which.
+    console.log(`id:        ${m.id}`);
+    console.log(`from:      ${m.sourceAgent || '(no agent: dashboard or system, see the first line below)'}`);
+    console.log(`to:        ${m.targetAgent}`);
+    console.log(`status:    ${m.status}`);
+    console.log(`created:   ${m.createdAt}`);
+    if (m.deliveredAt) console.log(`delivered: ${m.deliveredAt}`);
+    console.log('');
+    console.log(m.envelope);
+    return;
+  }
   let agent = agentName() || '', status = '', limit = '';
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--agent' && args[i + 1]) { agent = args[++i]; }
