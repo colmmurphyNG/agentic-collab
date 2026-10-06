@@ -175,6 +175,71 @@ describe('collab decide', () => {
   });
 });
 
+describe('collab reminder queue warnings', () => {
+  // A fake orchestrator holding one agent's reminders, so the real CLI can be run against it.
+  async function withServer(reminders: Array<Record<string, unknown>>, created: Record<string, unknown>, fn: (url: string) => Promise<void>) {
+    const { createServer } = await import('node:http');
+    const server = createServer((req, res) => {
+      res.setHeader('Content-Type', 'application/json');
+      if (req.method === 'POST' && req.url === '/api/reminders') { req.resume(); res.end(JSON.stringify(created)); return; }
+      if (req.method === 'GET' && req.url?.startsWith('/api/reminders')) { res.end(JSON.stringify(reminders)); return; }
+      res.statusCode = 404; res.end('{}');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const { port } = server.address() as { port: number };
+    try { await fn(`http://127.0.0.1:${port}`); } finally { server.close(); }
+  }
+
+  async function collabAt(url: string, args: string[]) {
+    const { spawn } = await import('node:child_process');
+    return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolveRun) => {
+      const p = spawn(COLLAB_BIN, args, { env: { ...process.env, ORCHESTRATOR_URL: url, COLLAB_AGENT: 'test-runner' } });
+      let stdout = '', stderr = '';
+      p.stdout.on('data', (d) => { stdout += d; });
+      p.stderr.on('data', (d) => { stderr += d; });
+      p.on('close', (status) => resolveRun({ status, stdout, stderr }));
+    });
+  }
+
+  const row = (id: number, sortOrder: number, extra: Record<string, unknown> = {}) => ({
+    id, sortOrder, agentName: 'x', prompt: `task ${id}`, cadenceMinutes: 30, status: 'pending', lastDeliveredAt: null, ...extra,
+  });
+
+  it('should warn when a new reminder is queued behind others, naming them and suggesting a job', async () => {
+    const top = row(10, 1, { lastDeliveredAt: '2026-10-01T09:00:00Z', cadenceMinutes: 1440 });
+    const added = row(50, 5);
+    await withServer([top, row(11, 2), added], added, async (url) => {
+      const r = await collabAt(url, ['reminder', 'add', 'x', 'sweep', '--cadence', '30m']);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /created reminder #50/);
+      assert.match(r.stderr, /#50 is queued behind 2 pending reminder\(s\) for x \(#10, #11\)/);
+      assert.match(r.stderr, /collab job add x "<prompt>" --cron "\*\/30 \* \* \* \*"/);
+    });
+  });
+
+  it('should not warn when the new reminder is the only one, so it fires', async () => {
+    const added = row(50, 1);
+    await withServer([added], added, async (url) => {
+      const r = await collabAt(url, ['reminder', 'add', 'x', 'sweep', '--cadence', '30m']);
+      assert.equal(r.status, 0, r.stderr);
+      assert.doesNotMatch(r.stderr, /queued behind/);
+    });
+  });
+
+  it('should mark the firing reminder, the waiting ones, and those never fired', async () => {
+    const reminders = [row(10, 1, { lastDeliveredAt: '2026-10-01T09:00:00Z' }), row(11, 2), row(20, 1, { agentName: 'y' })];
+    await withServer(reminders, {}, async (url) => {
+      const r = await collabAt(url, ['reminder', 'list']);
+      assert.equal(r.status, 0, r.stderr);
+      const line = (id: number) => r.stdout.split('\n').find((l) => l.startsWith(`${id} `)) ?? '';
+      assert.match(line(10), /firing$/);
+      assert.match(line(11), /waiting, never fired$/);
+      assert.match(line(20), /firing, never fired$/);
+      assert.match(r.stdout, /Only the top pending reminder per agent fires/);
+    });
+  });
+});
+
 describe('collab queue --id', () => {
   it('should refuse a non-numeric id before any network call', () => {
     const r = runCollab(['queue', '--id', 'abc']);

@@ -557,6 +557,14 @@ cmd('decide', 'decide --topic <t> "<question>" --option <key>="<label>" ... [--r
 
 // ── Reminders ──
 
+/** A cron expression matching a reminder cadence, where one exists; otherwise a placeholder. */
+function cronForMinutes(m) {
+  if (m < 60 && 60 % m === 0) return `*/${m} * * * *`;
+  if (m % 60 === 0 && m < 1440 && 24 % (m / 60) === 0) return `0 */${m / 60} * * *`;
+  if (m === 1440) return '0 9 * * *';
+  return '<cron expression>';
+}
+
 cmd('reminder', 'reminder <sub> [args...]', 'Manage reminders (add|list|done|cancel|swap)', async (args) => {
   const sub = args[0];
   const sargs = args.slice(1);
@@ -594,6 +602,16 @@ cmd('reminder', 'reminder <sub> [args...]', 'Manage reminders (add|list|done|can
     const createdBy = from || agentName() || undefined;
     const reminder = await api('POST', '/api/reminders', { agentName: targetAgent, prompt, cadenceMinutes, createdBy });
     console.log(`created reminder #${reminder.id} for ${targetAgent} (every ${cadenceMinutes}m)`);
+    // Only an agent's top pending reminder ever fires, so one added behind others stays silent until they finish.
+    const queue = await api('GET', `/api/reminders?agent=${encodeURIComponent(targetAgent)}`);
+    const ahead = queue
+      .filter(r => r.status === 'pending' && r.id !== reminder.id && r.sortOrder < reminder.sortOrder)
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+    if (ahead.length) {
+      console.error(`warning: #${reminder.id} is queued behind ${ahead.length} pending reminder(s) for ${targetAgent} ` +
+        `(${ahead.map(r => `#${r.id}`).join(', ')}) and will not fire until they are done or cancelled. ` +
+        `For a repeating check use: collab job add ${targetAgent} "<prompt>" --cron "${cronForMinutes(cadenceMinutes)}"`);
+    }
   }
 
   else if (sub === 'list') {
@@ -611,6 +629,13 @@ cmd('reminder', 'reminder <sub> [args...]', 'Manage reminders (add|list|done|can
     const maxAgent = Math.max(...reminders.map(r => r.agentName.length), 5);
     const maxPrompt = Math.min(Math.max(...reminders.map(r => r.prompt.length), 6), 50);
 
+    // Only each agent's lowest sort-order pending reminder fires; the rest wait behind it.
+    const top = new Map();
+    for (const r of pending) {
+      const best = top.get(r.agentName);
+      if (!best || r.sortOrder < best.sortOrder) top.set(r.agentName, r);
+    }
+    const firing = new Set([...top.values()].map(r => r.id));
     const printRows = (title, rows) => {
       if (rows.length === 0) return;
       if (title) console.log(title);
@@ -618,12 +643,16 @@ cmd('reminder', 'reminder <sub> [args...]', 'Manage reminders (add|list|done|can
       for (const r of rows) {
         const prompt = r.prompt.length > 50 ? r.prompt.slice(0, 47) + '...' : r.prompt;
         const cadence = `${r.cadenceMinutes}m`.padEnd(9);
-        const status = r.status === 'completed' ? 'done' : 'pending';
+        let status = r.status === 'completed' ? 'done' : (firing.has(r.id) ? 'firing' : 'waiting');
+        if (r.status === 'pending' && !r.lastDeliveredAt) status += ', never fired';
         console.log(`${r.id.toString().padEnd(maxId)}  ${r.agentName.padEnd(maxAgent)}  ${prompt.padEnd(maxPrompt)}  ${cadence} ${status}`);
       }
     };
 
     printRows('', pending);
+    if (pending.some(r => !firing.has(r.id))) {
+      console.log('\nOnly the top pending reminder per agent fires. A "waiting" one fires only after those above it are done or cancelled; use collab job for repeating checks.');
+    }
     if (completed.length > 0) {
       if (pending.length > 0) console.log('');
       printRows('Recently completed', completed);
