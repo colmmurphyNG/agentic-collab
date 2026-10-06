@@ -106,6 +106,8 @@ export class ClaudeAdapter implements EngineAdapter {
       // Claude Code shows "❯" (U+276F) or ">" prompt when waiting for input.
       // The prompt line may contain only the prompt character and whitespace.
       if (/^[\u276f>]\s*$/.test(line)) return 'waiting_for_input';
+      // An empty prompt may show a dimmed `Try "..."` suggestion instead.
+      if (/^\u276f\s+Try "[^"]*"$/.test(line)) return 'waiting_for_input';
 
       // Horizontal rule separators (─ U+2500) around the input area
       if (/^[\u2500\u25aa\s]+$/.test(line)) continue;
