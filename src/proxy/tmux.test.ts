@@ -254,6 +254,23 @@ describe('pasteText delivers a message intact', () => {
     assert.deepEqual(residue, [], 'the delivered text must not remain in any tmux buffer');
   });
 
+  it('types the prefix ahead of the pasted text, with no line break to submit it early', async () => {
+    const out = `${tmpdir()}/paste-prefix-${process.pid}.bin`;
+    const name = `paste-prefix-${process.pid}`;
+    const prefix = 'Delivered.\nSender in header. ';
+    const text = 'line one\nline two';
+    const expected = 'Delivered. Sender in header. ' + text;
+    files.push(out);
+    made.push(name);
+    rawReader(name, expected.length, out);
+    await settle(400);
+
+    await pasteText(name, text, false, prefix);
+    const got = await readWhenSized(out, expected.length);
+
+    assert.equal(got, expected, 'prefix first, line breaks in it flattened, message byte-for-byte after');
+  });
+
   // A third test asserting that two concurrent deliveries each get their own text was
   // written and then deleted: it cannot fail. `exec` here wraps execSync and nothing
   // yields between the load and the paste, so two pasteText calls in this single-threaded

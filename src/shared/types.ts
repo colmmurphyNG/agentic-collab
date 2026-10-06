@@ -415,7 +415,7 @@ export type WsEvent = WsInitEvent | WsAgentUpdateEvent | WsMessageEvent | WsProx
 
 export type ProxyCommand =
   | { action: 'create_session'; sessionName: string; cwd: string }
-  | { action: 'paste'; sessionName: string; text: string; pressEnter: boolean }
+  | { action: 'paste'; sessionName: string; text: string; pressEnter: boolean; typedPrefix?: string }
   | { action: 'capture'; sessionName: string; lines: number }
   | { action: 'kill_session'; sessionName: string }
   | { action: 'list_sessions' }
