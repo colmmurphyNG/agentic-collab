@@ -232,6 +232,23 @@ describe('Engine Adapters', () => {
       }
     });
 
+    it('detects idle state when the empty prompt shows a suggestion', () => {
+      // Newer Claude Code builds fill an empty prompt with a dimmed `Try "..."`
+      // hint; capture-pane drops the dimming, so it reads as text after ❯.
+      const pane = [
+        '────────────────────────────────────────',
+        '❯ Try "fix typecheck errors"',
+        '────────────────────────────────────────',
+        '  /private/tmp  Opus 5.5 (1M context)  ctx: --',
+        '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+      ].join('\n');
+      assert.equal(adapter.detectIdleState(pane), 'waiting_for_input');
+    });
+
+    it('does not treat other text after the prompt as idle', () => {
+      assert.equal(adapter.detectIdleState('output\n❯ fix the tests'), 'unknown');
+    });
+
     it('detects running state from spinner', () => {
       assert.equal(adapter.detectIdleState('some output\n⠋ Running task...'), 'running_tool');
     });
