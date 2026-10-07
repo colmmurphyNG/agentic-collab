@@ -50,14 +50,11 @@ function discoverViaDocker() {
   return null;
 }
 
-async function discoverOrchestrator() {
-  const env = process.env['ORCHESTRATOR_URL'];
-  if (env) return env;
-
+async function discoverOnce() {
   const docker = discoverViaDocker();
   if (docker) {
     try {
-      const r = await fetch(`${docker}/api/orchestrator/status`, { signal: AbortSignal.timeout(3000) });
+      const r = await fetch(`${docker}/api/orchestrator/status`, { signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS) });
       if (r.ok) return docker;
     } catch {}
   }
@@ -67,12 +64,26 @@ async function discoverOrchestrator() {
   for (const port of [8001, 3000, 3001]) {
     const url = `http://localhost:${port}`;
     try {
-      const r = await fetch(`${url}/api/orchestrator/status`, { signal: AbortSignal.timeout(3000) });
+      const r = await fetch(`${url}/api/orchestrator/status`, { signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS) });
       if (r.ok) return url;
     } catch {}
   }
 
   return null;
+}
+
+// A busy orchestrator can take several seconds to answer; one retry covers a stall
+// that clears on its own before we report it as down.
+const DISCOVERY_TIMEOUT_MS = 8000;
+const DISCOVERY_RETRY_DELAY_MS = 1000;
+
+async function discoverOrchestrator() {
+  const env = process.env['ORCHESTRATOR_URL'];
+  if (env) return env;
+  const first = await discoverOnce();
+  if (first) return first;
+  await new Promise((r) => setTimeout(r, DISCOVERY_RETRY_DELAY_MS));
+  return discoverOnce();
 }
 
 // ── HTTP Helpers ──
