@@ -11,6 +11,7 @@ export const MANIFEST_MAX_HOURS = 168;
 export const MANIFEST_PREVIEW_CHARS = 200;
 export const MANIFEST_MAX_LINKS = 5;
 export const MANIFEST_GENERAL_TOPIC = 'general';
+export const MANIFEST_LIFECYCLE_TOPIC = 'lifecycle';
 
 export interface ManifestMessage {
   agent: string;
@@ -65,6 +66,8 @@ export function buildManifest(messages: ManifestMessage[]): ManifestRow[] {
   for (const m of ordered) {
     if (!m.agent) continue;
     const topic = m.topic?.trim() || MANIFEST_GENERAL_TOPIC;
+    // Spawn, recycle and health-check notices: nothing there for the operator to pick up.
+    if (topic === MANIFEST_LIFECYCLE_TOPIC) continue;
     const key = `${m.agent}\u0000${topic}`;
     let row = rows.get(key);
     // Newest first, so the first message seen for a thread is its last one.

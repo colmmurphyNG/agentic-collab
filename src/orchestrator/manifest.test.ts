@@ -51,6 +51,14 @@ describe('manifest helpers', () => {
     assert.equal(rows[0]!.lastDirection, 'to_agent');
     assert.equal(rows[0]!.preview, 'three');
   });
+
+  it('leaves out system lifecycle notices', () => {
+    const rows = buildManifest([
+      { agent: 'a', topic: 'lifecycle', direction: 'from_agent', message: '[system] Recycled', createdAt: '2026-01-01T00:00:02Z' },
+      { agent: 'a', topic: 'work', direction: 'from_agent', message: 'done', createdAt: '2026-01-01T00:00:01Z' },
+    ]);
+    assert.deepEqual(rows.map((r) => r.topic), ['work']);
+  });
 });
 
 describe('manifest (database)', () => {
