@@ -198,6 +198,8 @@ export function connect() {
         break;
       case 'message':
         _addMessage(data.msg);
+        { const tp = document.getElementById('todayPanel');
+          if (tp && tp.style.display !== 'none' && tp.render) tp.render(); }
         break;
       case 'queue_update':
         _handleQueueUpdate(data.message);

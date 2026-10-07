@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="/dashboard/assets/styles/files-panel.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/decisions.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/updates.css">
+<link rel="stylesheet" href="/dashboard/assets/styles/today.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/responsive.css">
 </head>
 <body>
@@ -30,6 +31,7 @@
     <a href="/docs" target="_blank" class="header-btn">Docs</a>
     <a href="/scratch" target="_blank" class="header-btn">Scratch</a>
     <a href="/usage" target="_blank" class="header-btn">Usage</a>
+    <button id="todayBtn" class="header-btn" title="Conversations from the last day and a half">Today</button>
     <button id="decisionsBtn" class="header-btn" title="Decisions waiting on you">Decisions <span id="decisionsCount" class="decisions-count" style="display:none"></span></button>
     <button id="updatesBtn" class="header-btn" title="Finished work from agents">Updates <span id="updatesCount" class="updates-count" style="display:none"></span></button>
     <button id="settingsBtn" class="header-btn">Settings</button>
@@ -77,6 +79,7 @@
   <settings-panel id="settingsPanel" style="display:none" class="thread-panel"></settings-panel>
   <decisions-panel id="decisionsPanel" style="display:none" class="thread-panel decisions-panel"></decisions-panel>
   <updates-panel id="updatesPanel" style="display:none" class="thread-panel updates-panel"></updates-panel>
+  <today-panel id="todayPanel" style="display:none" class="thread-panel today-panel"></today-panel>
 </div>
 
 <script type="module">
@@ -91,13 +94,14 @@ import '/dashboard/assets/jobs-panel.ts';
 import '/dashboard/assets/files-panel.ts';
 import '/dashboard/assets/decisions-panel.ts';
 import '/dashboard/assets/updates-panel.ts';
+import '/dashboard/assets/today-panel.ts';
 import { loadServerPrefs } from '/dashboard/assets/settings.ts';
 import '/dashboard/assets/settings.ts';
 import { agentAction, openCreateAgentModal, setup as setupLifecycle } from '/dashboard/assets/agent-lifecycle.ts';
 import { sendMessage, uploadFile, handleFileUpload, updateSendability, handleQueueUpdate, setup as setupMessageIO } from '/dashboard/assets/message-io.ts';
 import { voiceState, initVoice, initCommandPalette, setup as setupVoicePalette } from '/dashboard/assets/voice-palette.ts';
 import { handleAuthError, connect, fetchEngineUsage, setup as setupConnection } from '/dashboard/assets/connection.ts';
-import { renderThread, getActiveTopic, updatePageTitle, setup as setupThread } from '/dashboard/assets/thread.ts';
+import { renderThread, getActiveTopic, setActiveTopic, updatePageTitle, setup as setupThread } from '/dashboard/assets/thread.ts';
 import { renderAgents, selectAgent, patchAgentCard, updateAgent, addMessage, handleMessageWithdrawn, applySearchFilter, initAgentListEvents, setup as setupAgentList } from '/dashboard/assets/agent-list.ts';
 import { pushUrlState, restorePendingAgent, setup as setupUrlState } from '/dashboard/assets/url-state.ts';
 {
@@ -322,6 +326,49 @@ import { pushUrlState, restorePendingAgent, setup as setupUrlState } from '/dash
   decisionsBtn.addEventListener('click', () => { if (updatesPanel.style.display !== 'none') closeUpdates(); });
   document.getElementById('agentList').addEventListener('click', () => {
     if (updatesPanel.style.display !== 'none') closeUpdates();
+  });
+
+  // ── Today toggle ──
+  const todayBtn = document.getElementById('todayBtn');
+  const todayPanel = document.getElementById('todayPanel');
+  function closeToday() {
+    todayPanel.style.display = 'none';
+    // Leave the thread hidden if another panel replaced this one.
+    if (settingsPanel.style.display === 'none' && decisionsPanel.style.display === 'none' && updatesPanel.style.display === 'none') threadPanel.style.display = '';
+    todayBtn.style.color = 'var(--text-dim)';
+    todayBtn.style.borderColor = 'var(--border)';
+  }
+  function openToday() {
+    if (settingsPanel.style.display !== 'none') closeSettings();
+    if (decisionsPanel.style.display !== 'none') closeDecisions();
+    if (updatesPanel.style.display !== 'none') closeUpdates();
+    todayPanel.style.display = 'flex';
+    threadPanel.style.display = 'none';
+    todayBtn.style.color = 'var(--accent)';
+    todayBtn.style.borderColor = 'var(--accent)';
+    todayPanel.render();
+  }
+  todayBtn.addEventListener('click', () => {
+    if (todayPanel.style.display !== 'none') closeToday(); else openToday();
+  });
+  todayPanel.addEventListener('close-today', closeToday);
+  for (const btn of [settingsBtn, decisionsBtn, updatesBtn]) {
+    btn.addEventListener('click', () => { if (todayPanel.style.display !== 'none') closeToday(); });
+  }
+  document.getElementById('agentList').addEventListener('click', () => {
+    if (todayPanel.style.display !== 'none') closeToday();
+  });
+  // Resume the thread in the same composer a normal send uses: select the agent, set the topic it
+  // will carry, and focus it. Nothing is sent here.
+  todayPanel.addEventListener('today-pickup', (e) => {
+    const { agent, topic } = e.detail;
+    closeToday();
+    state.threadView = 'messages';
+    selectAgent(agent);
+    setActiveTopic(topic);
+    renderThread();
+    const input = document.getElementById('threadInput');
+    if (input && input.focus) input.focus();
   });
 
   // ── URL State (History API) ──
