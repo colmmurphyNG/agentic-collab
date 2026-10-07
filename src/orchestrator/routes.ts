@@ -36,6 +36,7 @@ import { sessionName } from '../shared/agent-entity.ts';
 import { paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
 import { recordTelegramInbound, getActiveTelegramRoute, maybeAutoClearOnCommPref, isCommPrefDirective, isQuietCommand, clearAllTelegramRoutes, clearTelegramRoute, listTelegramRoutes, _resetTelegramRoutes } from './telegram-routing.ts';
 import { updateLinkError } from './update-link.ts';
+import { listMarkdownRecursiveAsync, createSwrCache, logIfSlow, type SwrCache } from './scratch-index.ts';
 import type { MessageDispatcher } from './message-dispatcher.ts';
 import type { UsagePoller } from './usage-poller.ts';
 
@@ -199,6 +200,15 @@ type Route = {
   pattern: URLPattern;
   handler: RouteHandler;
 };
+
+const SCRATCH_INDEX_TTL_MS = 60_000;
+
+/** Module-level so the cache survives across routers; `build` is exposed for tests. */
+export const scratchIndexState: {
+  key: string;
+  cache: SwrCache<string> | null;
+  build: ((personas?: () => Set<string>) => Promise<string>) | null;
+} = { key: '', cache: null, build: null };
 
 function buildRoutes(): Route[] {
   const routes: Route[] = [];
@@ -1500,31 +1510,6 @@ function resolveScratchFile(project: string, relPath: string): { path: string } 
   return { path: candidateReal };
 }
 
-/** Recursively collect all `.md` files under a directory. Returns paths
- *  relative to `root`. Skips hidden dirs (dot-prefixed) and node_modules. */
-function listMarkdownRecursive(root: string): Array<{ relPath: string; size: number; mtimeMs: number }> {
-  const results: Array<{ relPath: string; size: number; mtimeMs: number }> = [];
-  function walk(dir: string, prefix: string): void {
-    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
-    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const entry of entries) {
-      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-      const full = join(dir, entry.name);
-      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        walk(full, rel);
-      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
-        try {
-          const st = statSync(full);
-          results.push({ relPath: rel, size: st.size, mtimeMs: st.mtimeMs });
-        } catch { /* file vanished between readdir and stat — skip */ }
-      }
-    }
-  }
-  walk(root, '');
-  return results;
-}
-
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -1587,8 +1572,7 @@ function getProjectPrimaryPersona(): Record<string, string> {
   return out;
 }
 
-function attributePersona(relPath: string, project: string): string {
-  const known = getKnownPersonas();
+function attributePersona(relPath: string, project: string, known: Set<string>): string {
   // Handoff filename: handoff_<persona>_<timestamp>.md
   const handoffMatch = /^handoff[-_]([a-zA-Z0-9-]+?)[-_]\d{8}/.exec(basename(relPath));
   if (handoffMatch) {
@@ -1613,24 +1597,41 @@ function attributePersona(relPath: string, project: string): string {
   return getProjectPrimaryPersona()[project] ?? 'unattributed';
 }
 
+// The index walk is expensive (thousands of files over a bind mount), so it is
+// built asynchronously and served stale-while-revalidate. The cache is keyed on
+// the env that shapes the output so a changed configuration never serves old HTML.
+function scratchIndexCacheFor(): SwrCache<string> {
+  const key = [process.env['PROJECT_RENDER_ROOTS'], process.env['PROJECT_PRIMARY_PERSONAS'], process.env['PERSONAS_DIR']].join('\0');
+  if (scratchIndexState.key !== key || !scratchIndexState.cache) {
+    scratchIndexState.key = key;
+    scratchIndexState.cache = createSwrCache(() => buildScratchIndexHtml(), SCRATCH_INDEX_TTL_MS);
+  }
+  return scratchIndexState.cache;
+}
+scratchIndexState.build = (personas) => buildScratchIndexHtml(personas);
+
 route('GET', '/scratch', async (req, res, _match, ctx) => {
   if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  const html = await scratchIndexCacheFor().get();
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(html);
+});
 
+async function buildScratchIndexHtml(personas: () => Set<string> = getKnownPersonas): Promise<string> {
   const roots = getProjectRenderRoots();
   if (roots.size === 0) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(wrapMarkdownPage('Scratch', renderMarkdown('# Scratch files\n\n_No projects are configured for scratch rendering. Set `PROJECT_RENDER_ROOTS` to a comma-separated list of absolute paths._')));
-    return;
+    return wrapMarkdownPage('Scratch', renderMarkdown('# Scratch files\n\n_No projects are configured for scratch rendering. Set `PROJECT_RENDER_ROOTS` to a comma-separated list of absolute paths._'));
   }
 
   // Gather all files across all projects with persona attribution.
   type Entry = { project: string; relPath: string; size: number; mtimeMs: number; persona: string };
   const all: Entry[] = [];
+  const known = personas(); // once per build, not per file
   for (const [project, projectRoot] of roots.entries()) {
     for (const root of discoverScratchRoots(projectRoot)) {
-      for (const f of listMarkdownRecursive(root.absRoot)) {
+      for (const f of await listMarkdownRecursiveAsync(root.absRoot)) {
         const relPath = `${root.urlPrefix}${f.relPath}`;
-        all.push({ project, relPath, size: f.size, mtimeMs: f.mtimeMs, persona: attributePersona(relPath, project) });
+        all.push({ project, relPath, size: f.size, mtimeMs: f.mtimeMs, persona: attributePersona(relPath, project, known) });
       }
     }
   }
@@ -1675,10 +1676,8 @@ route('GET', '/scratch', async (req, res, _match, ctx) => {
     lines.push('');
   }
 
-  const html = wrapMarkdownPage('Scratch', renderMarkdown(lines.join('\n')));
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(html);
-});
+  return wrapMarkdownPage('Scratch', renderMarkdown(lines.join('\n')));
+}
 
 route('GET', '/scratch/:project/:path+', async (req, res, match, ctx) => {
   if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
@@ -3475,10 +3474,22 @@ function checkRateLimit(ip: string, limit: number): boolean {
 
 // ── Route Matcher ──
 
-export function createRouter(ctx: RouteContext): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+export const SLOW_REQUEST_MS = 1000;
+
+export type RouterOptions = {
+  slowRequestMs?: number;
+  now?: () => number;
+  log?: (line: string) => void;
+};
+
+export function createRouter(ctx: RouteContext, opts: RouterOptions = {}): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const routes = buildRoutes();
+  const now = opts.now ?? Date.now;
+  const slowMs = opts.slowRequestMs ?? SLOW_REQUEST_MS;
 
   return async (req, res) => {
+    const startedAt = now();
+    res.once('close', () => logIfSlow(req.method, req.url, startedAt, now(), slowMs, opts.log));
     const url = new URL(req.url!, `http://${req.headers.host}`);
 
     // Auth: state-mutating methods require Bearer token (GET and OPTIONS are exempt)
