@@ -37,6 +37,7 @@ import { paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
 import { recordTelegramInbound, getActiveTelegramRoute, maybeAutoClearOnCommPref, isCommPrefDirective, isQuietCommand, clearAllTelegramRoutes, clearTelegramRoute, listTelegramRoutes, _resetTelegramRoutes } from './telegram-routing.ts';
 import { updateLinkError } from './update-link.ts';
 import { listMarkdownRecursiveAsync, createSwrCache, logIfSlow, type SwrCache } from './scratch-index.ts';
+import { parseManifestHours } from './manifest.ts';
 import type { MessageDispatcher } from './message-dispatcher.ts';
 import type { UsagePoller } from './usage-poller.ts';
 
@@ -879,6 +880,14 @@ route('GET', '/api/dashboard/messages/search', async (req, res, _match, ctx) => 
   const agent = url.searchParams.get('agent') || undefined;
   const results = ctx.db.searchMessages(q, agent);
   json(res, 200, results);
+});
+
+route('GET', '/api/manifest', async (req, res, _match, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  const url = new URL(req.url!, `http://${req.headers.host}`);
+  const hours = parseManifestHours(url.searchParams.get('hours'));
+  if (hours === null) return json(res, 400, { error: 'hours must be a whole number' });
+  json(res, 200, ctx.db.getManifest(hours));
 });
 
 route('PUT', '/api/dashboard/read-cursor', async (req, res, _match, ctx) => {

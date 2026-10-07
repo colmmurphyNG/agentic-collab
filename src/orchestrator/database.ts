@@ -40,6 +40,7 @@ import {
   serializeUpsertParams,
   buildMigrationStatements,
 } from './field-registry.ts';
+import { buildManifest, type ManifestRow } from './manifest.ts';
 
 const SCHEMA = `
   PRAGMA journal_mode = WAL;
@@ -95,6 +96,7 @@ const SCHEMA = `
   );
 
   CREATE INDEX IF NOT EXISTS idx_dm_agent ON dashboard_messages(agent);
+  CREATE INDEX IF NOT EXISTS idx_dm_created ON dashboard_messages(created_at);
 
   CREATE TABLE IF NOT EXISTS proxies (
     proxy_id      TEXT PRIMARY KEY,
@@ -604,6 +606,24 @@ export class Database {
       threads[msg.agent]!.push(msg);
     }
     return threads;
+  }
+
+  /** One row per (agent, topic) thread with a message in the last `hours`, newest first. */
+  getManifest(hours: number, now: number = Date.now()): ManifestRow[] {
+    // created_at is stored as second-resolution ISO text, so the cutoff must be too to compare correctly.
+    const cutoff = new Date(now - hours * 3_600_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const rows = this.db.prepare(`
+      SELECT agent, topic, direction, message, created_at
+      FROM dashboard_messages
+      WHERE created_at >= ? AND withdrawn = 0 AND agent != ''
+    `).all(cutoff) as Array<Record<string, unknown>>;
+    return buildManifest(rows.map((r) => ({
+      agent: r['agent'] as string,
+      topic: (r['topic'] as string | null) ?? null,
+      direction: r['direction'] as MessageDirection,
+      message: r['message'] as string,
+      createdAt: r['created_at'] as string,
+    })));
   }
 
   searchMessages(query: string, agent?: string): DashboardMessage[] {
