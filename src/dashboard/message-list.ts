@@ -11,6 +11,7 @@
  */
 
 import { icon } from '/dashboard/assets/icons.ts';
+import { revealStart } from '/dashboard/assets/reveal.ts';
 
 const PAGE_SIZE = 30;
 
@@ -144,17 +145,32 @@ export class MessageList extends HTMLElement {
     // Progressive loading on scroll-up
     this.onscroll = () => {
       if (this.scrollTop > 80 || this._renderedFrom <= 0) return;
-      const from = this._renderedFrom;
-      const loadFrom = Math.max(0, from - PAGE_SIZE);
-      const olderFrag = document.createDocumentFragment();
-      for (let i = loadFrom; i < from; i++) {
-        olderFrag.appendChild(buildMessageEl(this._thread[i], this._agentName, this._renderMarkdown));
-      }
-      const prevHeight = this.scrollHeight;
-      this.prepend(olderFrag);
-      this.scrollTop += this.scrollHeight - prevHeight;
-      this._renderedFrom = loadFrom;
+      this._prependFrom(Math.max(0, this._renderedFrom - PAGE_SIZE));
     };
+  }
+
+  /** Render older messages from `loadFrom` up to the current window, keeping the scroll position. */
+  _prependFrom(loadFrom) {
+    const from = this._renderedFrom;
+    const olderFrag = document.createDocumentFragment();
+    for (let i = loadFrom; i < from; i++) {
+      olderFrag.appendChild(buildMessageEl(this._thread[i], this._agentName, this._renderMarkdown));
+    }
+    const prevHeight = this.scrollHeight;
+    this.prepend(olderFrag);
+    this.scrollTop += this.scrollHeight - prevHeight;
+    this._renderedFrom = loadFrom;
+  }
+
+  /**
+   * Make sure message `msgId` is rendered, loading older messages if needed.
+   * Returns its element, or null if the message is not in the loaded thread.
+   */
+  revealMessage(msgId) {
+    const start = revealStart(this._thread || [], this._renderedFrom ?? 0, msgId);
+    if (start < 0) return null;
+    if (start < this._renderedFrom) this._prependFrom(start);
+    return this.querySelector(`[data-msg-id="${msgId}"]`);
   }
 
   /**
