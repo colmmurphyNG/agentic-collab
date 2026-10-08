@@ -1619,8 +1619,26 @@ function scratchIndexCacheFor(): SwrCache<string> {
 }
 scratchIndexState.build = (personas) => buildScratchIndexHtml(personas);
 
+/**
+ * 401 for a route people reach by clicking a link. A browser gets a page that
+ * says how to fix it (the dashboard re-sets the auth cookie when it loads);
+ * anything that didn't ask for HTML keeps the JSON error.
+ */
+function unauthorizedLink(req: IncomingMessage, res: ServerResponse): void {
+  if (!String(req.headers.accept ?? '').includes('text/html')) {
+    json(res, 401, { error: 'Unauthorized' });
+    return;
+  }
+  res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end('<!doctype html><meta charset="utf-8"><title>Not signed in</title>'
+    + '<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem">'
+    + '<h1>Not signed in</h1><p>This page signs you in with a cookie that the dashboard sets. '
+    + 'Open or reload the dashboard, then try this link again.</p>'
+    + '<p><a href="/dashboard">Reload the dashboard</a></p></body>');
+}
+
 route('GET', '/scratch', async (req, res, _match, ctx) => {
-  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  if (!authorize(ctx.orchestratorSecret, req)) return unauthorizedLink(req, res);
   const html = await scratchIndexCacheFor().get();
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(html);
@@ -1689,7 +1707,7 @@ async function buildScratchIndexHtml(personas: () => Set<string> = getKnownPerso
 }
 
 route('GET', '/scratch/:project/:path+', async (req, res, match, ctx) => {
-  if (!authorize(ctx.orchestratorSecret, req)) return json(res, 401, { error: 'Unauthorized' });
+  if (!authorize(ctx.orchestratorSecret, req)) return unauthorizedLink(req, res);
 
   const project = match.pathname.groups['project']!;
   const relPath = match.pathname.groups['path']!;

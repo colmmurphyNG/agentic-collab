@@ -1810,6 +1810,25 @@ describe('API Routes — /scratch (R: render-only endpoint)', () => {
     assert.equal(status, 401);
   });
 
+  it('tells a browser to reload the dashboard when a scratch link arrives without auth', async () => {
+    // A link click sends Accept: text/html and cannot carry a bearer header, so a
+    // missing cookie should explain the fix rather than show raw JSON.
+    testSecret = 'shh';
+    for (const path of ['/scratch', '/scratch/project-a/top.md']) {
+      const { status, body } = await getHtml(path, { accept: 'text/html,application/xhtml+xml' });
+      assert.equal(status, 401, path);
+      assert.match(body, /reload the dashboard/i, path);
+      assert.match(body, /href="\/dashboard"/, path);
+    }
+  });
+
+  it('still answers API clients with JSON when scratch auth is missing', async () => {
+    testSecret = 'shh';
+    const { status, data } = await getJson('/scratch', { accept: 'application/json' });
+    assert.equal(status, 401);
+    assert.equal(data.error, 'Unauthorized');
+  });
+
   it('returns 401 on the per-file route when secret is set and no auth header is provided', async () => {
     testSecret = 'shh';
     const { status } = await getJson('/scratch/project-a/top.md');
