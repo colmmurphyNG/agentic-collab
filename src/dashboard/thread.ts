@@ -252,21 +252,28 @@ function jumpToMessage(agent, topic, msgId) {
     else state.selected = agent;
   }
 
+  // The message only exists in the Messages tab, and a counterparty filter can hide it.
+  state.threadView = 'messages';
+  const target = (state.threads[agent] || []).find(m => m.id === msgId);
+  const cp = getActiveCounterparty();
+  if (target && cp !== 'all' && !messageMatchesCounterparty(target, cp, agent)) setActiveCounterparty('all');
+
   // Override topic filter. setActiveTopic + renderThread re-renders the panel.
   if (topic) setActiveTopic(topic);
   renderThread();
+  pushUrlState();
 
   // After render, scroll to the message and flash-highlight it.
   // Defer one frame so the DOM is laid out.
   requestAnimationFrame(() => {
-    const el = document.querySelector(`[data-msg-id="${msgId}"]`);
+    // Only the newest page is rendered, so older messages must be loaded first.
+    const el = document.getElementById('threadMessages').revealMessage(msgId);
     if (!el) {
-      // Fallback: the message might be out of the current paginated window;
-      // log instead of silently failing so the operator notices.
-      console.warn(`[search] jumpToMessage: msg-id ${msgId} not in DOM after topic switch to "${topic}"`);
+      console.warn(`[search] jumpToMessage: msg-id ${msgId} not in ${agent}'s loaded thread`);
       return;
     }
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Instant: an old message can be thousands of messages up, too far to animate.
+    el.scrollIntoView({ block: 'center' });
     el.classList.add('search-jump-highlight');
     setTimeout(() => el.classList.remove('search-jump-highlight'), 2200);
   });
