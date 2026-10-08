@@ -4,6 +4,8 @@
  * Import via: import { state, on, emit } from '/dashboard/assets/state.ts';
  */
 
+import { tokenCookie, clearedTokenCookie } from '/dashboard/assets/token-cookie.ts';
+
 // ── State ──
 
 export const state = {
@@ -102,17 +104,26 @@ export function setToken(token) {
  * /scratch, /docs, etc.
  */
 function syncTokenCookie(token) {
-  document.cookie = `conductor_token=${encodeURIComponent(token)}; path=/; SameSite=Strict`;
+  document.cookie = tokenCookie(token);
 }
 
 function clearTokenCookie() {
-  document.cookie = 'conductor_token=; path=/; SameSite=Strict; max-age=0';
+  document.cookie = clearedTokenCookie();
 }
 
 // Sync the cookie on module load — covers dashboard sessions that set the
 // token before this code (cookie-sync logic) existed.
 const _initialToken = getToken();
 if (_initialToken) syncTokenCookie(_initialToken);
+
+// Re-sync just before following a scratch link: the cookie can be cleared
+// while the dashboard tab stays open, and the link is the only thing that
+// would notice.
+document.addEventListener('click', (e) => {
+  const link = e.target instanceof Element ? e.target.closest('a[href^="/scratch"]') : null;
+  const token = link && getToken();
+  if (token) syncTokenCookie(token);
+}, true);
 
 export function authHeaders() {
   const t = getToken();
