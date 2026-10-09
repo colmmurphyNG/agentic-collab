@@ -2808,3 +2808,37 @@ describe('composeHandoffBody — session pointer', () => {
     assert.doesNotMatch(body, /\.jsonl/);
   });
 });
+
+describe('withLaunchEnv — Seat / Gateway route', () => {
+  let tmpConfigDir: string;
+  let prevConfigDir: string | undefined;
+
+  const agent = (route: string | null) => ({
+    name: 'gw-agent', engine: 'claude', route, launchEnv: null,
+  }) as unknown as AgentRecord;
+
+  before(() => {
+    tmpConfigDir = mkdtempSync(join(tmpdir(), 'gateway-launch-test-'));
+    prevConfigDir = process.env['AGENTIC_COLLAB_CONFIG_DIR'];
+    process.env['AGENTIC_COLLAB_CONFIG_DIR'] = tmpConfigDir;
+    writeFileSync(join(tmpConfigDir, 'gateway-settings.json'), JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://gw.example' } }));
+  });
+
+  after(() => {
+    rmSync(tmpConfigDir, { recursive: true, force: true });
+    if (prevConfigDir !== undefined) process.env['AGENTIC_COLLAB_CONFIG_DIR'] = prevConfigDir;
+    else delete process.env['AGENTIC_COLLAB_CONFIG_DIR'];
+  });
+
+  it('launches a gateway agent with its gateway settings file and a family model alias', () => {
+    const cmd = withLaunchEnv(agent('gateway'), 'claude --model claude-opus-5-5 --settings /x.json', '/p.md');
+    assert.match(cmd, new RegExp(`--settings '${join(tmpConfigDir, 'gateway-settings', 'gw-agent.json')}'`));
+    assert.match(cmd, /--model opus/);
+    assert.match(cmd, /COLLAB_AGENT=/);
+  });
+
+  it('leaves a seat agent launch command as written', () => {
+    const cmd = withLaunchEnv(agent(null), 'claude --model claude-opus-5-5 --settings /x.json', '/p.md');
+    assert.match(cmd, /--model claude-opus-5-5 --settings \/x\.json/);
+  });
+});

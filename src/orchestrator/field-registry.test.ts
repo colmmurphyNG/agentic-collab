@@ -17,9 +17,9 @@ import {
 
 describe('field-registry', () => {
   describe('CONFIG_FIELDS', () => {
-    it('has 20 entries covering all config fields', () => {
+    it('has 21 entries covering all config fields', () => {
       // 20 since item O (PR #5) added hookReload as a first-class registry field.
-      assert.equal(CONFIG_FIELDS.length, 20);
+      assert.equal(CONFIG_FIELDS.length, 21);
     });
 
     it('has unique field names', () => {
@@ -167,7 +167,7 @@ describe('field-registry', () => {
         'engine', 'model', 'thinking', 'cwd', 'persona', 'permissions',
         'proxy_id', 'agent_group', 'account', 'launch_env',
         'hook_start', 'hook_resume', 'hook_compact', 'hook_exit',
-        'hook_interrupt', 'hook_reload', 'hook_submit', 'custom_buttons', 'indicators', 'icon',
+        'hook_interrupt', 'hook_reload', 'hook_submit', 'custom_buttons', 'indicators', 'icon', 'route',
       ];
       assert.deepEqual(cols, expected);
     });
@@ -185,7 +185,7 @@ describe('field-registry', () => {
         'engine', 'model', 'thinking', 'cwd', 'persona', 'permissions',
         'agent_group', 'account', 'launch_env',
         'hook_start', 'hook_resume', 'hook_compact', 'hook_exit',
-        'hook_interrupt', 'hook_reload', 'hook_submit', 'custom_buttons', 'indicators', 'icon',
+        'hook_interrupt', 'hook_reload', 'hook_submit', 'custom_buttons', 'indicators', 'icon', 'route',
       ];
       assert.deepEqual(cols, expected);
     });
@@ -215,7 +215,7 @@ describe('field-registry', () => {
       };
 
       const params = serializeConfigParams(opts);
-      assert.equal(params.length, 20); // 20 config fields (hookReload added by item O)
+      assert.equal(params.length, 21); // 21 config fields
       assert.equal(params[0], 'claude'); // engine
       assert.equal(params[1], null);    // model
       assert.equal(params[2], null);    // thinking
@@ -315,7 +315,7 @@ describe('field-registry', () => {
       };
 
       const params = serializeUpsertParams(opts);
-      assert.equal(params.length, 19); // 20 (CONFIG_FIELDS) - 1 (proxyId, createOnly)
+      assert.equal(params.length, 20); // 21 (CONFIG_FIELDS) - 1 (proxyId, createOnly)
       // proxyId value 'p1' should NOT appear
       assert.ok(!params.includes('p1'));
     });

@@ -159,6 +159,52 @@ describe('API Routes', () => {
     assert.equal(status, 404);
   });
 
+  describe('POST /api/agents/:name/route/:target', () => {
+    let gwDir: string;
+    let prevConfigDir: string | undefined;
+    before(() => {
+      gwDir = mkdtempSync(join(tmpdir(), 'route-endpoint-'));
+      prevConfigDir = process.env['AGENTIC_COLLAB_CONFIG_DIR'];
+      process.env['AGENTIC_COLLAB_CONFIG_DIR'] = gwDir;
+    });
+    after(() => {
+      rmSync(gwDir, { recursive: true, force: true });
+      if (prevConfigDir !== undefined) process.env['AGENTIC_COLLAB_CONFIG_DIR'] = prevConfigDir;
+      else delete process.env['AGENTIC_COLLAB_CONFIG_DIR'];
+    });
+
+    it('rejects a target other than seat or gateway', async () => {
+      const { status } = await api('POST', '/api/agents/api-agent-grouped/route/openrouter');
+      assert.equal(status, 400);
+    });
+
+    it('returns 404 for an unknown agent', async () => {
+      const { status } = await api('POST', '/api/agents/nonexistent-agent/route/seat');
+      assert.equal(status, 404);
+    });
+
+    it('refuses the gateway until gateway-settings.json exists', async () => {
+      const { status, data } = await api('POST', '/api/agents/api-agent-grouped/route/gateway');
+      assert.equal(status, 409);
+      assert.match(String((data as Record<string, unknown>).error), /not set up/);
+      const { data: agent } = await api('GET', '/api/agents/api-agent-grouped');
+      assert.equal((agent as Record<string, unknown>).route, null);
+    });
+
+    it('switches to the gateway and back to the seat', async () => {
+      writeFileSync(join(gwDir, 'gateway-settings.json'), '{}');
+      const on = await api('POST', '/api/agents/api-agent-grouped/route/gateway');
+      assert.equal(on.status, 200);
+      let { data: agent } = await api('GET', '/api/agents/api-agent-grouped');
+      assert.equal((agent as Record<string, unknown>).route, 'gateway');
+
+      const off = await api('POST', '/api/agents/api-agent-grouped/route/seat');
+      assert.equal(off.status, 200);
+      ({ data: agent } = await api('GET', '/api/agents/api-agent-grouped'));
+      assert.equal((agent as Record<string, unknown>).route, null);
+    });
+  });
+
   it('POST /api/agents rejects duplicate', async () => {
     const { status } = await api('POST', '/api/agents', {
       name: 'api-agent-1',

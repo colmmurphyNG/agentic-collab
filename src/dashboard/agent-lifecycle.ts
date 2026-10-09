@@ -23,7 +23,7 @@ export function setup({ handleAuthError, selectAgent }) {
 // ── Constants ──
 
 const DESTRUCTIVE_ACTIONS = new Set(['kill', 'destroy', 'reload', 'recycle']);
-const ACTION_LABELS = { kill: 'Kill', destroy: 'Destroy', exit: 'Exit', resume: 'Resume', interrupt: 'Interrupt', compact: 'Compact', spawn: 'Spawn', reload: 'Reload', recycle: 'Recycle', unwedge: 'Unwedge' };
+const ACTION_LABELS = { kill: 'Kill', destroy: 'Destroy', exit: 'Exit', resume: 'Resume', interrupt: 'Interrupt', compact: 'Compact', spawn: 'Spawn', reload: 'Reload', recycle: 'Recycle', unwedge: 'Unwedge', 'route/gateway': 'Gateway from next restart', 'route/seat': 'Seat from next restart' };
 
 const ENGINE_TEMPLATES = {
   claude: `---

@@ -179,6 +179,7 @@ export type AgentRecord = {
   agentGroup: string | null; // grouping label from persona frontmatter
   launchEnv: LaunchEnv | null; // launch-time env injected on spawn/resume/reload
   account: string | null; // named credential account for HOME isolation
+  route: string | null; // 'gateway' sends the agent through the LLM gateway on its next launch; null = seat
   sortOrder: number; // manual ordering within group
   /** Hook value for starting the agent (preset/file/inline). */
   hookStart: string | null;
