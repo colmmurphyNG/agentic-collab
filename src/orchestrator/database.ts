@@ -482,6 +482,7 @@ export class Database {
     stateBeforeShutdown: string | null;
     spawnCount: number;
     agentGroup: string | null;
+    route: string | null;
     launchEnv: LaunchEnv | null;
   }>): AgentRecord {
     const agent = this.getAgent(name);

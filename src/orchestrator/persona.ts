@@ -41,6 +41,8 @@ export type PersonaFrontmatter = {
   group?: string;
   /** Named credential account for per-agent HOME isolation. */
   account?: string;
+  /** 'gateway' launches the agent through the LLM gateway instead of the seat. */
+  route?: string;
   /** Launch-time environment variables injected on spawn/resume/reload. */
   env?: LaunchEnv;
   /** Hook value for starting the agent. String (legacy) or structured object. */

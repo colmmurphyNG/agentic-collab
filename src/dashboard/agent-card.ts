@@ -62,6 +62,11 @@ export function buildActionsHtml(agent) {
   } else if (isVoid) {
     html = '<button data-action="spawn">Spawn</button><button class="danger" data-action="destroy">Destroy</button>';
   }
+  if (agent.engine === 'claude' && !transitioning) {
+    html += agent.route === 'gateway'
+      ? '<button class="secondary" data-action="route/seat" title="Go back to the seat on the next restart. The conversation is kept.">Use seat</button>'
+      : '<button class="secondary" data-action="route/gateway" title="Run through the LLM gateway instead of the seat from the next restart. The conversation is kept.">Use gateway</button>';
+  }
   if (activeIdle) {
     // Merge custom buttons from agent record + engine config (agent takes priority)
     const merged = {};
@@ -99,7 +104,8 @@ function buildIndicatorsHtml(indicators) {
 function buildMetaHtml(agent, proxies) {
   const modelStr = [agent.engine, agent.model, agent.thinking].filter(Boolean).join(' ');
   const accountSpan = agent.account ? `<span title="account: ${esc(agent.account)}">acct: ${esc(agent.account)}</span>` : '';
-  return `<span>${esc(modelStr)}</span>${accountSpan}${agent.proxyId ? `<span title="proxy: ${esc(agent.proxyId)}">${esc(agent.proxyId)}${proxyWarning(agent.proxyId, proxies)}</span>` : ''}`;
+  const routeSpan = agent.route === 'gateway' ? '<span title="Runs through the LLM gateway, not the seat (from its next restart)">via gateway</span>' : '';
+  return `<span>${esc(modelStr)}</span>${accountSpan}${routeSpan}${agent.proxyId ? `<span title="proxy: ${esc(agent.proxyId)}">${esc(agent.proxyId)}${proxyWarning(agent.proxyId, proxies)}</span>` : ''}`;
 }
 
 function decisionBadgeHtml(count) {

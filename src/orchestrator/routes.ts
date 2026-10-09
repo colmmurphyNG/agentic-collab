@@ -20,6 +20,7 @@ import { sanitizeMessage, generateMessageId } from '../shared/sanitize.ts';
 import { parseCron, nextFireAt as cronNextFireAt } from '../shared/cron.ts';
 import { getVersion, versionsMatch } from '../shared/version.ts';
 import type { LockManager } from '../shared/lock.ts';
+import { gatewayConfigured, isAgentRoute } from './gateway-route.ts';
 import { getPersonasDir, parseFrontmatter, createPersonaAndAgent, syncSinglePersona, syncPersonasWithDiff, updateFrontmatterField, resolvePersonaPath, toHostPath } from './persona.ts';
 import {
   spawnAgent, resumeAgent, suspendAgent, destroyAgent,
@@ -2832,6 +2833,33 @@ route('PATCH', '/api/agents/:name/group', async (req, res, match, ctx) => {
   }));
 
   json(res, 200, { ok: true });
+});
+
+// Seat / Gateway switch. Takes effect on the agent's next launch; the session
+// id is untouched, so a resume keeps the conversation.
+route('POST', '/api/agents/:name/route/:target', async (_req, res, match, ctx) => {
+  const name = match.pathname.groups['name']!;
+  const target = match.pathname.groups['target']!;
+  if (!isAgentRoute(target)) { json(res, 400, { error: 'route must be "seat" or "gateway"' }); return; }
+
+  const agent = ctx.db.getAgent(name);
+  if (!agent) { json(res, 404, { error: `Agent "${name}" not found` }); return; }
+  if (target === 'gateway' && agent.engine !== 'claude') {
+    json(res, 409, { error: `Only claude agents can use the gateway ("${name}" is ${agent.engine})` }); return;
+  }
+  if (target === 'gateway' && !gatewayConfigured()) {
+    json(res, 409, { error: 'Gateway is not set up: gateway-settings.json is missing from the config dir' }); return;
+  }
+
+  const route = target === 'gateway' ? 'gateway' : null;
+  // Frontmatter first: persona sync re-reads it, so a DB-only change would be undone.
+  const personaPath = resolvePersonaPath(name);
+  if (personaPath) updateFrontmatterField(personaPath, 'route', route);
+  ctx.db.updateAgentState(name, agent.state, agent.version, { route });
+  ctx.db.logEvent(name, 'route_changed', undefined, { route: target });
+
+  ctx.wss.broadcast(JSON.stringify({ type: 'agent_update', agent: ctx.db.getAgent(name) }));
+  json(res, 200, { ok: true, route: target, appliesOn: 'next launch' });
 });
 
 // ── Orchestrator Control ──

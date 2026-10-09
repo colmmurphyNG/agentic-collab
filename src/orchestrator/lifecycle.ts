@@ -25,6 +25,7 @@ import type { LockManager } from '../shared/lock.ts';
 import type { ProxyCommand, ProxyResponse, AgentRecord, PipelineStep } from '../shared/types.ts';
 import { sessionName, requireProxy, canSuspend, canResume } from '../shared/agent-entity.ts';
 import { shellQuote, sleep } from '../shared/utils.ts';
+import { applyRoute } from './gateway-route.ts';
 import { getAdapter } from './adapters/index.ts';
 import { resolvePersonaPath, loadPersona, composeSystemPrompt, getPersonasDir, toHostPath, parseFrontmatter } from './persona.ts';
 import { resolveHook } from './hook-resolver.ts';
@@ -122,7 +123,7 @@ export function withLaunchEnv(agent: AgentRecord, cmd: string, personaFile: stri
   const reservedKeys = new Set(baseEntries.map(([key]) => key));
   const launchEntries = Object.entries(agent.launchEnv ?? {})
     .filter(([key]) => !reservedKeys.has(key));
-  return prependExports(cmd, [...baseEntries, ...launchEntries]);
+  return prependExports(applyRoute(agent, cmd), [...baseEntries, ...launchEntries]);
 }
 
 /**
