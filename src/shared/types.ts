@@ -285,7 +285,7 @@ export type Reminder = {
 
 export type DecisionStatus = 'open' | 'answered' | 'withdrawn';
 
-export type DecisionOption = { key: string; label: string };
+export type DecisionOption = { key: string; label: string; steps?: string | null };
 
 export type Decision = {
   id: number;
@@ -316,6 +316,24 @@ export type Update = {
   status: UpdateStatus;
   createdAt: string;
   seenAt: string | null;
+  doneAt: string | null;
+};
+
+// ── To-dos ──
+// Actions for the operator that came out of a decision: choosing an option that carries steps
+// opens one. He marks it done, and that notifies the agent that raised the decision.
+
+export type TodoStatus = 'open' | 'done';
+
+export type Todo = {
+  id: number;
+  agentName: string;
+  title: string;
+  steps: string | null;
+  decisionId: number | null;
+  topic: string | null;
+  status: TodoStatus;
+  createdAt: string;
   doneAt: string | null;
 };
 

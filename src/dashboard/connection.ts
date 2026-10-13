@@ -26,6 +26,15 @@ function _refreshDecisions() {
   if (panel && panel.style.display !== 'none' && panel.render) panel.render();
 }
 
+/** Update the header's open count and re-render the To-do panel if it is open. */
+function _refreshTodos() {
+  const n = (state.todos || []).length;
+  const count = document.getElementById('todosCount');
+  if (count) { count.textContent = n ? String(n) : ''; count.style.display = n ? '' : 'none'; }
+  const panel = document.getElementById('todosPanel');
+  if (panel && panel.style.display !== 'none' && panel.render) panel.render();
+}
+
 /** Update the header's unseen count and re-render the Updates panel if it is open. */
 function _refreshUpdates() {
   const n = state.unseenUpdates || 0;
@@ -173,6 +182,9 @@ export function connect() {
         _refreshDecisions();
         state.updates = data.updates || [];
         state.unseenUpdates = data.unseenUpdates || 0;
+        state.todos = data.todos || [];
+        state.openTodos = data.openTodos || 0;
+        _refreshTodos();
         _refreshUpdates();
         // Restore unread counts from server, preserving any live increments
         if (data.unreadCounts) {
@@ -277,6 +289,11 @@ export function connect() {
         state.updates = data.updates || [];
         state.unseenUpdates = data.unseenUpdates || 0;
         _refreshUpdates();
+        break;
+      case 'todos_change':
+        state.todos = data.todos || [];
+        state.openTodos = data.openTodos || 0;
+        _refreshTodos();
         break;
       case 'reminder_update':
         if (state.threadView === 'reminders') {

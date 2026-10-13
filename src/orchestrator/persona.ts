@@ -1085,6 +1085,8 @@ Decisions (anything you need the operator to decide goes here, not at the end of
   collab decide --topic <t> "question" --option a="label" --option b="label" --recommend a [--blocking]
   collab decide list
   The answer arrives as a normal dashboard message on that topic.
+  An option that is an action FOR the operator carries his steps: --action-steps b="check the order on stage BM".
+  Choosing it opens a to-do item in his To-do tab; you are told when he marks it done.
 
 Updates (finished work the operator should look at: a review page, a PR, a report):
   collab update "title" --link <https://... or /pages/...> [--summary "one line"] [--topic <t>]

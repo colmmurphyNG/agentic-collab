@@ -1,0 +1,130 @@
+.todos-count {
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+}
+
+.todos-panel {
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.todos-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.todos-header h2 {
+  font-size: 15px;
+  margin: 0 auto 0 0;
+  color: var(--text);
+}
+
+.todos-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.todos-close {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.todos-list {
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.todos-done-heading {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin: 8px 0 0;
+}
+
+.todo-empty {
+  color: var(--text-dim);
+  padding: 24px 0;
+  text-align: center;
+}
+
+.todo-item {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.todo-item.done { opacity: 0.7; }
+.todo-item.sending { opacity: 0.5; pointer-events: none; }
+
+.todo-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.todo-agent { font-weight: 700; color: var(--text); }
+.todo-age { margin-left: auto; }
+
+.todo-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.todo-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.todo-steps {
+  color: var(--text);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.todo-action {
+  flex-shrink: 0;
+  background: none;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.todo-action:hover { border-color: var(--accent); }

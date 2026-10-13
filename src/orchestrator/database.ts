@@ -24,6 +24,8 @@ import type {
   DecisionStatus,
   Update,
   UpdateStatus,
+  Todo,
+  TodoStatus,
   Job,
   JobStatus,
   PageRecord,
@@ -328,6 +330,22 @@ export class Database {
         status TEXT NOT NULL DEFAULT 'open',
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         seen_at TEXT,
+        done_at TEXT
+      )
+    `);
+
+    // Actions for the operator that came out of a decision answer. Opening one and marking it
+    // done both notify the raising agent, so nothing is silently dropped on either side.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS todos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name TEXT NOT NULL,
+        title TEXT NOT NULL,
+        steps TEXT,
+        decision_id INTEGER,
+        topic TEXT,
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         done_at TEXT
       )
     `);
@@ -981,6 +999,51 @@ export class Database {
     return result.changes === 0 ? undefined : this.getUpdate(id);
   }
 
+  // ── To-dos ──
+
+  createTodo(opts: { agentName: string; title: string; steps?: string | null; decisionId?: number | null; topic?: string | null }): Todo {
+    this.db.prepare(`
+      INSERT INTO todos (agent_name, title, steps, decision_id, topic) VALUES (?, ?, ?, ?, ?)
+    `).run(opts.agentName, opts.title, opts.steps ?? null, opts.decisionId ?? null, opts.topic ?? null);
+    const row = this.db.prepare('SELECT * FROM todos WHERE id = last_insert_rowid()').get() as Record<string, unknown>;
+    return mapTodoRow(row);
+  }
+
+  getTodo(id: number): Todo | undefined {
+    const row = this.db.prepare('SELECT * FROM todos WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return row ? mapTodoRow(row) : undefined;
+  }
+
+  /** Newest first. Done ones are ordered by when they were marked done. */
+  listTodos(opts: { status?: TodoStatus | 'all' } = {}): Todo[] {
+    const status = opts.status ?? 'open';
+    const where = status === 'all' ? '' : ' WHERE status = ?';
+    const params = status === 'all' ? [] : [status];
+    const order = status === 'done' ? 'done_at DESC, id DESC' : 'id DESC';
+    return (this.db.prepare(`SELECT * FROM todos${where} ORDER BY ${order} LIMIT 200`).all(...params) as Array<Record<string, unknown>>).map(mapTodoRow);
+  }
+
+  /** Returns undefined if it was not open; the caller notifies the raising agent. */
+  markTodoDone(id: number): Todo | undefined {
+    const result = this.db.prepare(`
+      UPDATE todos SET status = 'done', done_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ? AND status = 'open'
+    `).run(id);
+    return result.changes === 0 ? undefined : this.getTodo(id);
+  }
+
+  /** Returns undefined if it was not done. */
+  reopenTodo(id: number): Todo | undefined {
+    const result = this.db.prepare(`
+      UPDATE todos SET status = 'open', done_at = NULL WHERE id = ? AND status = 'done'
+    `).run(id);
+    return result.changes === 0 ? undefined : this.getTodo(id);
+  }
+
+  countOpenTodos(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM todos WHERE status = 'open'").get() as Record<string, unknown>;
+    return (row['n'] as number) ?? 0;
+  }
+
   countUnseenOpenUpdates(): number {
     const row = this.db.prepare("SELECT COUNT(*) AS n FROM updates WHERE status = 'open' AND seen_at IS NULL").get() as Record<string, unknown>;
     return row['n'] as number;
@@ -1585,6 +1648,20 @@ function mapUpdateRow(row: Record<string, unknown>): Update {
     status: row['status'] as UpdateStatus,
     createdAt: row['created_at'] as string,
     seenAt: (row['seen_at'] as string | null) ?? null,
+    doneAt: (row['done_at'] as string | null) ?? null,
+  };
+}
+
+function mapTodoRow(row: Record<string, unknown>): Todo {
+  return {
+    id: row['id'] as number,
+    agentName: row['agent_name'] as string,
+    title: row['title'] as string,
+    steps: (row['steps'] as string | null) ?? null,
+    decisionId: (row['decision_id'] as number | null) ?? null,
+    topic: (row['topic'] as string | null) ?? null,
+    status: row['status'] as TodoStatus,
+    createdAt: row['created_at'] as string,
     doneAt: (row['done_at'] as string | null) ?? null,
   };
 }

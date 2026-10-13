@@ -175,6 +175,47 @@ describe('collab decide', () => {
   });
 });
 
+describe('collab decide --action-steps', () => {
+  it('attaches steps to their option and rejects an unknown or malformed key', async () => {
+    const { createServer } = await import('node:http');
+    const { spawn } = await import('node:child_process');
+    let received: { url?: string | undefined; body?: any } = {};
+    const server = createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        received = { url: req.url, body: raw ? JSON.parse(raw) : undefined };
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 9, blocking: false, topic: 'issue-2' }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, r));
+    const port = (server.address() as { port: number }).port;
+    const run = (args: string[]) => new Promise<{ status: number | null; stderr: string }>((resolve) => {
+      const child = spawn(COLLAB_BIN, args, {
+        env: { ...process.env, ORCHESTRATOR_URL: `http://127.0.0.1:${port}`, COLLAB_AGENT: 'frontend' },
+      });
+      let stderr = '';
+      child.stderr.on('data', (c) => { stderr += c; });
+      child.on('close', (status) => resolve({ status, stderr }));
+    });
+    const bad = await run(['decide', '--topic', 'issue-2', 'Check the order?', '--option', 'a=Yes', '--action-steps', 'zz=check the order']);
+    assert.equal(bad.status, 2);
+    assert.match(bad.stderr, /--action-steps zz is not one of the option keys/);
+    const malformed = await run(['decide', '--topic', 'issue-2', 'Check the order?', '--option', 'a=Yes', '--action-steps', 'not-keyed']);
+    assert.equal(malformed.status, 2);
+    assert.match(malformed.stderr, /--action-steps must look like/);
+    const good = await run(['decide', '--topic', 'issue-2', 'Check the order?', '--option', 'a=Yes', '--option', 'b=You check the order on stage BM', '--action-steps', 'b=check order 12345 on stage BM']);
+    server.close();
+    assert.equal(good.status, 0);
+    assert.equal(received.url, '/api/decisions');
+    assert.deepEqual(received.body.options, [
+      { key: 'a', label: 'Yes' },
+      { key: 'b', label: 'You check the order on stage BM', steps: 'check order 12345 on stage BM' },
+    ]);
+  });
+});
+
 describe('collab reminder queue warnings', () => {
   // A fake orchestrator holding one agent's reminders, so the real CLI can be run against it.
   async function withServer(reminders: Array<Record<string, unknown>>, created: Record<string, unknown>, fn: (url: string) => Promise<void>) {
