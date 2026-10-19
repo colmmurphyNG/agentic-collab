@@ -22,12 +22,13 @@ describe('decisions (database)', () => {
   });
   after(() => { db.close(); rmSync(tmpDir, { recursive: true, force: true }); });
 
-  it('lists open decisions blocking first, then oldest first', () => {
+  it('lists open decisions blocking first, then newest first', () => {
     const a = db.createDecision({ agentName: 'x', topic: 't', question: 'first', options: [] });
     const b = db.createDecision({ agentName: 'y', topic: 't', question: 'second, blocking', options: [], blocking: true });
     const c = db.createDecision({ agentName: 'x', topic: 't', question: 'third', options: [] });
-    assert.deepEqual(db.listDecisions().map((d) => d.id), [b.id, a.id, c.id]);
-    assert.deepEqual(db.countOpenDecisionsByAgent(), { x: 2, y: 1 });
+    const d = db.createDecision({ agentName: 'y', topic: 't', question: 'fourth, blocking', options: [], blocking: true });
+    assert.deepEqual(db.listDecisions().map((x) => x.id), [d.id, b.id, c.id, a.id]);
+    assert.deepEqual(db.countOpenDecisionsByAgent(), { x: 2, y: 2 });
   });
 
   it('round-trips options and the recommendation, and refuses a recommendation that is not an option', () => {
