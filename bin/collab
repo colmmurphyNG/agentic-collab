@@ -511,7 +511,7 @@ cmd('tmux', 'tmux <agent> -- <tmux args...>', 'Run a constrained tmux command ag
 
 // ── Decisions ──
 
-cmd('decide', 'decide --topic <t> "<question>" --option <key>="<label>" ... [--recommend <key>] [--blocking]  |  decide list [--all]  |  decide withdraw <id>',
+cmd('decide', 'decide --topic <t> "<question>" --option <key>="<label>" ... [--action-steps <key>="<steps>"] [--recommend <key>] [--blocking]  |  decide list [--all]  |  decide withdraw <id>',
   'Raise a decision for the operator to answer from the Decisions tab', async (args) => {
   const me = agentName();
   if (args[0] === 'list') {
@@ -531,9 +531,10 @@ cmd('decide', 'decide --topic <t> "<question>" --option <key>="<label>" ... [--r
     console.log(`withdrew decision #${id}`);
     return;
   }
-  const FLAGS = new Set(['--topic', '--option', '--recommend', '--blocking']);
+  const FLAGS = new Set(['--topic', '--option', '--action-steps', '--recommend', '--blocking']);
   let topic = null, recommended = null, blocking = false;
   const options = [];
+  const actionSteps = new Map(); // option key -> steps; a option with steps is an action for the operator
   const positional = [];
   let endOfOptions = false;
   for (let i = 0; i < args.length; i++) {
@@ -543,6 +544,11 @@ cmd('decide', 'decide --topic <t> "<question>" --option <key>="<label>" ... [--r
     if (a === '--topic' && args[i + 1]) topic = args[++i];
     else if (a === '--recommend' && args[i + 1]) recommended = args[++i];
     else if (a === '--blocking') blocking = true;
+    else if (a === '--action-steps' && args[i + 1]) {
+      const m = args[++i].match(/^([A-Za-z0-9]{1,8})[=:](.+)$/s);
+      if (!m) { console.error('error: --action-steps must look like a="do this, then that" (key is 1-8 letters or digits)'); process.exit(2); }
+      actionSteps.set(m[1], m[2].trim());
+    }
     else if (a === '--option' && args[i + 1]) {
       const m = args[++i].match(/^([A-Za-z0-9]{1,8})[=:](.+)$/s);
       if (!m) { console.error('error: --option must look like a="label" (key is 1-8 letters or digits)'); process.exit(2); }
@@ -554,8 +560,14 @@ cmd('decide', 'decide --topic <t> "<question>" --option <key>="<label>" ... [--r
   }
   const question = positional.join(' ').trim();
   if (!topic || !question) {
-    console.error('usage: collab decide --topic <t> "<question>" --option a="<label>" --option b="<label>" [--recommend a] [--blocking]');
+    console.error('usage: collab decide --topic <t> "<question>" --option a="<label>" --option b="<label>" [--action-steps b="<steps>"] [--recommend a] [--blocking]');
     process.exit(1);
+  }
+  for (const [key, steps] of actionSteps) {
+    const opt = options.find((o) => o.key === key);
+    if (!opt) { console.error(`error: --action-steps ${key} is not one of the option keys`); process.exit(2); }
+    if (steps.length > 500) { console.error(`error: --action-steps ${key} must be at most 500 characters`); process.exit(2); }
+    opt.steps = steps;
   }
   if (recommended && !options.some((o) => o.key === recommended)) {
     console.error(`error: --recommend ${recommended} is not one of the option keys`);
@@ -563,7 +575,7 @@ cmd('decide', 'decide --topic <t> "<question>" --option <key>="<label>" ... [--r
   }
   if (!me) { console.error('error: COLLAB_AGENT is not set'); process.exit(1); }
   const d = await api('POST', '/api/decisions', { agentName: me, topic, question, options, recommended, blocking });
-  console.log(`raised decision #${d.id} (${d.blocking ? 'blocking' : 'non-blocking'}). The answer arrives as a message on topic ${d.topic}.`);
+  console.log(`raised decision #${d.id} (${d.blocking ? 'blocking' : 'non-blocking'}). The answer arrives as a message on topic ${d.topic}.${(d.options || []).some((o) => o.steps) ? ' Options carrying --action-steps open a to-do item for the operator when chosen; you will be told when he marks it done.' : ''}`);
 });
 
 // ── Updates ──

@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="/dashboard/assets/styles/files-panel.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/decisions.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/updates.css">
+  <link rel="stylesheet" href="/dashboard/assets/styles/todo.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/today.css">
 <link rel="stylesheet" href="/dashboard/assets/styles/responsive.css">
 </head>
@@ -34,6 +35,7 @@
     <button id="todayBtn" class="header-btn" title="Conversations from the last day and a half">Today</button>
     <button id="decisionsBtn" class="header-btn" title="Decisions waiting on you">Decisions <span id="decisionsCount" class="decisions-count" style="display:none"></span></button>
     <button id="updatesBtn" class="header-btn" title="Finished work from agents">Updates <span id="updatesCount" class="updates-count" style="display:none"></span></button>
+    <button id="todosBtn" class="header-btn" title="Actions for you that came out of a decision">To-do <span id="todosCount" class="todos-count" style="display:none"></span></button>
     <button id="settingsBtn" class="header-btn">Settings</button>
     <div class="conn-status">
       <div class="conn-dot" id="connDot"></div>
@@ -79,6 +81,7 @@
   <settings-panel id="settingsPanel" style="display:none" class="thread-panel"></settings-panel>
   <decisions-panel id="decisionsPanel" style="display:none" class="thread-panel decisions-panel"></decisions-panel>
   <updates-panel id="updatesPanel" style="display:none" class="thread-panel updates-panel"></updates-panel>
+  <todo-panel id="todosPanel" style="display:none" class="thread-panel todos-panel"></todo-panel>
   <today-panel id="todayPanel" style="display:none" class="thread-panel today-panel"></today-panel>
 </div>
 
@@ -94,6 +97,7 @@ import '/dashboard/assets/jobs-panel.ts';
 import '/dashboard/assets/files-panel.ts';
 import '/dashboard/assets/decisions-panel.ts';
 import '/dashboard/assets/updates-panel.ts';
+import '/dashboard/assets/todo-panel.ts';
 import '/dashboard/assets/today-panel.ts';
 import { loadServerPrefs } from '/dashboard/assets/settings.ts';
 import '/dashboard/assets/settings.ts';
@@ -283,6 +287,7 @@ import { pushUrlState, restorePendingAgent, setup as setupUrlState } from '/dash
   }
   function openDecisions() {
     if (settingsPanel.style.display !== 'none') closeSettings();
+    if (todosPanel && todosPanel.style.display !== 'none') closeTodos();
     decisionsPanel.style.display = 'flex';
     threadPanel.style.display = 'none';
     decisionsBtn.style.color = 'var(--accent)';
@@ -311,6 +316,7 @@ import { pushUrlState, restorePendingAgent, setup as setupUrlState } from '/dash
   function openUpdates() {
     if (settingsPanel.style.display !== 'none') closeSettings();
     if (decisionsPanel.style.display !== 'none') closeDecisions();
+    if (todosPanel && todosPanel.style.display !== 'none') closeTodos();
     updatesPanel.style.display = 'flex';
     threadPanel.style.display = 'none';
     updatesBtn.style.color = 'var(--accent)';
@@ -328,13 +334,46 @@ import { pushUrlState, restorePendingAgent, setup as setupUrlState } from '/dash
     if (updatesPanel.style.display !== 'none') closeUpdates();
   });
 
+  // ── To-dos toggle ──
+  const todosBtn = document.getElementById('todosBtn');
+  const todosPanel = document.getElementById('todosPanel');
+  function closeTodos() {
+    todosPanel.style.display = 'none';
+    // Leave the thread hidden if another panel replaced this one.
+    if (settingsPanel.style.display === 'none' && decisionsPanel.style.display === 'none' &&
+        updatesPanel.style.display === 'none' && todayPanel.style.display === 'none') threadPanel.style.display = '';
+    todosBtn.style.color = 'var(--text-dim)';
+    todosBtn.style.borderColor = 'var(--border)';
+  }
+  function openTodos() {
+    if (settingsPanel.style.display !== 'none') closeSettings();
+    if (decisionsPanel.style.display !== 'none') closeDecisions();
+    if (updatesPanel.style.display !== 'none') closeUpdates();
+    if (todayPanel.style.display !== 'none') closeToday();
+    todosPanel.style.display = 'flex';
+    threadPanel.style.display = 'none';
+    todosBtn.style.color = 'var(--accent)';
+    todosBtn.style.borderColor = 'var(--accent)';
+    todosPanel.render();
+  }
+  todosBtn.addEventListener('click', () => {
+    if (todosPanel.style.display !== 'none') closeTodos(); else openTodos();
+  });
+  todosPanel.addEventListener('close-todos', closeTodos);
+  for (const btn of [settingsBtn, decisionsBtn, updatesBtn, todayBtn]) {
+    btn.addEventListener('click', () => { if (todosPanel.style.display !== 'none') closeTodos(); });
+  }
+  document.getElementById('agentList').addEventListener('click', () => {
+    if (todosPanel.style.display !== 'none') closeTodos();
+  });
+
   // ── Today toggle ──
   const todayBtn = document.getElementById('todayBtn');
   const todayPanel = document.getElementById('todayPanel');
   function closeToday() {
     todayPanel.style.display = 'none';
     // Leave the thread hidden if another panel replaced this one.
-    if (settingsPanel.style.display === 'none' && decisionsPanel.style.display === 'none' && updatesPanel.style.display === 'none') threadPanel.style.display = '';
+    if (settingsPanel.style.display === 'none' && decisionsPanel.style.display === 'none' && updatesPanel.style.display === 'none' && todosPanel.style.display === 'none') threadPanel.style.display = '';
     todayBtn.style.color = 'var(--text-dim)';
     todayBtn.style.borderColor = 'var(--border)';
   }
@@ -342,6 +381,7 @@ import { pushUrlState, restorePendingAgent, setup as setupUrlState } from '/dash
     if (settingsPanel.style.display !== 'none') closeSettings();
     if (decisionsPanel.style.display !== 'none') closeDecisions();
     if (updatesPanel.style.display !== 'none') closeUpdates();
+    if (todosPanel && todosPanel.style.display !== 'none') closeTodos();
     todayPanel.style.display = 'flex';
     threadPanel.style.display = 'none';
     todayBtn.style.color = 'var(--accent)';

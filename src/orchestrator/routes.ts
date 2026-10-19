@@ -14,7 +14,7 @@ import { renderMarkdown, wrapInHtml, DOC_PAGES } from '../docs/render.ts';
 import { hostname } from 'node:os';
 import type { Database } from './database.ts';
 import type { WebSocketServer } from '../shared/websocket-server.ts';
-import type { AgentState, DashboardMessage, DestinationRecord, EngineType, FileRecord, PendingMessage, ProxyCommand, ProxyResponse, ProxyRegistration } from '../shared/types.ts';
+import type { AgentState, DashboardMessage, DecisionOption, DestinationRecord, EngineType, FileRecord, PendingMessage, ProxyCommand, ProxyResponse, ProxyRegistration, TodoStatus } from '../shared/types.ts';
 import type { TelegramDispatcher } from './telegram.ts';
 import { sanitizeMessage, generateMessageId } from '../shared/sanitize.ts';
 import { parseCron, nextFireAt as cronNextFireAt } from '../shared/cron.ts';
@@ -2946,14 +2946,20 @@ route('POST', '/api/decisions', async (req, res, _match, ctx) => {
   }
   const rawOptions = body.options === undefined ? [] : body.options;
   if (!Array.isArray(rawOptions) || rawOptions.length > 8) return json(res, 400, { error: 'options must be a list of at most 8' });
-  const options: Array<{ key: string; label: string }> = [];
+  const options: DecisionOption[] = [];
   for (const o of rawOptions) {
     const key = (o as { key?: unknown })?.key;
     const label = (o as { label?: unknown })?.label;
     if (typeof key !== 'string' || !DECISION_KEY_RE.test(key)) return json(res, 400, { error: 'each option key must be 1-8 letters or digits' });
     if (typeof label !== 'string' || !label.trim() || label.length > 300) return json(res, 400, { error: `option "${key}" needs a label of at most 300 characters` });
     if (options.some((x) => x.key === key)) return json(res, 400, { error: `duplicate option key "${key}"` });
-    options.push({ key, label: sanitizeMessage(label) });
+    const steps = (o as { steps?: unknown })?.steps;
+    if (steps !== undefined && steps !== null) {
+      if (typeof steps !== 'string' || !steps.trim() || steps.length > 500) {
+        return json(res, 400, { error: `option "${key}" steps must be at most 500 characters` });
+      }
+    }
+    options.push({ key, label: sanitizeMessage(label), steps: steps ? sanitizeMessage(steps.trim()) : null });
   }
   let recommended: string | null = null;
   if (body.recommended !== undefined && body.recommended !== null) {
@@ -3000,7 +3006,7 @@ route('POST', '/api/decisions/:id/answer', async (req, res, match, ctx) => {
   if (!existing) return json(res, 404, { error: 'Decision not found' });
   if (existing.status !== 'open') return json(res, 409, { error: `Decision is already ${existing.status}` });
 
-  let chosen: { key: string; label: string } | undefined;
+  let chosen: DecisionOption | undefined;
   if (body.choice !== undefined && body.choice !== null) {
     chosen = existing.options.find((o) => o.key === body.choice);
     if (!chosen) return json(res, 400, { error: 'choice must be one of the option keys' });
@@ -3012,7 +3018,22 @@ route('POST', '/api/decisions/:id/answer', async (req, res, match, ctx) => {
   const closed = ctx.db.closeDecision(id, 'answered', answer);
   if (!closed) return json(res, 409, { error: 'Decision was answered elsewhere just now' });
 
-  const reply = `DECISION #${closed.id} answered: ${answer}\n(Your question: ${closed.question})`;
+  // An option that carries steps is an action for the operator: choosing it opens a to-do
+  // item carrying them, and marking that done tells this agent. Keep it out of the reply
+  // when the answer is only text or a plain choice.
+  let todo = null;
+  if (chosen?.steps) {
+    todo = ctx.db.createTodo({
+      agentName: closed.agentName,
+      title: chosen.label,
+      steps: chosen.steps,
+      decisionId: closed.id,
+      topic: closed.topic,
+    });
+    broadcastTodosChange(ctx);
+  }
+  const reply = `DECISION #${closed.id} answered: ${answer}\n(Your question: ${closed.question})` +
+    (todo ? `\n(A to-do item #${todo.id} opened for the operator: ${chosen!.label}; you will be told when it is done.)` : '');
   enqueueAndDeliver(ctx, {
     agentName: closed.agentName,
     displayMessage: reply,
@@ -3125,6 +3146,51 @@ route('POST', '/api/updates/:id/reopen', async (_req, res, match, ctx) => {
   const reopened = ctx.db.reopenUpdate(id);
   if (!reopened) return json(res, 409, { error: 'Update is already open' });
   broadcastUpdatesChange(ctx);
+  json(res, 200, reopened);
+});
+
+// ── To-dos ──
+// Actions for the operator that came out of a decision. An option with steps opens one when it
+// is chosen; marking it done notifies the raising agent on the decision's topic.
+
+route('GET', '/api/todos', async (req, res, _match, ctx) => {
+  const url = new URL(req.url!, `http://${req.headers.host}`);
+  const status = url.searchParams.get('status') ?? 'open';
+  if (!['open', 'done', 'all'].includes(status)) return json(res, 400, { error: 'status must be open, done or all' });
+  json(res, 200, ctx.db.listTodos({ status: status as TodoStatus | 'all' }));
+});
+
+route('POST', '/api/todos/:id/done', async (_req, res, match, ctx) => {
+  const id = updateIdFrom(match);
+  if (id === null) return json(res, 400, { error: 'Invalid to-do ID' });
+  const existing = ctx.db.getTodo(id);
+  if (!existing) return json(res, 404, { error: 'To-do not found' });
+  const done = ctx.db.markTodoDone(id);
+  if (!done) return json(res, 409, { error: 'To-do is already done' });
+  // Tell the agent that raised the decision, so it learns its action happened without asking.
+  const topic = done.topic ?? 'general';
+  const reply = `TO-DO #${done.id} done: ${done.title}${done.decisionId ? ` (from decision #${done.decisionId})` : ''}`;
+  enqueueAndDeliver(ctx, {
+    agentName: done.agentName,
+    displayMessage: reply,
+    envelope: buildReplyEnvelope('dashboard', topic, reply),
+    topic,
+    sourceAgent: 'dashboard',
+    targetAgent: done.agentName,
+    queueSourceAgent: null,
+  });
+  broadcastTodosChange(ctx);
+  json(res, 200, done);
+});
+
+route('POST', '/api/todos/:id/reopen', async (_req, res, match, ctx) => {
+  const id = updateIdFrom(match);
+  if (id === null) return json(res, 400, { error: 'Invalid to-do ID' });
+  const existing = ctx.db.getTodo(id);
+  if (!existing) return json(res, 404, { error: 'To-do not found' });
+  const reopened = ctx.db.reopenTodo(id);
+  if (!reopened) return json(res, 409, { error: 'To-do is already open' });
+  broadcastTodosChange(ctx);
   json(res, 200, reopened);
 });
 
@@ -3770,6 +3836,10 @@ function broadcastDecisionUpdate(ctx: RouteContext): void {
 
 function broadcastUpdatesChange(ctx: RouteContext): void {
   ctx.wss.broadcast(JSON.stringify({ type: 'updates_change', updates: ctx.db.listUpdates({ status: 'open' }), unseenUpdates: ctx.db.countUnseenOpenUpdates() }));
+}
+
+function broadcastTodosChange(ctx: RouteContext): void {
+  ctx.wss.broadcast(JSON.stringify({ type: 'todos_change', todos: ctx.db.listTodos({ status: 'open' }), openTodos: ctx.db.countOpenTodos() }));
 }
 
 function broadcastReminderUpdate(ctx: RouteContext): void {

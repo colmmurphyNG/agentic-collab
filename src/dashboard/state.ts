@@ -35,6 +35,8 @@ export const state = {
   openDecisionsByAgent: {},
   // Open updates (finished work agents posted for the Updates tab), and how many are unseen.
   updates: [],
+  todos: [],
+  openTodos: 0,
   unseenUpdates: 0,
   editingPersona: false,
   indicators: {},
