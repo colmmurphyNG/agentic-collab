@@ -920,7 +920,7 @@ export class Database {
     const status = opts.status ?? 'open';
     if (status !== 'all') { where.push('status = ?'); params.push(status); }
     if (opts.agentName) { where.push('agent_name = ?'); params.push(opts.agentName); }
-    const order = status === 'open' ? 'blocking DESC, id ASC' : 'COALESCE(answered_at, created_at) DESC, id DESC';
+    const order = status === 'open' ? 'blocking DESC, id DESC' : 'COALESCE(answered_at, created_at) DESC, id DESC';
     const sql = `SELECT * FROM decisions ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${order} LIMIT ?`;
     params.push(opts.limit ?? 200);
     return (this.db.prepare(sql).all(...params) as Array<Record<string, unknown>>).map(mapDecisionRow);

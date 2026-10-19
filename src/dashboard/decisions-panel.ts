@@ -1,6 +1,6 @@
 /**
  * <decisions-panel> Web Component.
- * Every open decision from every agent in one list, blocking first then oldest, with one-click
+ * Every open decision from every agent in one list, blocking first then newest, with one-click
  * "accept recommendation", pick-an-option, or a free-text reply. Answers go back to the agent
  * as an ordinary dashboard message (server side, POST /api/decisions/:id/answer).
  *
