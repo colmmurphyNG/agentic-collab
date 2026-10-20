@@ -1520,9 +1520,8 @@ async function captureDestroyHandoff(
 
     let recentMessages: DashboardMessage[] = [];
     try {
-      const threads = ctx.db.getDashboardThreads(agent.name);
-      const all = threads[agent.name] ?? [];
-      recentMessages = all.slice(-10);
+      const threads = ctx.db.getDashboardThreads(agent.name, 10);
+      recentMessages = threads[agent.name] ?? [];
     } catch (err) {
       console.warn(`[handoff] ${agent.name}: dashboard-message fetch failed: ${(err as Error).message}`);
     }

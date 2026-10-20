@@ -606,17 +606,23 @@ export class Database {
     return mapDashboardMessageRow(row);
   }
 
-  getDashboardThreads(agentName?: string): Record<string, DashboardMessage[]> {
+  /** `limitPerAgent` keeps only each agent's newest N messages; still returned oldest first. */
+  getDashboardThreads(agentName?: string, limitPerAgent?: number): Record<string, DashboardMessage[]> {
     const query = `
-      SELECT dm.*, pm.status AS delivery_status
-      FROM dashboard_messages dm
-      LEFT JOIN pending_messages pm ON dm.queue_id = pm.id
-      WHERE 1=1${agentName ? ' AND dm.agent = ?' : ''}
-      ORDER BY dm.created_at ASC
+      SELECT * FROM (
+        SELECT dm.*, pm.status AS delivery_status,
+          ROW_NUMBER() OVER (PARTITION BY dm.agent ORDER BY dm.created_at DESC, dm.id DESC) AS recency
+        FROM dashboard_messages dm
+        LEFT JOIN pending_messages pm ON dm.queue_id = pm.id
+        WHERE 1=1${agentName ? ' AND dm.agent = ?' : ''}
+      )
+      ${limitPerAgent ? 'WHERE recency <= ?' : ''}
+      ORDER BY created_at ASC, id ASC
     `;
-    const rows = agentName
-      ? this.db.prepare(query).all(agentName) as Array<Record<string, unknown>>
-      : this.db.prepare(query).all() as Array<Record<string, unknown>>;
+    const params: Array<string | number> = [];
+    if (agentName) params.push(agentName);
+    if (limitPerAgent) params.push(limitPerAgent);
+    const rows = this.db.prepare(query).all(...params) as Array<Record<string, unknown>>;
 
     const threads: Record<string, DashboardMessage[]> = {};
     for (const row of rows) {

@@ -338,6 +338,18 @@ describe('Database', () => {
       assert.equal(threads['thread-agent-b'], undefined);
     });
 
+    it('keeps only the newest messages per agent when given a limit, oldest first', () => {
+      for (let n = 1; n <= 5; n++) db.addDashboardMessage('cap-agent-a', 'to_agent', `a${n}`);
+      for (let n = 1; n <= 2; n++) db.addDashboardMessage('cap-agent-b', 'to_agent', `b${n}`);
+
+      const threads = db.getDashboardThreads(undefined, 3);
+      assert.deepEqual(threads['cap-agent-a']!.map(m => m.message), ['a3', 'a4', 'a5']);
+      assert.deepEqual(threads['cap-agent-b']!.map(m => m.message), ['b1', 'b2']);
+
+      const unlimited = db.getDashboardThreads('cap-agent-a');
+      assert.equal(unlimited['cap-agent-a']!.length, 5);
+    });
+
     it('searches messages by text', () => {
       db.addDashboardMessage('search-agent-a', 'to_agent', 'deploy the widget service');
       db.addDashboardMessage('search-agent-a', 'from_agent', 'widget deployed successfully');
