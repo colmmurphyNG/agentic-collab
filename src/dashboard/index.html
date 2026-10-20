@@ -360,7 +360,7 @@ import { pushUrlState, restorePendingAgent, setup as setupUrlState } from '/dash
     if (todosPanel.style.display !== 'none') closeTodos(); else openTodos();
   });
   todosPanel.addEventListener('close-todos', closeTodos);
-  for (const btn of [settingsBtn, decisionsBtn, updatesBtn, todayBtn]) {
+  for (const btn of [settingsBtn, decisionsBtn, updatesBtn]) {
     btn.addEventListener('click', () => { if (todosPanel.style.display !== 'none') closeTodos(); });
   }
   document.getElementById('agentList').addEventListener('click', () => {
