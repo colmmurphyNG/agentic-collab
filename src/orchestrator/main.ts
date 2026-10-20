@@ -340,10 +340,13 @@ server.on('upgrade', (req, socket, head) => {
   }
 });
 
+// Full history grew the init frame past what a browser will accept (156 MB), so send only recent messages.
+const INIT_MESSAGES_PER_AGENT = 200;
+
 // On WS connect, send init event
 wss.onConnect((client) => {
   const agents = db.listAgents();
-  const threads = db.getDashboardThreads();
+  const threads = db.getDashboardThreads(undefined, INIT_MESSAGES_PER_AGENT);
   const rawProxies = db.listProxies();
   const unreadCounts = db.getUnreadCounts();
   // Enrich proxies with version match status
