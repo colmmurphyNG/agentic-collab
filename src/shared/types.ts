@@ -55,7 +55,7 @@ export type PipelineStep =
   | { type: 'keystrokes'; actions: SendAction[] }
   | { type: 'keystroke'; key: string }
   | { type: 'shell'; command: string; env?: LaunchEnv }
-  | { type: 'capture'; lines: number; regex: string; var: string }
+  | { type: 'capture'; lines: number; regex: string; var: string; attempts?: number; intervalMs?: number }
   | { type: 'wait'; ms: number };
 
 /** A hook field value: flat string (legacy), structured object, or pipeline (array of steps). */

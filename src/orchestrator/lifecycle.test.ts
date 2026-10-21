@@ -283,9 +283,10 @@ describe('Lifecycle', () => {
     // A bare test DB seeds no engine config and leaves hook_start NULL, and the
     // fallback hook dispatches no capture step at all — so the pipeline has to be
     // supplied here or these tests assert against a path they never reach.
+    // One attempt keeps the miss tests from sleeping through the retry budget.
     const HOOK_WITH_CAPTURE = JSON.stringify([
       { type: 'shell', command: 'claude' },
-      { type: 'capture', lines: 30, regex: 'uuid', var: 'SESSION_ID' },
+      { type: 'capture', lines: 30, regex: 'uuid', var: 'SESSION_ID', attempts: 1 },
     ]);
 
     function ctxWithPane(pane: string): LifecycleContext {
@@ -351,6 +352,77 @@ describe('Lifecycle', () => {
         db.getAgent('cap-hit')?.capturedVars?.['SESSION_ID'], NEW_ID,
         'a successful capture must overwrite the stale value',
       );
+    });
+  });
+
+  describe('spawnAgent — capture waits for a slow screen', () => {
+    const NEW_ID = 'acbc5499-5a68-41d9-8970-424fe3804d90';
+
+    // The pane shows the id only from the Nth read on, as when /status renders late.
+    function ctxWithLatePane(showFrom: number): { ctx: LifecycleContext; reads: () => number } {
+      let reads = 0;
+      return {
+        reads: () => reads,
+        ctx: {
+          ...ctx,
+          proxyDispatch: async (_proxyId: string, command: ProxyCommand): Promise<ProxyResponse> => {
+            proxyCommands.push(command);
+            if (command.action === 'has_session') return { ok: true, data: false };
+            if (command.action === 'capture') {
+              reads++;
+              return { ok: true, data: reads >= showFrom ? `Session ID: ${NEW_ID}\n` : '> \n' };
+            }
+            return { ok: true };
+          },
+        },
+      };
+    }
+
+    it('should keep reading until the id appears, then stop', async () => {
+      const hook = JSON.stringify([
+        { type: 'shell', command: '/status' },
+        { type: 'capture', lines: 30, regex: 'uuid', var: 'SESSION_ID', attempts: 5, intervalMs: 1 },
+      ]);
+      db.createAgent({ name: 'cap-late', engine: 'claude', cwd: '/tmp', proxyId: 'p1', hookStart: hook });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      const late = ctxWithLatePane(3);
+
+      await spawnAgent(late.ctx, { name: 'cap-late', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+
+      assert.equal(db.getAgent('cap-late')?.capturedVars?.['SESSION_ID'], NEW_ID);
+      assert.equal(late.reads(), 3, 'reading must stop at the first match');
+      assert.equal(db.getEvents('cap-late', 50).some(e => e.event === 'capture_miss'), false);
+    });
+
+    it('should report a miss only after the last attempt', async () => {
+      const hook = JSON.stringify([
+        { type: 'shell', command: '/status' },
+        { type: 'capture', lines: 30, regex: 'uuid', var: 'SESSION_ID', attempts: 3, intervalMs: 1 },
+      ]);
+      db.createAgent({ name: 'cap-never', engine: 'claude', cwd: '/tmp', proxyId: 'p1', hookStart: hook });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      const never = ctxWithLatePane(Infinity);
+
+      await spawnAgent(never.ctx, { name: 'cap-never', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+
+      assert.equal(never.reads(), 3);
+      const misses = db.getEvents('cap-never', 50).filter(e => e.event === 'capture_miss');
+      assert.equal(misses.length, 1, 'one miss per step, not one per read');
+    });
+
+    // The live engine config sets no attempts, so the default is what protects it.
+    it('should retry by default when the step sets no attempts', async () => {
+      const hook = JSON.stringify([
+        { type: 'shell', command: '/status' },
+        { type: 'capture', lines: 30, regex: 'uuid', var: 'SESSION_ID' },
+      ]);
+      db.createAgent({ name: 'cap-default', engine: 'claude', cwd: '/tmp', proxyId: 'p1', hookStart: hook });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      const late = ctxWithLatePane(2);
+
+      await spawnAgent(late.ctx, { name: 'cap-default', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+
+      assert.equal(db.getAgent('cap-default')?.capturedVars?.['SESSION_ID'], NEW_ID);
     });
   });
 
