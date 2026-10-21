@@ -154,6 +154,10 @@ function wrapLaunchResult(result: HookResult, agent: AgentRecord, personaFile: s
   return result;
 }
 
+/** How many times a capture step reads the pane before giving up, and the gap between reads. */
+export const CAPTURE_DEFAULT_ATTEMPTS = 10;
+export const CAPTURE_DEFAULT_INTERVAL_MS = 500;
+
 /**
  * Normalize pipeline steps loaded from JSON (DB indicators, engine configs,
  * custom buttons) to the canonical PipelineStep shape.
@@ -281,17 +285,30 @@ async function dispatchHookResult(
           });
         }
       } else if (step.type === 'capture') {
-        const captureResult = await ctx.proxyDispatch(proxyId, {
-          action: 'capture',
-          sessionName: tmuxSession,
-          lines: step.lines,
-        });
-        if (opts?.agentName && captureResult.ok && typeof captureResult.data === 'string') {
-          try {
-            const regexStr = step.regex === 'uuid'
-              ? '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
-              : step.regex;
-            const re = new RegExp(regexStr);
+        // Polled, because the screen being read is usually opened by the step just
+        // before it and one read can land before it has rendered. A miss there
+        // costs more than the id: the Escape that follows reaches the CLI before
+        // the screen opens, the screen opens anyway, and it swallows the next
+        // message pasted into the pane while the queue reports it delivered.
+        const attempts = Math.max(1, step.attempts ?? CAPTURE_DEFAULT_ATTEMPTS);
+        const intervalMs = Math.max(0, step.intervalMs ?? CAPTURE_DEFAULT_INTERVAL_MS);
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+          const captureResult = await ctx.proxyDispatch(proxyId, {
+            action: 'capture',
+            sessionName: tmuxSession,
+            lines: step.lines,
+          });
+          if (!opts?.agentName) break;
+          if (captureResult.ok && typeof captureResult.data === 'string') {
+            let re: RegExp;
+            try {
+              re = new RegExp(step.regex === 'uuid'
+                ? '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
+                : step.regex);
+            } catch (err) {
+              console.warn(`[lifecycle] ${opts.agentName}: capture regex failed for $${step.var}:`, (err as Error).message);
+              break;
+            }
             // Strip CLI-failure lines first so a UUID inside an error message
             // ("No conversation found with session ID: <uuid>") cannot be
             // captured and re-written to the DB as the live session id.
@@ -313,25 +330,28 @@ async function dispatchHookResult(
                   });
                 }
               }
-            } else {
-              // A miss leaves whatever the previous launch stored, which then reads
-              // as this launch's id. Silence made that indistinguishable from
-              // success: the only trace was a missing log line, and absence is not
-              // something anyone reads for.
-              const stale = ctx.db.getAgent(opts.agentName)?.capturedVars?.[step.var] ?? null;
-              console.warn(
-                `[lifecycle] ${opts.agentName}: capture for $${step.var} matched nothing in ${step.lines} lines`
-                + ` — retaining previous value ${stale ?? 'none'}, which may now be stale`,
-              );
-              ctx.db.logEvent(opts.agentName, 'capture_miss', undefined, {
-                var: step.var,
-                lines: step.lines,
-                retainedValue: stale,
-              });
+              break;
             }
-          } catch (err) {
-            console.warn(`[lifecycle] ${opts.agentName}: capture regex failed for $${step.var}:`, (err as Error).message);
           }
+          if (attempt < attempts) {
+            await sleep(intervalMs);
+            continue;
+          }
+          // A miss leaves whatever the previous launch stored, which then reads
+          // as this launch's id. Silence made that indistinguishable from
+          // success: the only trace was a missing log line, and absence is not
+          // something anyone reads for.
+          const stale = ctx.db.getAgent(opts.agentName)?.capturedVars?.[step.var] ?? null;
+          console.warn(
+            `[lifecycle] ${opts.agentName}: capture for $${step.var} matched nothing in ${step.lines} lines`
+            + ` after ${attempts} attempts — retaining previous value ${stale ?? 'none'}, which may now be stale`,
+          );
+          ctx.db.logEvent(opts.agentName, 'capture_miss', undefined, {
+            var: step.var,
+            lines: step.lines,
+            attempts,
+            retainedValue: stale,
+          });
         }
       } else if (step.type === 'wait') {
         await sleep(step.ms);
