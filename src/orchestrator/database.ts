@@ -43,6 +43,7 @@ import {
   buildMigrationStatements,
 } from './field-registry.ts';
 import { buildManifest, type ManifestRow } from './manifest.ts';
+import { openScratchIndexDb, scratchIndexPathFor } from './scratch-search.ts';
 
 const SCHEMA = `
   PRAGMA journal_mode = WAL;
@@ -178,11 +179,18 @@ const SCHEMA = `
 
 export class Database {
   private db: DatabaseSync;
+  /** Scratch file index, kept in its own file so it can be deleted and rebuilt. */
+  readonly scratchDb: DatabaseSync;
+  /** True when the SQLite build has FTS5; scratch content search needs it. */
+  readonly scratchFts: boolean;
 
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
     this.db.exec(SCHEMA);
     this.migrate();
+    const scratch = openScratchIndexDb(scratchIndexPathFor(dbPath));
+    this.scratchDb = scratch.db;
+    this.scratchFts = scratch.fts;
   }
 
   private migrate(): void {
@@ -407,6 +415,7 @@ export class Database {
 
   close(): void {
     this.db.close();
+    this.scratchDb.close();
   }
 
   // ── Agents ──

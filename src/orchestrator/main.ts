@@ -8,7 +8,7 @@ import { readFileSync, mkdirSync, readdirSync, statSync, existsSync } from 'node
 import { join, dirname } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 import { Database } from './database.ts';
-import { createRouter, startTelegramPolling, type RouteContext } from './routes.ts';
+import { createRouter, startTelegramPolling, scratchIndexerState, type RouteContext } from './routes.ts';
 import { TelegramDispatcher } from './telegram.ts';
 import { WebSocketServer } from '../shared/websocket-server.ts';
 import { LockManager } from '../shared/lock.ts';
@@ -468,6 +468,10 @@ server.listen(PORT, '0.0.0.0', async () => {
   } catch (err) {
     console.error('[orchestrator] Persona sync failed:', err);
   }
+
+  // Scratch index: one background scan after startup, then on an interval.
+  scratchIndexerState.create!(db).start();
+  if (!db.scratchFts) console.warn('[scratch-index] SQLite has no FTS5; scratch content search is disabled');
 
   // Poll persona directory for changes (fs.watch unreliable on Docker bind mounts)
   const personasDir = getPersonasDir();
