@@ -8,9 +8,69 @@
  * over thousands of files never stalls other requests.
  */
 
+import { rmSync } from 'node:fs';
 import { open } from 'node:fs/promises';
-import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import { listMarkdownRecursiveAsync } from './scratch-index.ts';
+
+// Metadata for listing/paging, plus a contentless FTS5 table keyed by
+// scratch_docs.id so file bodies are not stored twice. id is AUTOINCREMENT so a
+// rowid is never reused for a different file.
+const SCRATCH_SCHEMA = `
+  PRAGMA journal_mode = WAL;
+  PRAGMA busy_timeout = 5000;
+  CREATE TABLE IF NOT EXISTS scratch_docs (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    path     TEXT NOT NULL UNIQUE,
+    project  TEXT NOT NULL,
+    persona  TEXT NOT NULL,
+    abs_path TEXT NOT NULL,
+    size     INTEGER NOT NULL,
+    mtime_ms INTEGER NOT NULL,
+    indexed  INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_scratch_docs_mtime ON scratch_docs(mtime_ms DESC);
+  CREATE INDEX IF NOT EXISTS idx_scratch_docs_persona ON scratch_docs(persona, mtime_ms DESC);
+`;
+
+/** The index sits next to the main database, never inside it. */
+export function scratchIndexPathFor(dbPath: string): string {
+  return dbPath === ':memory:' ? ':memory:' : `${dbPath.replace(/\.db$/, '')}.scratch-index.db`;
+}
+
+function openWithSchema(path: string): DatabaseSync {
+  const db = new DatabaseSync(path);
+  try {
+    db.exec(SCRATCH_SCHEMA);
+    return db;
+  } catch (err) {
+    db.close();
+    throw err;
+  }
+}
+
+/**
+ * Everything in the index can be rebuilt from the files on disk, so a file that
+ * will not open is deleted and recreated rather than repaired. Without FTS5 the
+ * page and filename search keep working; only content search is switched off.
+ */
+export function openScratchIndexDb(path: string): { db: DatabaseSync; fts: boolean } {
+  let db: DatabaseSync;
+  try {
+    db = openWithSchema(path);
+  } catch (err) {
+    console.warn(`[scratch-index] recreating ${path}: ${(err as Error).message}`);
+    for (const p of [path, `${path}-wal`, `${path}-shm`]) rmSync(p, { force: true });
+    db = openWithSchema(path);
+  }
+  try {
+    db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS scratch_fts USING fts5(body, content='', contentless_delete=1, tokenize='trigram')`);
+    db.prepare(`SELECT rowid FROM scratch_fts WHERE scratch_fts MATCH 'abc' LIMIT 1`).all();
+    return { db, fts: true };
+  } catch {
+    return { db, fts: false };
+  }
+}
 
 /** Indexed body per file; the rest of a larger file is not searchable. */
 export const SCRATCH_BODY_CAP_BYTES = 512 * 1024;

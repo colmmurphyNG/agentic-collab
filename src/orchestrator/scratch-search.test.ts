@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
 import {
   createScratchIndexer, readCapped, searchScratchContent, searchScratchNames, listScratchDocs, ftsPhrase, scratchSnippet,
-  SCRATCH_BODY_CAP_BYTES,
+  SCRATCH_BODY_CAP_BYTES, openScratchIndexDb, scratchIndexPathFor,
 } from './scratch-search.ts';
 import { Database } from './database.ts';
 import { createRouter, scratchIndexerState, type RouteContext } from './routes.ts';
@@ -26,7 +26,7 @@ describe('scratch indexer', () => {
   let persona = 'alpha';
   function indexer(fts = db.scratchFts) {
     return createScratchIndexer({
-      db: db.rawDb, fts, log: () => {},
+      db: db.scratchDb, fts, log: () => {},
       roots: () => [{ project: 'proj', absRoot: join(root, 'scratch'), urlPrefix: '' }],
       attribute: () => persona,
       readBody: async (p, cap) => { reads.push(p); return readCapped(p, cap); },
@@ -62,17 +62,17 @@ describe('scratch indexer', () => {
     s = await indexer().runOnce();
     assert.equal(s.changed, 1);
     assert.deepEqual(reads, [join(root, 'scratch', 'one.md')]);
-    assert.equal((searchScratchContent(db.rawDb, true, 'brown fox', 10) as any).items.length, 0, 'old body is gone');
-    assert.equal((searchScratchContent(db.rawDb, true, 'purple otter', 10) as any).items.length, 1);
-    assert.equal(listScratchDocs(db.rawDb, { offset: 0, limit: 10 }).total, 2, 'update replaces the row, no duplicate');
+    assert.equal((searchScratchContent(db.scratchDb, true, 'brown fox', 10) as any).items.length, 0, 'old body is gone');
+    assert.equal((searchScratchContent(db.scratchDb, true, 'purple otter', 10) as any).items.length, 1);
+    assert.equal(listScratchDocs(db.scratchDb, { offset: 0, limit: 10 }).total, 2, 'update replaces the row, no duplicate');
   });
 
   it('finds content by substring and file names by terms', () => {
-    const c = searchScratchContent(db.rawDb, true, 'ripeEnab', 10);
+    const c = searchScratchContent(db.scratchDb, true, 'ripeEnab', 10);
     assert.equal(c.status, 'ok');
     assert.deepEqual((c as any).items.map((i: any) => i.path), ['proj/sub/two.md']);
-    assert.deepEqual(searchScratchNames(db.rawDb, 'SUB two', 10).map((d) => d.path), ['proj/sub/two.md']);
-    assert.deepEqual(searchScratchNames(db.rawDb, '%', 10), [], 'LIKE wildcards are literal');
+    assert.deepEqual(searchScratchNames(db.scratchDb, 'SUB two', 10).map((d) => d.path), ['proj/sub/two.md']);
+    assert.deepEqual(searchScratchNames(db.scratchDb, '%', 10), [], 'LIKE wildcards are literal');
   });
 
   it('re-attributes personas for unchanged files without re-reading them', async () => {
@@ -80,22 +80,22 @@ describe('scratch indexer', () => {
     const s = await indexer().runOnce();
     assert.equal(s.changed, 0);
     assert.equal(reads.length, 0);
-    assert.equal(listScratchDocs(db.rawDb, { persona: 'beta', offset: 0, limit: 10 }).total, 2);
+    assert.equal(listScratchDocs(db.scratchDb, { persona: 'beta', offset: 0, limit: 10 }).total, 2);
   });
 
   it('removes rows and index entries for vanished files', async () => {
     unlinkSync(join(root, 'scratch', 'sub', 'two.md'));
     const s = await indexer().runOnce();
     assert.equal(s.removed, 1);
-    assert.equal(listScratchDocs(db.rawDb, { offset: 0, limit: 10 }).total, 1);
-    assert.equal((searchScratchContent(db.rawDb, true, 'fail-open', 10) as any).items.length, 0);
+    assert.equal(listScratchDocs(db.scratchDb, { offset: 0, limit: 10 }).total, 1);
+    assert.equal((searchScratchContent(db.scratchDb, true, 'fail-open', 10) as any).items.length, 0);
   });
 
   it('keeps the index when every root walks empty (unreadable mount)', async () => {
-    const empty = createScratchIndexer({ db: db.rawDb, fts: true, log: () => {}, roots: () => [], attribute: () => 'x' });
+    const empty = createScratchIndexer({ db: db.scratchDb, fts: true, log: () => {}, roots: () => [], attribute: () => 'x' });
     const s = await empty.runOnce();
     assert.equal(s.removed, 0);
-    assert.equal(listScratchDocs(db.rawDb, { offset: 0, limit: 10 }).total, 1);
+    assert.equal(listScratchDocs(db.scratchDb, { offset: 0, limit: 10 }).total, 1);
   });
 
   it('never overlaps runs: a call during a run joins it', async () => {
@@ -108,17 +108,17 @@ describe('scratch indexer', () => {
   it('caps the indexed body per file', async () => {
     touch(join(root, 'scratch', 'big.md'), `${'x'.repeat(SCRATCH_BODY_CAP_BYTES)}\nTAILMARKER`, 1_700_000_200);
     await indexer().runOnce();
-    assert.equal((searchScratchContent(db.rawDb, true, 'TAILMARKER', 10) as any).items.length, 0);
+    assert.equal((searchScratchContent(db.scratchDb, true, 'TAILMARKER', 10) as any).items.length, 0);
   });
 
   it('survives hostile query text without throwing', () => {
     for (const q of ['"', '""', 'a" OR "b', 'foo*', 'x AND y', '(abc)', 'NEAR(a b)', 'body:abc', "'; DROP TABLE scratch_docs; --", '\u0000abc']) {
-      const r = searchScratchContent(db.rawDb, true, q, 10);
+      const r = searchScratchContent(db.scratchDb, true, q, 10);
       assert.notEqual(r.status, 'error', `query ${JSON.stringify(q)} errored`);
-      searchScratchNames(db.rawDb, q, 10);
+      searchScratchNames(db.scratchDb, q, 10);
     }
-    assert.equal(searchScratchContent(db.rawDb, true, '', 10).status, 'too_short');
-    assert.equal(searchScratchContent(db.rawDb, true, 'ab', 10).status, 'too_short');
+    assert.equal(searchScratchContent(db.scratchDb, true, '', 10).status, 'too_short');
+    assert.equal(searchScratchContent(db.scratchDb, true, 'ab', 10).status, 'too_short');
     assert.equal(ftsPhrase('a"b'), '"a""b"');
   });
 
@@ -131,16 +131,39 @@ describe('scratch indexer', () => {
   it('without FTS keeps the metadata and reports content search as unavailable', async () => {
     const plain = new Database(join(root, 'nofts.db'));
     const ix = createScratchIndexer({
-      db: plain.rawDb, fts: false, log: () => {},
+      db: plain.scratchDb, fts: false, log: () => {},
       roots: () => [{ project: 'proj', absRoot: join(root, 'scratch'), urlPrefix: '' }],
       attribute: () => 'alpha',
       readBody: async () => { throw new Error('bodies must not be read without FTS'); },
     });
     const s = await ix.runOnce();
     assert.ok(s.changed >= 1);
-    assert.equal(searchScratchContent(plain.rawDb, false, 'quick', 10).status, 'unavailable');
-    assert.ok(searchScratchNames(plain.rawDb, 'one', 10).length >= 1);
+    assert.equal(searchScratchContent(plain.scratchDb, false, 'quick', 10).status, 'unavailable');
+    assert.ok(searchScratchNames(plain.scratchDb, 'one', 10).length >= 1);
     plain.close();
+  });
+});
+
+describe('scratch index storage', () => {
+  it('lives in its own file beside the main database, not inside it', () => {
+    const root = tmp();
+    const db = new Database(join(root, 'orchestrator.db'));
+    assert.equal(scratchIndexPathFor(join(root, 'orchestrator.db')), join(root, 'orchestrator.scratch-index.db'));
+    assert.equal(db.rawDb.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'scratch%'").all().length, 0);
+    assert.ok(db.scratchDb.prepare("SELECT name FROM sqlite_master WHERE name = 'scratch_docs'").get());
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('recreates an index file that will not open', () => {
+    const root = tmp();
+    const path = join(root, 'x.scratch-index.db');
+    writeFileSync(path, 'this is not a sqlite database '.repeat(200));
+    const { db, fts } = openScratchIndexDb(path);
+    assert.equal(fts, true);
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM scratch_docs').get() as { n: number }).n, 0);
+    db.close();
+    rmSync(root, { recursive: true, force: true });
   });
 });
 
@@ -214,13 +237,13 @@ describe('scratch HTTP endpoints', () => {
   });
 
   it('reports content search unavailable when FTS5 is missing, filename search still works', async () => {
-    db.scratchFts = false;
+    (db as { scratchFts: boolean }).scratchFts = false;
     try {
       const r = await (await fetch(url('/api/scratch/search?q=f07'))).json() as any;
       assert.equal(r.content.status, 'unavailable');
       assert.equal(r.files.length, 1);
       assert.equal((await fetch(url('/scratch'))).status, 200);
-    } finally { db.scratchFts = true; }
+    } finally { (db as { scratchFts: boolean }).scratchFts = true; }
   });
 
   it('applies the same auth as /scratch', async () => {

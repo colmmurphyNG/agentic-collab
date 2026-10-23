@@ -147,7 +147,7 @@ describe('scratch index build', () => {
     const summary = await indexOnce(db, () => { reads++; return new Set(['alpha']); });
     assert.equal(reads, 1);
     assert.equal(summary.seen, 3005);
-    const alpha = db.rawDb.prepare("SELECT COUNT(*) AS n FROM scratch_docs WHERE persona = 'alpha'").get() as { n: number };
+    const alpha = db.scratchDb.prepare("SELECT COUNT(*) AS n FROM scratch_docs WHERE persona = 'alpha'").get() as { n: number };
     assert.equal(alpha.n, 5); // attribution still uses the set
   });
 

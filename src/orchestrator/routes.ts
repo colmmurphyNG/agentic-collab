@@ -1616,7 +1616,7 @@ function createScratchIndexerFor(db: Database, opts: ScratchIndexerFactoryOption
   const personas = opts.personas ?? getKnownPersonas;
   let known = new Set<string>();
   return createScratchIndexer({
-    db: db.rawDb,
+    db: db.scratchDb,
     fts: db.scratchFts,
     ...(opts.intervalMs !== undefined && { intervalMs: opts.intervalMs }),
     ...(opts.log && { log: opts.log }),
@@ -1672,7 +1672,7 @@ route('GET', '/api/scratch/list', async (req, res, _match, ctx) => {
   const limit = clampInt(q.get('limit'), 50, 1, SCRATCH_PAGE_MAX);
   const offset = clampInt(q.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER);
   const persona = q.get('persona') || undefined;
-  const { total, items } = listScratchDocs(ctx.db.rawDb, { offset, limit, ...(persona && { persona }) });
+  const { total, items } = listScratchDocs(ctx.db.scratchDb, { offset, limit, ...(persona && { persona }) });
   json(res, 200, { total, offset, limit, items: items.map(scratchDocJson) });
 });
 
@@ -1682,7 +1682,7 @@ route('GET', '/api/scratch/search', async (req, res, _match, ctx) => {
   const q = normalizeQuery(params.get('q'));
   const limit = clampInt(params.get('limit'), 25, 1, SCRATCH_SEARCH_MAX);
   if (!q) return json(res, 200, { q, files: [], content: { status: 'ok', items: [] } });
-  const db = ctx.db.rawDb;
+  const db = ctx.db.scratchDb;
   const files = searchScratchNames(db, q, limit).map(scratchDocJson);
   const found = searchScratchContent(db, ctx.db.scratchFts, q, limit);
   if (found.status !== 'ok') return json(res, 200, { q, files, content: { status: found.status, minChars: MIN_CONTENT_QUERY_CHARS } });
@@ -1700,7 +1700,7 @@ function buildScratchShellHtml(dbh: Database): string {
   if (getProjectRenderRoots().size === 0) {
     return wrapMarkdownPage('Scratch', renderMarkdown('# Scratch files\n\n_No projects are configured for scratch rendering. Set `PROJECT_RENDER_ROOTS` to a comma-separated list of absolute paths._'));
   }
-  const db = dbh.rawDb;
+  const db = dbh.scratchDb;
   const totals = scratchTotals(db);
   const latest = listScratchDocs(db, { offset: 0, limit: 10 }).items;
   const personas = scratchPersonaCounts(db).sort((a, b) => {

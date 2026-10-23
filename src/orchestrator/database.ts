@@ -43,6 +43,7 @@ import {
   buildMigrationStatements,
 } from './field-registry.ts';
 import { buildManifest, type ManifestRow } from './manifest.ts';
+import { openScratchIndexDb, scratchIndexPathFor } from './scratch-search.ts';
 
 const SCHEMA = `
   PRAGMA journal_mode = WAL;
@@ -178,13 +179,18 @@ const SCHEMA = `
 
 export class Database {
   private db: DatabaseSync;
+  /** Scratch file index, kept in its own file so it can be deleted and rebuilt. */
+  readonly scratchDb: DatabaseSync;
   /** True when the SQLite build has FTS5; scratch content search needs it. */
-  scratchFts = false;
+  readonly scratchFts: boolean;
 
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
     this.db.exec(SCHEMA);
     this.migrate();
+    const scratch = openScratchIndexDb(scratchIndexPathFor(dbPath));
+    this.scratchDb = scratch.db;
+    this.scratchFts = scratch.fts;
   }
 
   private migrate(): void {
@@ -400,33 +406,6 @@ export class Database {
         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
       )
     `);
-
-    // Scratch file index: metadata for listing/paging, plus a contentless FTS5
-    // table keyed by scratch_docs.id so file bodies are not stored twice. id is
-    // AUTOINCREMENT so a rowid is never reused for a different file.
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS scratch_docs (
-        id       INTEGER PRIMARY KEY AUTOINCREMENT,
-        path     TEXT NOT NULL UNIQUE,
-        project  TEXT NOT NULL,
-        persona  TEXT NOT NULL,
-        abs_path TEXT NOT NULL,
-        size     INTEGER NOT NULL,
-        mtime_ms INTEGER NOT NULL,
-        indexed  INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE INDEX IF NOT EXISTS idx_scratch_docs_mtime ON scratch_docs(mtime_ms DESC);
-      CREATE INDEX IF NOT EXISTS idx_scratch_docs_persona ON scratch_docs(persona, mtime_ms DESC);
-    `);
-    // Without FTS5 (or if the table was made by a build that had it) the page and
-    // filename search keep working; only content search is switched off.
-    try {
-      this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS scratch_fts USING fts5(body, content='', contentless_delete=1, tokenize='trigram')`);
-      this.db.prepare(`SELECT rowid FROM scratch_fts WHERE scratch_fts MATCH 'abc' LIMIT 1`).all();
-      this.scratchFts = true;
-    } catch {
-      this.scratchFts = false;
-    }
   }
 
   /** Expose raw handle for LockManager (shares same DB connection). */
@@ -436,6 +415,7 @@ export class Database {
 
   close(): void {
     this.db.close();
+    this.scratchDb.close();
   }
 
   // ── Agents ──
