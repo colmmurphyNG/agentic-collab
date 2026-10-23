@@ -37,7 +37,11 @@ import { sessionName } from '../shared/agent-entity.ts';
 import { paneEndsWithShellPrompt } from './cli-failure-patterns.ts';
 import { recordTelegramInbound, getActiveTelegramRoute, maybeAutoClearOnCommPref, isCommPrefDirective, isQuietCommand, clearAllTelegramRoutes, clearTelegramRoute, listTelegramRoutes, _resetTelegramRoutes } from './telegram-routing.ts';
 import { updateLinkError } from './update-link.ts';
-import { listMarkdownRecursiveAsync, createSwrCache, logIfSlow, type SwrCache } from './scratch-index.ts';
+import { logIfSlow } from './scratch-index.ts';
+import {
+  createScratchIndexer, scratchIndexStatus, scratchTotals, scratchPersonaCounts, listScratchDocs, searchScratchNames,
+  searchScratchContent, scratchSnippet, normalizeQuery, clampInt, MIN_CONTENT_QUERY_CHARS, type ScratchDocRow,
+} from './scratch-search.ts';
 import { parseManifestHours } from './manifest.ts';
 import type { MessageDispatcher } from './message-dispatcher.ts';
 import type { UsagePoller } from './usage-poller.ts';
@@ -203,14 +207,13 @@ type Route = {
   handler: RouteHandler;
 };
 
-const SCRATCH_INDEX_TTL_MS = 60_000;
+type ScratchIndexerFactoryOptions = { personas?: () => Set<string>; intervalMs?: number; log?: (l: string) => void };
 
-/** Module-level so the cache survives across routers; `build` is exposed for tests. */
-export const scratchIndexState: {
-  key: string;
-  cache: SwrCache<string> | null;
-  build: ((personas?: () => Set<string>) => Promise<string>) | null;
-} = { key: '', cache: null, build: null };
+/** The scratch helpers live inside buildRoutes, so the indexer factory is handed
+ *  out here once `createRouter` has run. */
+export const scratchIndexerState: {
+  create: ((db: Database, opts?: ScratchIndexerFactoryOptions) => ReturnType<typeof createScratchIndexer>) | null;
+} = { create: null };
 
 function buildRoutes(): Route[] {
   const routes: Route[] = [];
@@ -1607,18 +1610,26 @@ function attributePersona(relPath: string, project: string, known: Set<string>):
   return getProjectPrimaryPersona()[project] ?? 'unattributed';
 }
 
-// The index walk is expensive (thousands of files over a bind mount), so it is
-// built asynchronously and served stale-while-revalidate. The cache is keyed on
-// the env that shapes the output so a changed configuration never serves old HTML.
-function scratchIndexCacheFor(): SwrCache<string> {
-  const key = [process.env['PROJECT_RENDER_ROOTS'], process.env['PROJECT_PRIMARY_PERSONAS'], process.env['PERSONAS_DIR']].join('\0');
-  if (scratchIndexState.key !== key || !scratchIndexState.cache) {
-    scratchIndexState.key = key;
-    scratchIndexState.cache = createSwrCache(() => buildScratchIndexHtml(), SCRATCH_INDEX_TTL_MS);
-  }
-  return scratchIndexState.cache;
+/** The scratch indexer for `db`: walks every configured scratch root (async, over
+ *  a bind mount) into the SQLite index that `/scratch` and its search read from. */
+function createScratchIndexerFor(db: Database, opts: ScratchIndexerFactoryOptions = {}) {
+  const personas = opts.personas ?? getKnownPersonas;
+  let known = new Set<string>();
+  return createScratchIndexer({
+    db: db.rawDb,
+    fts: db.scratchFts,
+    ...(opts.intervalMs !== undefined && { intervalMs: opts.intervalMs }),
+    ...(opts.log && { log: opts.log }),
+    // Persona set and roots are re-read each run so new personas/projects are picked up.
+    roots: () => {
+      known = personas();
+      return [...getProjectRenderRoots()].flatMap(([project, projectRoot]) =>
+        discoverScratchRoots(projectRoot).map((r) => ({ project, absRoot: r.absRoot, urlPrefix: r.urlPrefix })));
+    },
+    attribute: (project, relPath) => attributePersona(relPath, project, known),
+  });
 }
-scratchIndexState.build = (personas) => buildScratchIndexHtml(personas);
+scratchIndexerState.create = createScratchIndexerFor;
 
 /**
  * 401 for a route people reach by clicking a link. A browser gets a page that
@@ -1638,74 +1649,137 @@ function unauthorizedLink(req: IncomingMessage, res: ServerResponse): void {
     + '<p><a href="/dashboard">Reload the dashboard</a></p></body>');
 }
 
+const SCRATCH_PAGE_MAX = 200;
+const SCRATCH_SEARCH_MAX = 100;
+const SCRATCH_SNIPPET_MAX = 20;
+
+const escHtml = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const scratchHref = (path: string) => `/scratch/${path.split('/').map(encodeURIComponent).join('/')}`;
+
+function scratchDocJson(d: ScratchDocRow) {
+  return { path: d.path, href: scratchHref(d.path), project: d.project, persona: d.persona, size: d.size, mtimeMs: d.mtimeMs, age: formatRelativeAge(d.mtimeMs), sizeLabel: formatBytes(d.size) };
+}
+
 route('GET', '/scratch', async (req, res, _match, ctx) => {
   if (!authorize(ctx.orchestratorSecret, req)) return unauthorizedLink(req, res);
-  const html = await scratchIndexCacheFor().get();
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(html);
+  res.end(buildScratchShellHtml(ctx.db));
 });
 
-async function buildScratchIndexHtml(personas: () => Set<string> = getKnownPersonas): Promise<string> {
-  const roots = getProjectRenderRoots();
-  if (roots.size === 0) {
+route('GET', '/api/scratch/list', async (req, res, _match, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return unauthorizedLink(req, res);
+  const q = new URL(req.url ?? '', 'http://localhost').searchParams;
+  const limit = clampInt(q.get('limit'), 50, 1, SCRATCH_PAGE_MAX);
+  const offset = clampInt(q.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER);
+  const persona = q.get('persona') || undefined;
+  const { total, items } = listScratchDocs(ctx.db.rawDb, { offset, limit, ...(persona && { persona }) });
+  json(res, 200, { total, offset, limit, items: items.map(scratchDocJson) });
+});
+
+route('GET', '/api/scratch/search', async (req, res, _match, ctx) => {
+  if (!authorize(ctx.orchestratorSecret, req)) return unauthorizedLink(req, res);
+  const params = new URL(req.url ?? '', 'http://localhost').searchParams;
+  const q = normalizeQuery(params.get('q'));
+  const limit = clampInt(params.get('limit'), 25, 1, SCRATCH_SEARCH_MAX);
+  if (!q) return json(res, 200, { q, files: [], content: { status: 'ok', items: [] } });
+  const db = ctx.db.rawDb;
+  const files = searchScratchNames(db, q, limit).map(scratchDocJson);
+  const found = searchScratchContent(db, ctx.db.scratchFts, q, limit);
+  if (found.status !== 'ok') return json(res, 200, { q, files, content: { status: found.status, minChars: MIN_CONTENT_QUERY_CHARS } });
+  // Snippets come from disk for the first few hits only; the index stores no bodies.
+  const items = await Promise.all(found.items.map(async (d, i) => ({
+    ...scratchDocJson(d),
+    snippet: i < SCRATCH_SNIPPET_MAX ? await scratchSnippet(d.absPath, q) : '',
+  })));
+  json(res, 200, { q, files, content: { status: 'ok', items } });
+});
+
+/** Light shell: totals, latest 10, one collapsed section per persona, a search
+ *  box. File lists and search results are fetched by the inline script. */
+function buildScratchShellHtml(dbh: Database): string {
+  if (getProjectRenderRoots().size === 0) {
     return wrapMarkdownPage('Scratch', renderMarkdown('# Scratch files\n\n_No projects are configured for scratch rendering. Set `PROJECT_RENDER_ROOTS` to a comma-separated list of absolute paths._'));
   }
-
-  // Gather all files across all projects with persona attribution.
-  type Entry = { project: string; relPath: string; size: number; mtimeMs: number; persona: string };
-  const all: Entry[] = [];
-  const known = personas(); // once per build, not per file
-  for (const [project, projectRoot] of roots.entries()) {
-    for (const root of discoverScratchRoots(projectRoot)) {
-      for (const f of await listMarkdownRecursiveAsync(root.absRoot)) {
-        const relPath = `${root.urlPrefix}${f.relPath}`;
-        all.push({ project, relPath, size: f.size, mtimeMs: f.mtimeMs, persona: attributePersona(relPath, project, known) });
-      }
-    }
-  }
-  all.sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-  const lines: string[] = ['# Scratch files', ''];
-  lines.push(`_Total: ${all.length} files across ${roots.size} projects. Updated ${all[0] ? formatRelativeAge(all[0].mtimeMs) : 'never'}._`);
-  lines.push('');
-
-  // ── Latest 10 ──
-  lines.push('## Latest 10');
-  lines.push('');
-  if (all.length === 0) {
-    lines.push('_No markdown files yet._');
-  } else {
-    for (const f of all.slice(0, 10)) {
-      lines.push(`- [${f.project}/${f.relPath}](/scratch/${f.project}/${f.relPath}) — **${f.persona}**, ${formatBytes(f.size)}, ${formatRelativeAge(f.mtimeMs)}`);
-    }
-  }
-  lines.push('');
-
-  // ── Grouped by persona ──
-  lines.push('## By persona');
-  lines.push('');
-  const byPersona = new Map<string, Entry[]>();
-  for (const f of all) {
-    if (!byPersona.has(f.persona)) byPersona.set(f.persona, []);
-    byPersona.get(f.persona)!.push(f);
-  }
-  // Sort personas by total file count desc, with 'unattributed' last
-  const personaOrder = [...byPersona.entries()].sort((a, b) => {
-    if (a[0] === 'unattributed') return 1;
-    if (b[0] === 'unattributed') return -1;
-    return b[1].length - a[1].length;
+  const db = dbh.rawDb;
+  const totals = scratchTotals(db);
+  const latest = listScratchDocs(db, { offset: 0, limit: 10 }).items;
+  const personas = scratchPersonaCounts(db).sort((a, b) => {
+    if (a.persona === 'unattributed') return 1;
+    if (b.persona === 'unattributed') return -1;
+    return b.count - a.count;
   });
-  for (const [persona, files] of personaOrder) {
-    lines.push(`### ${persona} (${files.length} file${files.length === 1 ? '' : 's'})`);
-    lines.push('');
-    for (const f of files) {
-      lines.push(`- [${f.project}/${f.relPath}](/scratch/${f.project}/${f.relPath}) — ${formatBytes(f.size)}, ${formatRelativeAge(f.mtimeMs)}`);
-    }
-    lines.push('');
-  }
-
-  return wrapMarkdownPage('Scratch', renderMarkdown(lines.join('\n')));
+  const st = scratchIndexStatus;
+  const note = totals.files === 0
+    ? (st.running || st.lastFinishedAt === null ? 'Indexing in progress; reload in a moment.' : 'No markdown files yet.')
+    : `Index scanned ${st.lastFinishedAt ? formatRelativeAge(st.lastFinishedAt) : 'at startup'}${st.running ? ', rescanning now' : ''}.`;
+  const row = (d: ScratchDocRow, withPersona: boolean) =>
+    `<li><a href="${escHtml(scratchHref(d.path))}">${escHtml(d.path)}</a> &mdash; ${withPersona ? `<b>${escHtml(d.persona)}</b>, ` : ''}${formatBytes(d.size)}, ${formatRelativeAge(d.mtimeMs)}</li>`;
+  const body = [
+    '<h1>Scratch files</h1>',
+    `<p><em>Total: ${totals.files} files across ${totals.projects} projects. ${escHtml(note)}</em></p>`,
+    '<input id="q" type="search" placeholder="Search file names and contents" autocomplete="off" style="width:100%;padding:8px;font:inherit;box-sizing:border-box">',
+    '<div id="results"></div>',
+    '<h2>Latest 10</h2>',
+    `<ul>${latest.map((d) => row(d, true)).join('')}</ul>`,
+    '<h2>By persona</h2>',
+    ...personas.map((p) => `<details data-persona="${escHtml(p.persona)}"><summary><b>${escHtml(p.persona)}</b> (${p.count} file${p.count === 1 ? '' : 's'})</summary><ul></ul><button hidden>Load more</button></details>`),
+    `<script>${SCRATCH_PAGE_JS}</script>`,
+  ].join('\n');
+  return wrapMarkdownPage('Scratch', body);
 }
+
+// Every path and snippet is inserted with textContent / attributes, never as HTML.
+const SCRATCH_PAGE_JS = `
+(function () {
+  var PAGE = 100;
+  function li(d, withSnippet) {
+    var el = document.createElement('li');
+    var a = document.createElement('a');
+    a.href = d.href; a.textContent = d.path; el.appendChild(a);
+    el.appendChild(document.createTextNode(' \\u2014 ' + d.persona + ', ' + d.sizeLabel + ', ' + d.age));
+    if (withSnippet && d.snippet) {
+      var s = document.createElement('div');
+      s.style.cssText = 'color:#656d76;font-size:90%;white-space:pre-wrap;word-break:break-word';
+      s.textContent = d.snippet; el.appendChild(s);
+    }
+    return el;
+  }
+  function getJson(url) { return fetch(url, { credentials: 'same-origin' }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }); }
+  document.querySelectorAll('details[data-persona]').forEach(function (det) {
+    var ul = det.querySelector('ul'), btn = det.querySelector('button'), offset = 0, loaded = false;
+    function more() {
+      getJson('/api/scratch/list?persona=' + encodeURIComponent(det.dataset.persona) + '&offset=' + offset + '&limit=' + PAGE).then(function (r) {
+        r.items.forEach(function (d) { ul.appendChild(li(d)); });
+        offset += r.items.length; btn.hidden = offset >= r.total;
+      }).catch(function (e) { ul.appendChild(document.createTextNode('Failed to load: ' + e.message)); });
+    }
+    det.addEventListener('toggle', function () { if (det.open && !loaded) { loaded = true; more(); } });
+    btn.addEventListener('click', more);
+  });
+  var q = document.getElementById('q'), out = document.getElementById('results'), timer = null, seq = 0;
+  function section(title, items, snip) {
+    var h = document.createElement('h3'); h.textContent = title; out.appendChild(h);
+    var ul = document.createElement('ul'); items.forEach(function (d) { ul.appendChild(li(d, snip)); }); out.appendChild(ul);
+  }
+  function note(t) { var p = document.createElement('p'); p.textContent = t; out.appendChild(p); }
+  function search() {
+    var term = q.value.trim(), mine = ++seq;
+    out.textContent = '';
+    if (!term) return;
+    getJson('/api/scratch/search?q=' + encodeURIComponent(term)).then(function (r) {
+      if (mine !== seq) return;
+      out.textContent = '';
+      section('File names (' + r.files.length + ')', r.files, false);
+      var c = r.content;
+      if (c.status === 'ok') section('Contents (' + c.items.length + ')', c.items, true);
+      else if (c.status === 'unavailable') note('Content search unavailable on this server.');
+      else if (c.status === 'too_short') note('Type at least ' + c.minChars + ' characters to search contents.');
+      else note('Content search failed.');
+    }).catch(function (e) { if (mine === seq) { out.textContent = ''; note('Search failed: ' + e.message); } });
+  }
+  q.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(search, 250); });
+})();
+`;
 
 route('GET', '/scratch/:project/:path+', async (req, res, match, ctx) => {
   if (!authorize(ctx.orchestratorSecret, req)) return unauthorizedLink(req, res);

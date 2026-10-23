@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server } from 'node:http';
 import { listMarkdownRecursiveAsync, createSwrCache, logIfSlow, SCRATCH_SKIP_MARKER } from './scratch-index.ts';
-import { scratchIndexState, createRouter, type RouteContext } from './routes.ts';
+import { scratchIndexerState, createRouter, type RouteContext } from './routes.ts';
+import { Database } from './database.ts';
 
 function tmp(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), 'scratch-index-test-')));
@@ -104,12 +105,13 @@ describe('createSwrCache', () => {
   });
 });
 
-async function buildScratchIndex(personas: () => Set<string>): Promise<string> {
-  createRouter({ orchestratorSecret: null } as RouteContext); // registers the builder
-  return scratchIndexState.build!(personas);
+async function indexOnce(db: Database, personas: () => Set<string>) {
+  createRouter({ orchestratorSecret: null } as RouteContext); // registers the factory
+  return scratchIndexerState.create!(db, { personas, log: () => {} }).runOnce();
 }
 
 describe('scratch index build', () => {
+  let db: Database;
   let root: string;
   let personas: string;
   let prevRoots: string | undefined;
@@ -130,37 +132,42 @@ describe('scratch index build', () => {
     writeFileSync(join(personas, 'alpha.md'), '---\nengine: claude\n---\n');
     process.env['PROJECT_RENDER_ROOTS'] = proj;
     process.env['PERSONAS_DIR'] = personas;
+    db = new Database(join(root, 'idx.db'));
   });
   after(() => {
+    db.close();
     if (prevRoots === undefined) delete process.env['PROJECT_RENDER_ROOTS']; else process.env['PROJECT_RENDER_ROOTS'] = prevRoots;
     if (prevPersonasDir === undefined) delete process.env['PERSONAS_DIR']; else process.env['PERSONAS_DIR'] = prevPersonasDir;
     rmSync(root, { recursive: true, force: true });
     rmSync(personas, { recursive: true, force: true });
   });
 
-  it('reads the known persona set once per build, not once per file', async () => {
+  it('reads the known persona set once per run, not once per file', async () => {
     let reads = 0;
-    const html = await buildScratchIndex(() => { reads++; return new Set(['alpha']); });
+    const summary = await indexOnce(db, () => { reads++; return new Set(['alpha']); });
     assert.equal(reads, 1);
-    assert.match(html, /alpha \(5 files\)/); // attribution still uses the set
-    assert.match(html, /3005 files|Total: 3005/);
+    assert.equal(summary.seen, 3005);
+    const alpha = db.rawDb.prepare("SELECT COUNT(*) AS n FROM scratch_docs WHERE persona = 'alpha'").get() as { n: number };
+    assert.equal(alpha.n, 5); // attribution still uses the set
   });
 
-  it('lets other work run while a build over thousands of files is in progress', async () => {
+  it('lets other work run while an index run over thousands of files is in progress', async () => {
+    const fresh = new Database(join(root, 'idx2.db'));
     let ticks = 0;
     let maxGap = 0;
     let last = Date.now();
     const timer = setInterval(() => { const n = Date.now(); maxGap = Math.max(maxGap, n - last); last = n; ticks++; }, 5);
-    const html = await buildScratchIndex(() => new Set());
+    const summary = await indexOnce(fresh, () => new Set());
     clearInterval(timer);
-    assert.match(html, /Total: 3005/);
-    assert.ok(ticks > 0, 'timer must fire during the build');
+    fresh.close();
+    assert.equal(summary.changed, 3005);
+    assert.ok(ticks > 0, 'timer must fire during the run');
     assert.ok(maxGap < 1000, `event loop stalled for ${maxGap}ms`);
   });
 });
 
 describe('skipped folders over HTTP', () => {
-  let root: string; let server: Server; let port: number; let prev: string | undefined;
+  let root: string; let server: Server; let port: number; let prev: string | undefined; let db: Database;
   before(async () => {
     root = tmp();
     prev = process.env['PROJECT_RENDER_ROOTS'];
@@ -170,19 +177,22 @@ describe('skipped folders over HTTP', () => {
     writeFileSync(join(proj, 'scratch', 'idx', SCRATCH_SKIP_MARKER), '');
     writeFileSync(join(proj, 'scratch', 'idx', 'hidden.md'), '# hidden but servable');
     process.env['PROJECT_RENDER_ROOTS'] = proj;
-    const router = createRouter({ orchestratorSecret: null } as RouteContext);
+    db = new Database(join(root, 'skip.db'));
+    const router = createRouter({ orchestratorSecret: null, db } as RouteContext);
+    await scratchIndexerState.create!(db, { log: () => {} }).runOnce();
     server = createServer((req, res) => { void router(req, res); });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
     port = (server.address() as { port: number }).port;
   });
   after(() => {
     server.close();
+    db.close();
     if (prev === undefined) delete process.env['PROJECT_RENDER_ROOTS']; else process.env['PROJECT_RENDER_ROOTS'] = prev;
     rmSync(root, { recursive: true, force: true });
   });
 
   it('omits the folder from the index but still serves its files', async () => {
-    const index = await (await fetch(`http://127.0.0.1:${port}/scratch`)).text();
+    const index = await (await fetch(`http://127.0.0.1:${port}/api/scratch/list`)).text();
     assert.match(index, /skipproj\/listed\.md/);
     assert.ok(!index.includes('hidden.md'));
     const direct = await fetch(`http://127.0.0.1:${port}/scratch/skipproj/idx/hidden.md`);

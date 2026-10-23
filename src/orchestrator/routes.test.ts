@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, realpathSync
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Database } from './database.ts';
-import { createRouter, routeTelegramMessage, pruneJunkFiles, isJunkFile, type RouteContext } from './routes.ts';
+import { createRouter, scratchIndexerState, routeTelegramMessage, pruneJunkFiles, isJunkFile, type RouteContext } from './routes.ts';
 import { recordTelegramInbound, listTelegramRoutes, _resetTelegramRoutes } from './telegram-routing.ts';
 import type { TelegramDispatcher } from './telegram.ts';
 import { WebSocketServer } from '../shared/websocket-server.ts';
@@ -1709,6 +1709,7 @@ describe('API Routes — /scratch (R: render-only endpoint)', () => {
     } as RouteContext;
 
     const router = createRouter(ctx);
+    await scratchIndexerState.create!(db, { log: () => {} }).runOnce();
     server = createServer(async (req, res) => { await router(req, res); });
     await new Promise<void>((resolve) => {
       server.listen(0, () => {
@@ -1746,17 +1747,21 @@ describe('API Routes — /scratch (R: render-only endpoint)', () => {
     return { status: resp.status, data };
   }
 
-  it('GET /scratch renders an index grouped by project with markdown links', async () => {
+  it('GET /scratch renders a light shell and /api/scratch/list pages the files', async () => {
     const { status, body } = await getHtml('/scratch');
     assert.equal(status, 200);
-    assert.match(body, /project-a/);
-    assert.match(body, /project-b/);
-    // Both files in project-a should appear, with hrefs to /scratch/<project>/<relpath>.
-    assert.match(body, /\/scratch\/project-a\/top\.md/);
-    assert.match(body, /\/scratch\/project-a\/sub\/deep\.md/);
-    assert.match(body, /\/scratch\/project-b\/b\.md/);
+    assert.match(body, /Total: 6 files across 3 projects/);
+    assert.match(body, /Latest 10/);
+    assert.match(body, /id="q"/);
+    const { data } = await getJson('/api/scratch/list?limit=200');
+    const hrefs = data.items.map((i: any) => i.href);
+    assert.deepEqual([...hrefs].sort(), [
+      '/scratch/project-a/sub/deep.md', '/scratch/project-a/top.md', '/scratch/project-b/b.md',
+      '/scratch/project-c/c-top.md', '/scratch/project-c/subapp/nested.md', '/scratch/project-c/subapp/pr-1500-review/comments.md',
+    ]);
+    assert.equal(data.total, 6);
     // Non-markdown sibling must not appear in the index.
-    assert.ok(!body.includes('secret.txt'), 'non-.md files must not be listed');
+    assert.ok(!JSON.stringify(data).includes('secret.txt'), 'non-.md files must not be listed');
   });
 
   it('GET /scratch/:project/:path+ renders a .md file as HTML', async () => {
@@ -1894,17 +1899,18 @@ describe('API Routes — /scratch (R: render-only endpoint)', () => {
 
   // ── nested-scratch discovery (monorepo layouts like project-a/retail-react-app/scratch) ──
 
-  it('GET /scratch surfaces nested-scratch files with the subdir as a URL prefix', async () => {
-    const { status, body } = await getHtml('/scratch');
+  it('the list API surfaces nested-scratch files with the subdir as a URL prefix', async () => {
+    const { status, data } = await getJson('/api/scratch/list?limit=200');
     assert.equal(status, 200);
+    const paths: string[] = data.items.map((i: any) => i.path);
     // Top-level project-c file still appears at the bare path.
-    assert.match(body, /\/scratch\/project-c\/c-top\.md/);
+    assert.ok(paths.includes('project-c/c-top.md'));
     // Nested file appears with the `subapp/` prefix, NOT `subapp/scratch/`
-    // (the inner `scratch/` is implicit — the discoverScratchRoots root strips it).
-    assert.match(body, /\/scratch\/project-c\/subapp\/nested\.md/);
-    assert.match(body, /\/scratch\/project-c\/subapp\/pr-1500-review\/comments\.md/);
+    // (the inner `scratch/` is implicit; the discoverScratchRoots root strips it).
+    assert.ok(paths.includes('project-c/subapp/nested.md'));
+    assert.ok(paths.includes('project-c/subapp/pr-1500-review/comments.md'));
     // Sibling dir without its own scratch/ must not be scanned.
-    assert.ok(!body.includes('should-not-appear'), 'subdir without scratch/ must not be walked');
+    assert.ok(!paths.some((p) => p.includes('should-not-appear')), 'subdir without scratch/ must not be walked');
   });
 
   it('GET /scratch/:project/subapp/<file> renders a nested-scratch .md file', async () => {
@@ -1926,14 +1932,9 @@ describe('API Routes — /scratch (R: render-only endpoint)', () => {
   });
 
   it('attributes pr-NNNN-* nested-scratch dirs to prev (canonical PR-reviewer)', async () => {
-    const { status, body } = await getHtml('/scratch');
-    assert.equal(status, 200);
-    // The pr-1500-review entry must list **prev** as its persona (not the project-a
-    // primary fallback of `pwa`). The list row is markdown rendered to HTML:
-    // `… — <strong>prev</strong>, …`. The relevant slice should contain BOTH the
-    // path and the strong-tagged persona.
-    const prRowMatch = /pr-1500-review[\s\S]{0,200}?<strong>prev<\/strong>/i.exec(body);
-    assert.ok(prRowMatch, `expected pr-1500-review row to attribute to <strong>prev</strong> — body slice: ${body.slice(0, 500)}`);
+    // Not the project-a primary fallback of `pwa`.
+    const { data } = await getJson('/api/scratch/list?persona=prev');
+    assert.deepEqual(data.items.map((i: any) => i.path), ['project-c/subapp/pr-1500-review/comments.md']);
   });
 
   it('path-traversal `..` is rejected on nested-scratch URLs too', async () => {
