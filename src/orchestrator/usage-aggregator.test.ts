@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { UsageAggregator, renderUsageMarkdown, MODEL_PRICING } from './usage-aggregator.ts';
+import { UsageAggregator, renderUsageMarkdown, MODEL_PRICING, computeStreaks, windowCutoffMs } from './usage-aggregator.ts';
 
 
 function makeFixtureJsonl(events: object[]): string {
@@ -134,6 +134,70 @@ describe('UsageAggregator', () => {
     assert.equal(stale.totals.inputTokens, 100, 'stale data should match prior cache');
   });
 
+  it('should count a response written across several transcript lines once', async () => {
+    const slugDir = join(tmpDir, '-Users-dedupe');
+    mkdirSync(slugDir);
+    const ts = nowIso(0);
+    const usage = { input_tokens: 10, output_tokens: 100, cache_read_input_tokens: 1000, cache_creation_input_tokens: 50 };
+    writeFileSync(join(slugDir, 's.jsonl'), makeFixtureJsonl([
+      // Same response, three content blocks
+      { type: 'assistant', timestamp: ts, requestId: 'req_1', message: { id: 'msg_1', model: 'claude-opus-5-5', usage } },
+      { type: 'assistant', timestamp: ts, requestId: 'req_1', message: { id: 'msg_1', model: 'claude-opus-5-5', usage } },
+      { type: 'assistant', timestamp: ts, requestId: 'req_1', message: { id: 'msg_1', model: 'claude-opus-5-5', usage } },
+      // A different response
+      { type: 'assistant', timestamp: ts, requestId: 'req_2', message: { id: 'msg_2', model: 'claude-opus-5-5', usage } },
+    ]));
+
+    const agg = await new UsageAggregator({ jsonlDir: tmpDir, windowDays: 7 }).aggregate();
+    assert.equal(agg.totals.outputTokens, 200);
+    assert.equal(agg.totals.cacheReadTokens, 2000);
+    assert.equal(agg.highlights?.cacheWriteTokens, 100);
+    assert.equal(agg.highlights?.totalTokens, 2 * (10 + 100 + 1000 + 50));
+  });
+
+  it('should build highlights from the window', async () => {
+    const slugDir = join(tmpDir, '-Users-highlights');
+    mkdirSync(slugDir);
+    const today = nowIso(0);
+    const yesterday = nowIso(-1);
+    writeFileSync(join(slugDir, 'long.jsonl'), makeFixtureJsonl([
+      { type: 'custom-title', customTitle: 'long-one', sessionId: 'long' },
+      { type: 'assistant', timestamp: yesterday, message: { id: 'a', model: 'claude-opus-5-5', usage: { input_tokens: 0, output_tokens: 5000 } } },
+      { type: 'assistant', timestamp: today, message: { id: 'b', model: 'claude-opus-5-5', usage: { input_tokens: 0, output_tokens: 1000 } } },
+    ]));
+    writeFileSync(join(slugDir, 'short.jsonl'), makeFixtureJsonl([
+      { type: 'assistant', timestamp: today, message: { id: 'c', model: 'claude-sonnet-5-5', usage: { input_tokens: 0, output_tokens: 100 } } },
+    ]));
+    writeFileSync(join(slugDir, 'synthetic.jsonl'), makeFixtureJsonl([
+      // Outweighs every real model, so only the exclusion keeps it from winning
+      { type: 'assistant', timestamp: yesterday, message: { id: 'd', model: '<synthetic>', usage: { input_tokens: 0, output_tokens: 10_000 } } },
+    ]));
+
+    const h = (await new UsageAggregator({ jsonlDir: tmpDir, windowDays: 7 }).aggregate()).highlights!;
+    assert.equal(h.favouriteModel, 'claude-opus-5-5', 'synthetic entries are not a model choice');
+    assert.equal(h.longestSession?.title, 'long-one');
+    assert.ok(h.longestSession!.durationMs >= 23 * 60 * 60 * 1000);
+    assert.equal(h.activeDays, 2);
+    assert.equal(h.mostActiveDay, yesterday.slice(0, 10));
+    assert.equal(h.currentStreak, 2);
+    assert.equal(h.longestStreak, 2);
+  });
+
+  it('should treat the window as calendar days including today', () => {
+    const now = Date.parse('2026-10-30T11:00:00Z');
+    assert.equal(new Date(windowCutoffMs(7, now)).toISOString(), '2026-10-24T00:00:00.000Z');
+    assert.equal(new Date(windowCutoffMs(1, now)).toISOString(), '2026-10-30T00:00:00.000Z');
+  });
+
+  it('should compute longest and current streaks', () => {
+    const dates = ['2026-10-20', '2026-10-21', '2026-10-22', '2026-10-25', '2026-10-29', '2026-10-30'];
+    assert.deepEqual(computeStreaks(dates, '2026-10-30'), { longest: 3, current: 2 });
+    assert.deepEqual(computeStreaks(dates, '2026-10-31'), { longest: 3, current: 0 }, 'no activity today breaks the current streak');
+    assert.deepEqual(computeStreaks([], '2026-10-30'), { longest: 0, current: 0 });
+    // A run across a month boundary
+    assert.deepEqual(computeStreaks(['2026-09-30', '2026-10-01'], '2026-10-01'), { longest: 2, current: 2 });
+  });
+
   it('uses model pricing correctly for Sonnet/Opus/Haiku', () => {
     // Sanity-check the public pricing constants haven't drifted
     assert.equal(MODEL_PRICING['claude-sonnet-4-6']!.input, 3);
@@ -173,6 +237,49 @@ describe('renderUsageMarkdown', () => {
     assert.match(md, /brain/);
     assert.match(md, /tl/);
     assert.match(md, /\$10\.50/);
+  });
+
+  it('should render the highlights section when present', () => {
+    const md = renderUsageMarkdown({
+      refreshedAt: '2026-10-30T11:00:00.000Z',
+      windowDays: 7,
+      totals: { inputTokens: 36_400, outputTokens: 10_900_000, cacheReadTokens: 3_600_000_000, costUsd: 1, sessions: 161 },
+      byDay: [],
+      byAgent: [],
+      topSessions: [],
+      outliers: [],
+      stale: false,
+      seatQuota: null,
+      costMultiplier: 1.0,
+      highlights: {
+        favouriteModel: 'claude-opus-5-5',
+        totalTokens: 3_683_336_400,
+        cacheWriteTokens: 72_100_000,
+        longestSession: { title: 'tl', durationMs: (76 * 3600 + 48 * 60 + 40) * 1000 },
+        activeDays: 7,
+        mostActiveDay: '2026-10-28',
+        longestStreak: 7,
+        currentStreak: 1,
+      },
+    });
+    assert.match(md, /## Highlights/);
+    assert.match(md, /Favourite model:\*\* claude-opus-5-5 · \*\*Total tokens:\*\* 3\.7B/);
+    assert.match(md, /Longest session:\*\* 76h 48m 40s/);
+    assert.match(md, /Active days:\*\* 7\/7/);
+    assert.match(md, /Current streak:\*\* 1 day$/m);
+    assert.match(md, /Cache write\*\* 72M/);
+    assert.ok(md.indexOf('## Highlights') < md.indexOf('## Totals'), 'highlights lead the page');
+  });
+
+  it('should omit highlights when absent', () => {
+    const md = renderUsageMarkdown({
+      refreshedAt: '2026-10-30T11:00:00.000Z',
+      windowDays: 7,
+      totals: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0, sessions: 0 },
+      byDay: [], byAgent: [], topSessions: [], outliers: [],
+      stale: false, seatQuota: null, costMultiplier: 1.0,
+    });
+    assert.doesNotMatch(md, /## Highlights/);
   });
 
   it('shows the stale warning when stale=true', () => {
