@@ -102,6 +102,7 @@ export class ClaudeAdapter implements EngineAdapter {
       if (/using extra usage/i.test(line)) continue;
       if (/using standard usage/i.test(line)) continue;
       if (/\(\d+[km]? context\)\s+ctx:/i.test(line)) continue;
+      if (/\sctx: (--|\d+(\.\d+)?% used)$/.test(line)) continue;
 
       // Claude Code shows "❯" (U+276F) or ">" prompt when waiting for input.
       // The prompt line may contain only the prompt character and whitespace.
