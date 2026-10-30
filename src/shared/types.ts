@@ -462,4 +462,6 @@ export type ProxyResponse = {
   ok: boolean;
   data?: unknown;
   error?: string;
+  /** True when the proxy never answered, so the error says nothing about the agent. */
+  unreachable?: boolean;
 };

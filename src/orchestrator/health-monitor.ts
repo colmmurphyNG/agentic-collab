@@ -511,7 +511,7 @@ export class HealthMonitor {
 
   /**
    * Capture pane output for an agent. Returns null if capture failed
-   * (agent marked as failed as a side-effect).
+   * (agent marked as failed as a side-effect, unless the proxy was unreachable).
    */
   private async capturePaneOutput(agent: AgentRecord): Promise<string | null> {
     const captureResult = await this.proxyDispatch(agent.proxyId!, {
@@ -519,6 +519,14 @@ export class HealthMonitor {
       sessionName: sessionName(agent),
       lines: 50,
     });
+
+    if (!captureResult.ok && captureResult.unreachable) {
+      // No answer from the proxy says nothing about the agent, and counting it
+      // fails every agent on a slow proxy at once. A proxy that has really gone
+      // is failed by the heartbeat reaper (proxy-liveness.ts).
+      console.warn(`[health] Cannot reach proxy for ${agent.name}, leaving state unchanged: ${captureResult.error}`);
+      return null;
+    }
 
     if (!captureResult.ok) {
       const failures = (this.consecutiveFailures.get(agent.name) ?? 0) + 1;

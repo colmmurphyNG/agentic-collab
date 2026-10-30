@@ -335,6 +335,68 @@ describe('HealthMonitor', () => {
     assert.ok(agent?.failureReason?.includes('Health check failed'));
   });
 
+  it('leaves agent state alone when the proxy is unreachable', async () => {
+    db.createAgent({ name: 'health-unreach', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    const a = db.getAgent('health-unreach')!;
+    db.updateAgentState('health-unreach', 'active', a.version, {
+      tmuxSession: 'agent-health-unreach',
+      proxyId: 'p1',
+    });
+
+    const updates: string[] = [];
+    const unreachableDispatch = async () => ({
+      ok: false as const,
+      unreachable: true,
+      error: 'Proxy unreachable after 3 attempts: fetch failed',
+    });
+    const monitor = new HealthMonitor({
+      db,
+      locks: new LockManager(db.rawDb),
+      proxyDispatch: unreachableDispatch,
+      orchestratorHost: 'http://localhost:3000',
+      pollIntervalMs: 100,
+      onAgentUpdate: (name) => updates.push(name),
+    });
+
+    // Twice the failure threshold, so a counted failure would have tripped it
+    for (let i = 0; i < 6; i++) await monitor.pollAll();
+
+    const agent = db.getAgent('health-unreach');
+    assert.equal(agent?.state, 'active');
+    assert.equal(agent?.failureReason ?? null, null);
+    assert.ok(!updates.includes('health-unreach'), 'should not report a state change');
+  });
+
+  it('does not let unreachable polls count toward a real capture failure', async () => {
+    db.createAgent({ name: 'health-mixed', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    const a = db.getAgent('health-mixed')!;
+    db.updateAgentState('health-mixed', 'active', a.version, {
+      tmuxSession: 'agent-health-mixed',
+      proxyId: 'p1',
+    });
+
+    let reachable = false;
+    const mixedDispatch = async () => reachable
+      ? { ok: false as const, error: 'Session not found' }
+      : { ok: false as const, unreachable: true, error: 'Proxy unreachable after 3 attempts: fetch failed' };
+    const monitor = new HealthMonitor({
+      db,
+      locks: new LockManager(db.rawDb),
+      proxyDispatch: mixedDispatch,
+      orchestratorHost: 'http://localhost:3000',
+      pollIntervalMs: 100,
+    });
+
+    await monitor.pollAll();
+    await monitor.pollAll();
+    reachable = true;
+    await monitor.pollAll();
+    await monitor.pollAll();
+    assert.equal(db.getAgent('health-mixed')?.state, 'active', '2 real failures are below the threshold');
+    await monitor.pollAll();
+    assert.equal(db.getAgent('health-mixed')?.state, 'failed', 'the 3rd real failure trips it');
+  });
+
   it('fires onAgentUpdate callback on state transitions', async () => {
     const updates: string[] = [];
     ensureActive('health-a1');
