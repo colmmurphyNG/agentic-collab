@@ -19,6 +19,7 @@ import { ReminderDispatcher } from './reminder-dispatcher.ts';
 import { JobDispatcher } from './job-dispatcher.ts';
 import { shutdownAgents, restoreAllAgents } from './network.ts';
 import { reapStaleProxies } from './proxy-liveness.ts';
+import { createProxyDispatch } from './proxy-dispatch.ts';
 import type { LifecycleContext } from './lifecycle.ts';
 import { syncPersonasToDb, syncPersonasWithDiff, getPersonasDir } from './persona.ts';
 import { AccountStore } from './accounts.ts';
@@ -69,50 +70,7 @@ for (const config of DEFAULT_ENGINE_CONFIGS) {
 
 // ── Proxy Dispatch ──
 
-const PROXY_RETRY_COUNT = 2;
-const PROXY_RETRY_BASE_MS = 500;
-
-async function proxyDispatch(proxyId: string, command: ProxyCommand): Promise<ProxyResponse> {
-  const proxy = db.getProxy(proxyId);
-  if (!proxy) {
-    return { ok: false, error: `Proxy "${proxyId}" not registered` };
-  }
-
-  let lastError = '';
-  for (let attempt = 0; attempt <= PROXY_RETRY_COUNT; attempt++) {
-    if (attempt > 0) {
-      // Exponential backoff: 500ms, 1000ms
-      const delay = PROXY_RETRY_BASE_MS * Math.pow(2, attempt - 1);
-      await new Promise<void>((r) => setTimeout(r, delay));
-    }
-
-    try {
-      const resp = await fetch(`http://${proxy.host}/command`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-proxy-token': proxy.token,
-        },
-        body: JSON.stringify(command),
-        signal: AbortSignal.timeout(15_000),
-      });
-
-      if (!resp.ok) {
-        const text = await resp.text();
-        return { ok: false, error: `Proxy returned ${resp.status}: ${text}` };
-      }
-
-      return await resp.json() as ProxyResponse;
-    } catch (err) {
-      lastError = (err as Error).message;
-      if (attempt < PROXY_RETRY_COUNT) {
-        console.warn(`[proxy-dispatch] Attempt ${attempt + 1} failed for ${proxyId}: ${lastError}, retrying...`);
-      }
-    }
-  }
-
-  return { ok: false, error: `Proxy unreachable after ${PROXY_RETRY_COUNT + 1} attempts: ${lastError}` };
-}
+const proxyDispatch = createProxyDispatch((proxyId) => db.getProxy(proxyId));
 
 // ── Dashboard HTML ──
 
