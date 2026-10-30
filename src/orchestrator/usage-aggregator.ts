@@ -84,6 +84,19 @@ export type UsageAggregate = {
   stale: boolean;              // true if last refresh failed and we're returning prior cache
   seatQuota: SeatQuotaReport | null; // null when SEAT_QUOTA_TOKENS_PER_MONTH unset
   costMultiplier: number;      // applied to displayed dollar figures; defaults to 1.0
+  highlights?: UsageHighlights;
+};
+
+/** Headline figures in the style of Claude Code's own stats panel. */
+export type UsageHighlights = {
+  favouriteModel: string | null;
+  totalTokens: number;         // input + output + cache read + cache write
+  cacheWriteTokens: number;
+  longestSession: { title: string; durationMs: number } | null;
+  activeDays: number;
+  mostActiveDay: string | null;
+  longestStreak: number;
+  currentStreak: number;
 };
 
 /** Seat-quota tracking — operator's Anthropic Enterprise tier includes a token
@@ -130,6 +143,36 @@ function calcCost(input: number, output: number, cacheRead: number, model: strin
   return (input * p.input + output * p.output + cacheRead * p.cacheRead) / 1_000_000;
 }
 
+/** Longest and current run of consecutive dates; `dates` are YYYY-MM-DD. */
+export function computeStreaks(dates: string[], today: string): { longest: number; current: number } {
+  const days = new Set(dates);
+  const dayMs = 24 * 60 * 60 * 1000;
+  const prevDay = (d: string) => new Date(Date.parse(`${d}T00:00:00Z`) - dayMs).toISOString().slice(0, 10);
+
+  let longest = 0;
+  for (const d of days) {
+    if (days.has(prevDay(d))) continue;  // not the start of a run
+    let len = 1;
+    let next = new Date(Date.parse(`${d}T00:00:00Z`) + dayMs).toISOString().slice(0, 10);
+    while (days.has(next)) {
+      len++;
+      next = new Date(Date.parse(`${next}T00:00:00Z`) + dayMs).toISOString().slice(0, 10);
+    }
+    longest = Math.max(longest, len);
+  }
+
+  let current = 0;
+  for (let d = today; days.has(d); d = prevDay(d)) current++;
+  return { longest, current };
+}
+
+/** Start of the window: UTC midnight, so N days means N calendar dates including today. */
+export function windowCutoffMs(windowDays: number, nowMs: number): number {
+  const midnight = new Date(nowMs);
+  midnight.setUTCHours(0, 0, 0, 0);
+  return midnight.getTime() - (windowDays - 1) * 24 * 60 * 60 * 1000;
+}
+
 /** Aggregator with refresh-on-demand cache. */
 export class UsageAggregator {
   private cached: UsageAggregate | null = null;
@@ -173,8 +216,15 @@ export class UsageAggregator {
       throw new Error(`JSONL dir not found: ${this.jsonlDir}`);
     }
 
-    const cutoffMs = Date.now() - this.windowDays * 24 * 60 * 60 * 1000;
+    const cutoffMs = windowCutoffMs(this.windowDays, Date.now());
     const cutoffIso = new Date(cutoffMs).toISOString();
+
+    // One API response is written as several transcript lines (one per content
+    // block), each repeating the same usage. Count each response once.
+    const seenResponses = new Set<string>();
+    const modelTokens = new Map<string, number>();
+    const dayTokens = new Map<string, number>();
+    let cacheWriteTotal = 0;
 
     // Per-(date) buckets
     const dayMap = new Map<string, DayBucket>();
@@ -245,10 +295,22 @@ export class UsageAggregator {
           const model = (msg?.['model'] as string) ?? null;
           if (!usage) continue;
 
+          const responseId = msg?.['id'] as string | undefined;
+          if (responseId) {
+            const key = `${responseId}|${(ev['requestId'] as string) ?? ''}`;
+            if (seenResponses.has(key)) continue;
+            seenResponses.add(key);
+          }
+
           const input = (usage['input_tokens'] as number) || 0;
           const output = (usage['output_tokens'] as number) || 0;
           const cacheRead = (usage['cache_read_input_tokens'] as number) || 0;
+          const cacheWrite = (usage['cache_creation_input_tokens'] as number) || 0;
           const cost = calcCost(input, output, cacheRead, model);
+
+          const allTokens = input + output + cacheRead + cacheWrite;
+          cacheWriteTotal += cacheWrite;
+          if (model) modelTokens.set(model, (modelTokens.get(model) ?? 0) + allTokens);
 
           sessionInput += input;
           sessionOutput += output;
@@ -266,6 +328,7 @@ export class UsageAggregator {
           dayBucket.outputTokens += output;
           dayBucket.cacheReadTokens += cacheRead;
           dayBucket.costUsd += cost;
+          dayTokens.set(date, (dayTokens.get(date) ?? 0) + allTokens);
         }
 
         if (!sessionHasEventsInWindow) continue;
@@ -383,7 +446,17 @@ export class UsageAggregator {
       };
     }
 
+    const highlights = buildHighlights({
+      totals,
+      cacheWriteTotal,
+      modelTokens,
+      dayTokens,
+      sessions: [...sessionMap.values()],
+      today: new Date().toISOString().slice(0, 10),
+    });
+
     return {
+      highlights,
       refreshedAt: new Date().toISOString(),
       windowDays: this.windowDays,
       totals,
@@ -399,9 +472,57 @@ export class UsageAggregator {
 }
 
 
+function buildHighlights(input: {
+  totals: UsageAggregate['totals'];
+  cacheWriteTotal: number;
+  modelTokens: Map<string, number>;
+  dayTokens: Map<string, number>;
+  sessions: SessionRow[];
+  today: string;
+}): UsageHighlights {
+  let favouriteModel: string | null = null;
+  let favouriteTokens = -1;
+  for (const [model, tokens] of input.modelTokens) {
+    // '<synthetic>' marks locally generated messages, not a model anyone chose
+    if (model === '<synthetic>') continue;
+    if (tokens > favouriteTokens) { favouriteModel = model; favouriteTokens = tokens; }
+  }
+
+  let longestSession: UsageHighlights['longestSession'] = null;
+  for (const s of input.sessions) {
+    const durationMs = Date.parse(s.endTs) - Date.parse(s.startTs);
+    if (!longestSession || durationMs > longestSession.durationMs) longestSession = { title: s.title, durationMs };
+  }
+
+  let mostActiveDay: string | null = null;
+  let mostActiveTokens = -1;
+  for (const [date, tokens] of input.dayTokens) {
+    if (tokens > mostActiveTokens) { mostActiveDay = date; mostActiveTokens = tokens; }
+  }
+
+  const streaks = computeStreaks([...input.dayTokens.keys()], input.today);
+  const { inputTokens, outputTokens, cacheReadTokens } = input.totals;
+  return {
+    favouriteModel,
+    totalTokens: inputTokens + outputTokens + cacheReadTokens + input.cacheWriteTotal,
+    cacheWriteTokens: input.cacheWriteTotal,
+    longestSession,
+    activeDays: input.dayTokens.size,
+    mostActiveDay,
+    longestStreak: streaks.longest,
+    currentStreak: streaks.current,
+  };
+}
+
+function formatDuration(ms: number): string {
+  const secs = Math.floor(ms / 1000);
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ${secs % 60}s`;
+}
+
 /** Format the aggregate as a markdown report for the /usage HTML endpoint. */
 export function renderUsageMarkdown(agg: UsageAggregate): string {
   const fmtTokens = (n: number) => {
+    if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
     if (n >= 1_000_000) return `${Math.round(n / 1_000_000)}M`;
     if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
     return `${n}`;
@@ -422,6 +543,19 @@ export function renderUsageMarkdown(agg: UsageAggregate): string {
     lines.push('');
   } else {
     lines.push(`_Refreshed: ${agg.refreshedAt}_`);
+    lines.push('');
+  }
+
+  if (agg.highlights) {
+    const h = agg.highlights;
+    const plural = (n: number) => `${n} day${n === 1 ? '' : 's'}`;
+    lines.push('## Highlights');
+    lines.push('');
+    lines.push(`- **Favourite model:** ${h.favouriteModel ?? '—'} · **Total tokens:** ${fmtTokens(h.totalTokens)}`);
+    lines.push(`- **Sessions:** ${agg.totals.sessions} · **Longest session:** ${h.longestSession ? formatDuration(h.longestSession.durationMs) : '—'}`);
+    lines.push(`- **Active days:** ${h.activeDays}/${agg.windowDays} · **Longest streak:** ${plural(h.longestStreak)} · **Current streak:** ${plural(h.currentStreak)}`);
+    lines.push(`- **Most active day:** ${h.mostActiveDay ?? '—'}`);
+    lines.push(`- **Input** ${fmtTokens(agg.totals.inputTokens)} · **Output** ${fmtTokens(agg.totals.outputTokens)} · **Cache read** ${fmtTokens(agg.totals.cacheReadTokens)} · **Cache write** ${fmtTokens(h.cacheWriteTokens)}`);
     lines.push('');
   }
 
