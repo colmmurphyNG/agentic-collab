@@ -541,6 +541,17 @@ export class Database {
       throw new Error(`Version conflict on update for agent "${name}"`);
     }
 
+    // The agents row only holds the current session. Record each new one so a
+    // transcript can be traced back to the agent that ran it.
+    const nextSessionId = extra?.currentSessionId;
+    if (typeof nextSessionId === 'string' && nextSessionId.length > 0
+      && nextSessionId !== agent.currentSessionId) {
+      this.logEvent(name, 'session_started', undefined, {
+        sessionId: nextSessionId,
+        previousSessionId: agent.currentSessionId,
+      });
+    }
+
     return this.getAgent(name)!;
   }
 
