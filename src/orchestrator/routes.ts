@@ -2975,6 +2975,20 @@ route('GET', '/api/voice/status', async (_req, res, _match, ctx) => {
   json(res, 200, { enabled: ctx.voiceEnabled });
 });
 
+// Fed by the host's status-line script, which receives the account's rate limits on every render.
+route('POST', '/api/usage/status-line', async (req, res, _match, ctx) => {
+  let body: Record<string, unknown>;
+  try {
+    body = await readJson(req);
+  } catch (err) {
+    return json(res, 400, { error: (err as Error).message });
+  }
+  if (!ctx.usagePoller.recordStatusLineRateLimits(body['rate_limits'])) {
+    return json(res, 400, { error: 'rate_limits holds no valid five_hour or seven_day window' });
+  }
+  json(res, 200, { ok: true, usage: ctx.usagePoller.getUsageData() });
+});
+
 route('POST', '/api/engines/poll', async (_req, res, _match, ctx) => {
   try {
     await ctx.usagePoller.pollNow();

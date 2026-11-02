@@ -116,6 +116,22 @@ export class UsagePoller {
   }
 
   /**
+   * Stores the `rate_limits` object Claude Code hands its status-line script.
+   * Returns false when it holds no usable bucket, so nothing is overwritten.
+   */
+  recordStatusLineRateLimits(rateLimits: unknown, now: Date = new Date()): boolean {
+    const buckets = parseStatusLineRateLimits(rateLimits);
+    if (buckets.length === 0) return false;
+    this.usageData.set('claude', {
+      engine: 'claude',
+      buckets,
+      queriedAt: now.toISOString(),
+      queriedFrom: 'status-line',
+    });
+    return true;
+  }
+
+  /**
    * Find the best proxy for usage polling.
    * Prefers proxies with host.docker.internal (local to orchestrator container)
    * or localhost, as those minimize latency for tmux operations.
@@ -603,5 +619,30 @@ export function parseCodexStatus(output: string): UsageBucket[] {
     buckets.push({ label, pctUsed, resetsAt });
   }
 
+  return buckets;
+}
+
+// Same labels the /usage screen parser produces, so readers of either source agree.
+const STATUS_LINE_WINDOWS: ReadonlyArray<[key: string, label: string]> = [
+  ['five_hour', 'Current session'],
+  ['seven_day', 'Current week (all models)'],
+];
+
+/**
+ * Converts the status-line `rate_limits` object ({ five_hour, seven_day }, each
+ * { used_percentage, resets_at } with resets_at in epoch seconds) into buckets.
+ * A window with a missing or out-of-range value is left out rather than guessed.
+ */
+export function parseStatusLineRateLimits(rateLimits: unknown): UsageBucket[] {
+  if (!rateLimits || typeof rateLimits !== 'object') return [];
+  const buckets: UsageBucket[] = [];
+  for (const [key, label] of STATUS_LINE_WINDOWS) {
+    const window = (rateLimits as Record<string, unknown>)[key];
+    if (!window || typeof window !== 'object') continue;
+    const { used_percentage: pct, resets_at: resetsAt } = window as Record<string, unknown>;
+    if (typeof pct !== 'number' || !Number.isFinite(pct) || pct < 0 || pct > 100) continue;
+    if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt) || resetsAt <= 0) continue;
+    buckets.push({ label, pctUsed: pct, resetsAt: new Date(resetsAt * 1000).toISOString() });
+  }
   return buckets;
 }
