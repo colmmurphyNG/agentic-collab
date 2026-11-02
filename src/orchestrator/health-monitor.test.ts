@@ -171,6 +171,16 @@ describe('HealthMonitor', () => {
     assert.deepEqual(recycled, ['z-early'], 'an agent without an override keeps the global threshold');
   });
 
+  it('describeRecycleConfig reports the threshold and overrides in force', () => {
+    const monitor = makeMonitor({});
+    assert.match(monitor.describeRecycleConfig(), /overrides: none$/);
+    (monitor as unknown as { recycleThresholdOverrides: Map<string, number> }).recycleThresholdOverrides =
+      new Map([['tl', 25], ['sfcc', 30]]);
+    const line = monitor.describeRecycleConfig();
+    assert.match(line, new RegExp(`^auto-recycle at ${HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT}% when idle`));
+    assert.match(line, /overrides: tl=25%, sfcc=30%$/);
+  });
+
   it('parseRecycleThresholdOverrides keeps valid entries and skips bad ones', () => {
     assert.deepEqual([...parseRecycleThresholdOverrides(undefined)], []);
     assert.deepEqual([...parseRecycleThresholdOverrides('')], []);

@@ -343,6 +343,7 @@ export class HealthMonitor {
   start(): void {
     if (this.timer) return;
     console.log(`[health] Starting monitor (poll every ${this.pollIntervalMs}ms, fast-poll every ${HealthMonitor.FAST_POLL_MS}ms for active agents)`);
+    console.log(`[health] ${this.describeRecycleConfig()}`);
     this.timer = setInterval(() => {
       this.pollAll().catch((err) => {
         console.error('[health] Poll error:', err);
@@ -684,6 +685,12 @@ export class HealthMonitor {
    * NOTE: kept package-private (no `_` prefix) so tests can drive the
    * threshold transitions directly without simulating a full poll cycle.
    */
+  /** The recycle settings actually in force, so a missing or mistyped env var shows in the log. */
+  describeRecycleConfig(): string {
+    const overrides = [...this.recycleThresholdOverrides].map(([name, pct]) => `${name}=${pct}%`).join(', ');
+    return `auto-recycle at ${HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT}% when idle, cooldown ${Math.round(HealthMonitor.AUTO_RECYCLE_COOLDOWN_MS / 60_000)}min, overrides: ${overrides || 'none'}`;
+  }
+
   maybeTriggerAutoRecycle(agent: AgentRecord, contextPct: number): void {
     const threshold = this.recycleThresholdOverrides.get(agent.name) ?? HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT;
     if (contextPct < threshold) return;
