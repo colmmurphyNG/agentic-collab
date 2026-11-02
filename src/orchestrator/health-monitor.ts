@@ -143,6 +143,14 @@ export class HealthMonitor {
    */
   static readonly AUTO_RECYCLE_THRESHOLD_PCT = parseInt(process.env['AUTO_RECYCLE_THRESHOLD_PCT'] ?? '92', 10);
   /**
+   * Per-agent thresholds that replace the global one, e.g. `tl:25,sfcc:25`.
+   * Used to trial an earlier recycle on a few agents without moving the rest.
+   */
+  static readonly AUTO_RECYCLE_THRESHOLD_OVERRIDES = parseRecycleThresholdOverrides(
+    process.env['AUTO_RECYCLE_THRESHOLD_OVERRIDES'],
+  );
+  private recycleThresholdOverrides: ReadonlyMap<string, number> = HealthMonitor.AUTO_RECYCLE_THRESHOLD_OVERRIDES;
+  /**
    * Cool-down between auto-recycles for the same agent. Defense-in-depth so
    * a cold-start ctx spike right after spawn doesn't immediately re-trigger.
    * Default 30 min — set to 0 in tests.
@@ -335,6 +343,7 @@ export class HealthMonitor {
   start(): void {
     if (this.timer) return;
     console.log(`[health] Starting monitor (poll every ${this.pollIntervalMs}ms, fast-poll every ${HealthMonitor.FAST_POLL_MS}ms for active agents)`);
+    console.log(`[health] ${this.describeRecycleConfig()}`);
     this.timer = setInterval(() => {
       this.pollAll().catch((err) => {
         console.error('[health] Poll error:', err);
@@ -676,8 +685,15 @@ export class HealthMonitor {
    * NOTE: kept package-private (no `_` prefix) so tests can drive the
    * threshold transitions directly without simulating a full poll cycle.
    */
+  /** The recycle settings actually in force, so a missing or mistyped env var shows in the log. */
+  describeRecycleConfig(): string {
+    const overrides = [...this.recycleThresholdOverrides].map(([name, pct]) => `${name}=${pct}%`).join(', ');
+    return `auto-recycle at ${HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT}% when idle, cooldown ${Math.round(HealthMonitor.AUTO_RECYCLE_COOLDOWN_MS / 60_000)}min, overrides: ${overrides || 'none'}`;
+  }
+
   maybeTriggerAutoRecycle(agent: AgentRecord, contextPct: number): void {
-    if (contextPct < HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT) return;
+    const threshold = this.recycleThresholdOverrides.get(agent.name) ?? HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT;
+    if (contextPct < threshold) return;
     if (agent.state !== 'idle') return; // active work — defer to next poll
     const lastAt = this.lastAutoRecycleAt.get(agent.name) ?? 0;
     const sinceLast = Date.now() - lastAt;
@@ -687,7 +703,7 @@ export class HealthMonitor {
     }
     this.lastAutoRecycleAt.set(agent.name, Date.now());
     console.log(
-      `[health] ${agent.name}: auto-recycle triggered (ctx=${contextPct}% ≥ ${HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT}%, state=idle)`,
+      `[health] ${agent.name}: auto-recycle triggered (ctx=${contextPct}% ≥ ${threshold}%, state=idle)`,
     );
     this.db.logEvent(agent.name, 'auto_recycle_triggered', undefined, { contextPct });
     // Fire-and-forget; recycleAgent handles its own locking + failure paths.
@@ -1241,4 +1257,26 @@ function interpolateIndicatorActions(
     result[interpolatedKey] = interpolateStepGroups(steps, match);
   }
   return result;
+}
+
+/**
+ * Parses `name:pct` pairs separated by commas. An entry that is malformed or
+ * outside 1-100 is skipped with a warning, so the agent keeps the global
+ * threshold rather than recycling at a value nobody meant.
+ */
+export function parseRecycleThresholdOverrides(raw: string | undefined): Map<string, number> {
+  const overrides = new Map<string, number>();
+  if (!raw) return overrides;
+  for (const entry of raw.split(',')) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const match = /^([A-Za-z0-9_-]+):(\d{1,3})$/.exec(trimmed);
+    const pct = match ? Number(match[2]) : NaN;
+    if (!match || pct < 1 || pct > 100) {
+      console.warn(`[health] ignoring AUTO_RECYCLE_THRESHOLD_OVERRIDES entry "${trimmed}" (expected name:1-100)`);
+      continue;
+    }
+    overrides.set(match[1]!, pct);
+  }
+  return overrides;
 }

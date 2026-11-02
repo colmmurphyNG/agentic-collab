@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { Database } from './database.ts';
 import { LockManager } from '../shared/lock.ts';
 import type { ProxyCommand, ProxyResponse } from '../shared/types.ts';
-import { HealthMonitor, autoRecoverBackoffMs } from './health-monitor.ts';
+import { HealthMonitor, autoRecoverBackoffMs, parseRecycleThresholdOverrides } from './health-monitor.ts';
 import { MessageDispatcher } from './message-dispatcher.ts';
 
 describe('HealthMonitor', () => {
@@ -147,6 +147,57 @@ describe('HealthMonitor', () => {
     // Cool-down: subsequent call within window does not re-fire
     monitor.maybeTriggerAutoRecycle(a, 95);
     assert.equal(recycleCalls, 1, 'within cool-down should NOT re-trigger');
+  });
+
+  it('auto-recycle uses a per-agent override instead of the global threshold', () => {
+    db.createAgent({ name: 'z-early', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    db.createAgent({ name: 'z-normal', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+    for (const name of ['z-early', 'z-normal']) {
+      const rec = db.getAgent(name)!;
+      db.updateAgentState(name, 'idle', rec.version, { tmuxSession: `agent-${name}`, proxyId: 'p1' });
+    }
+
+    const recycled: string[] = [];
+    const monitor = makeMonitor({});
+    (monitor as unknown as { runAutoRecycle(name: string): Promise<void> }).runAutoRecycle = async (name) => { recycled.push(name); };
+    (monitor as unknown as { recycleThresholdOverrides: Map<string, number> }).recycleThresholdOverrides =
+      new Map([['z-early', 25]]);
+
+    monitor.maybeTriggerAutoRecycle(db.getAgent('z-early')!, 24);
+    assert.deepEqual(recycled, [], 'below the override should NOT trigger');
+    monitor.maybeTriggerAutoRecycle(db.getAgent('z-early')!, 25);
+    assert.deepEqual(recycled, ['z-early'], 'at the override should trigger');
+    monitor.maybeTriggerAutoRecycle(db.getAgent('z-normal')!, 25);
+    assert.deepEqual(recycled, ['z-early'], 'an agent without an override keeps the global threshold');
+  });
+
+  it('describeRecycleConfig reports the threshold and overrides in force', () => {
+    const monitor = makeMonitor({});
+    assert.match(monitor.describeRecycleConfig(), /overrides: none$/);
+    (monitor as unknown as { recycleThresholdOverrides: Map<string, number> }).recycleThresholdOverrides =
+      new Map([['tl', 25], ['sfcc', 30]]);
+    const line = monitor.describeRecycleConfig();
+    assert.match(line, new RegExp(`^auto-recycle at ${HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT}% when idle`));
+    assert.match(line, /overrides: tl=25%, sfcc=30%$/);
+  });
+
+  it('parseRecycleThresholdOverrides keeps valid entries and skips bad ones', () => {
+    assert.deepEqual([...parseRecycleThresholdOverrides(undefined)], []);
+    assert.deepEqual([...parseRecycleThresholdOverrides('')], []);
+    assert.deepEqual(
+      [...parseRecycleThresholdOverrides(' tl:25, sfcc-2:30 ,,')],
+      [['tl', 25], ['sfcc-2', 30]],
+    );
+    const warn = console.warn;
+    const warned: string[] = [];
+    console.warn = (msg: string) => { warned.push(msg); };
+    try {
+      const parsed = parseRecycleThresholdOverrides('a:0,b:101,c:x,:20,d:2.5,e,f:40');
+      assert.deepEqual([...parsed], [['f', 40]]);
+      assert.equal(warned.length, 6, 'each bad entry warns once');
+    } finally {
+      console.warn = warn;
+    }
   });
 
   it('auto-recycle (Z) defers when agent is active (not idle)', () => {
