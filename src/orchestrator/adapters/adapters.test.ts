@@ -232,6 +232,21 @@ describe('Engine Adapters', () => {
       }
     });
 
+    it('detects idle state when the status line model has no context-size suffix', () => {
+      // Claude Code v2.1.314 prints the model as plain "Opus 5.5", so the line can
+      // only be recognised by its trailing ctx segment.
+      for (const ctx of ['ctx: --', 'ctx: 45% used']) {
+        const pane = [
+          '────────────────────────────────────────',
+          '❯ Try "fix lint errors"',
+          '────────────────────────────────────────',
+          `  /private/tmp  Opus 5.5  ${ctx}`,
+          '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+        assert.equal(adapter.detectIdleState(pane), 'waiting_for_input', ctx);
+      }
+    });
+
     it('detects idle state when the empty prompt shows a suggestion', () => {
       // Newer Claude Code builds fill an empty prompt with a dimmed `Try "..."`
       // hint; capture-pane drops the dimming, so it reads as text after ❯.
