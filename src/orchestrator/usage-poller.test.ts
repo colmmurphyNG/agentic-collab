@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseClaudeUsage, parseCodexStatus } from './usage-poller.ts';
+import { parseClaudeUsage, parseCodexStatus, parseStatusLineRateLimits } from './usage-poller.ts';
 
 describe('parseClaudeUsage', () => {
   it('parses typical /usage output with two buckets', () => {
@@ -211,5 +211,38 @@ describe('parseCodexStatus', () => {
   it('returns empty for no usage data', () => {
     const buckets = parseCodexStatus('no status info here');
     assert.equal(buckets.length, 0);
+  });
+});
+
+describe('parseStatusLineRateLimits', () => {
+  it('maps both windows to the screen-parser labels with ISO reset times', () => {
+    assert.deepEqual(
+      parseStatusLineRateLimits({
+        five_hour: { used_percentage: 0, resets_at: 1793664000 },
+        seven_day: { used_percentage: 100, resets_at: 1793682000 },
+      }),
+      [
+        { label: 'Current session', pctUsed: 0, resetsAt: '2026-11-03T00:00:00.000Z' },
+        { label: 'Current week (all models)', pctUsed: 100, resetsAt: '2026-11-03T05:00:00.000Z' },
+      ],
+    );
+  });
+
+  it('keeps a valid window when the other is missing or bad', () => {
+    const buckets = parseStatusLineRateLimits({
+      five_hour: { used_percentage: -1, resets_at: 1793664000 },
+      seven_day: { used_percentage: 40.5, resets_at: 1793682000 },
+    });
+    assert.deepEqual(buckets.map((b) => [b.label, b.pctUsed]), [['Current week (all models)', 40.5]]);
+  });
+
+  it('returns nothing for absent or malformed input', () => {
+    for (const bad of [undefined, null, 'x', 42, {}, { five_hour: 'x' },
+      { five_hour: { used_percentage: '5', resets_at: 1 } },
+      { seven_day: { used_percentage: 101, resets_at: 1 } },
+      { seven_day: { used_percentage: 5, resets_at: 0 } },
+      { seven_day: { used_percentage: Number.NaN, resets_at: 1 } }]) {
+      assert.deepEqual(parseStatusLineRateLimits(bad), [], JSON.stringify(bad));
+    }
   });
 });

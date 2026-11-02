@@ -1,3 +1,4 @@
+import { UsagePoller } from './usage-poller.ts';
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
@@ -69,7 +70,7 @@ describe('API Routes', () => {
       orchestratorHost: 'http://localhost:3000',
       orchestratorSecret: null, // no auth for base tests
       messageDispatcher: makeTestDispatcher(db, locks, mockProxyDispatch),
-      usagePoller: { getUsageData: () => ({}), pollNow: async () => {} } as any,
+      usagePoller: new UsagePoller({ db, proxyDispatch: async () => ({ ok: true }) }),
       voiceEnabled: false,
       accountStore: new AccountStore({ accountsDir: join(tmpDir, 'accounts'), agentHomesDir: join(tmpDir, 'agent-homes'), skipAutoRegister: true }),
     };
@@ -116,6 +117,31 @@ describe('API Routes', () => {
     assert.equal(resp.status, 200);
     const text = await resp.text();
     assert.ok(text.includes('Dashboard'));
+  });
+
+  // ── Usage from the status line ──
+
+  it('POST /api/usage/status-line stores rate limits under the screen-parser labels', async () => {
+    const { status, data } = await api('POST', '/api/usage/status-line', {
+      rate_limits: {
+        five_hour: { used_percentage: 12, resets_at: 1793664000 },
+        seven_day: { used_percentage: 100, resets_at: 1793682000 },
+      },
+    });
+    assert.equal(status, 200);
+    const claude = (data as { usage: Record<string, { queriedFrom: string; buckets: unknown[] }> }).usage['claude']!;
+    assert.equal(claude.queriedFrom, 'status-line');
+    assert.deepEqual(claude.buckets, [
+      { label: 'Current session', pctUsed: 12, resetsAt: '2026-11-03T00:00:00.000Z' },
+      { label: 'Current week (all models)', pctUsed: 100, resetsAt: '2026-11-03T05:00:00.000Z' },
+    ]);
+    const engines = await api('GET', '/api/engines/status');
+    assert.equal((engines.data as { usage: Record<string, { queriedFrom: string }> }).usage['claude']!.queriedFrom, 'status-line');
+  });
+
+  it('POST /api/usage/status-line rejects a body with no usable window', async () => {
+    assert.equal((await api('POST', '/api/usage/status-line', {})).status, 400);
+    assert.equal((await api('POST', '/api/usage/status-line', { rate_limits: { seven_day: { used_percentage: 140, resets_at: 1 } } })).status, 400);
   });
 
   // ── Agent CRUD ──
