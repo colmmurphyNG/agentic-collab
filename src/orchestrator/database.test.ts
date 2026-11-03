@@ -102,6 +102,31 @@ describe('Database', () => {
       assert.equal(updated.failureReason, 'Spawn timeout');
     });
 
+    it('records a session_started event each time the session id changes', () => {
+      db.createAgent({ name: 'session-log', engine: 'claude', cwd: '/tmp' });
+      const sessionEvents = () => db.getEvents('session-log')
+        .filter((e) => e.event === 'session_started')
+        .sort((x, y) => x.id - y.id) // created_at has one-second resolution
+        .map((e) => JSON.parse(e.meta!));
+
+      let a = db.updateAgentState('session-log', 'active', 0, { currentSessionId: 's1' });
+      a = db.updateAgentState('session-log', 'idle', a.version, { currentSessionId: 's1' }); // same id
+      a = db.updateAgentState('session-log', 'active', a.version, { tmuxSession: 'x' }); // no id given
+      a = db.updateAgentState('session-log', 'failed', a.version, { currentSessionId: null }); // cleared
+      db.updateAgentState('session-log', 'active', a.version, { currentSessionId: 's2' });
+
+      assert.deepEqual(sessionEvents(), [
+        { sessionId: 's1', previousSessionId: null },
+        { sessionId: 's2', previousSessionId: null },
+      ]);
+    });
+
+    it('logs no session event when the update loses a version conflict', () => {
+      db.createAgent({ name: 'session-conflict', engine: 'claude', cwd: '/tmp' });
+      assert.throws(() => db.updateAgentState('session-conflict', 'active', 99, { currentSessionId: 's1' }));
+      assert.equal(db.getEvents('session-conflict').filter((e) => e.event === 'session_started').length, 0);
+    });
+
     it('upserts launch env from persona config without disturbing runtime state', () => {
       const created = db.createAgent({ name: 'persona-env', engine: 'claude', cwd: '/tmp/persona-env' });
       db.updateAgentState('persona-env', 'active', created.version, {
