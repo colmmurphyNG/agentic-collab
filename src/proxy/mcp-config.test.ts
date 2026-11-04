@@ -118,6 +118,50 @@ describe('proxy/mcp-config', () => {
       }
     });
 
+    it('resolves allowlisted servers from the agent-only library', () => {
+      const dir = tmpDir();
+      try {
+        const globalPath = join(dir, '.claude.json');
+        writeJson(globalPath, { mcpServers: { atlassian: { command: 'a' } } });
+        const libraryPath = join(dir, 'mcp-library.json');
+        writeJson(libraryPath, { mcpServers: { 'datadog-mcp': { command: 'lib-datadog' } } });
+
+        const { servers, missing } = buildAgentMcpConfig({
+          allowlist: ['atlassian', 'datadog-mcp'],
+          cwd: dir,
+          globalConfigPath: globalPath,
+          libraryPath,
+        });
+
+        assert.deepEqual(Object.keys(servers).sort(), ['atlassian', 'datadog-mcp']);
+        assert.equal((servers['datadog-mcp'] as { command: string }).command, 'lib-datadog');
+        assert.deepEqual(missing, []);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('global ~/.claude.json overrides the library on name collision', () => {
+      const dir = tmpDir();
+      try {
+        const globalPath = join(dir, '.claude.json');
+        writeJson(globalPath, { mcpServers: { atlassian: { command: 'global-atlassian' } } });
+        const libraryPath = join(dir, 'mcp-library.json');
+        writeJson(libraryPath, { mcpServers: { atlassian: { command: 'lib-atlassian' } } });
+
+        const { servers } = buildAgentMcpConfig({
+          allowlist: ['atlassian'],
+          cwd: dir,
+          globalConfigPath: globalPath,
+          libraryPath,
+        });
+
+        assert.equal((servers['atlassian'] as { command: string }).command, 'global-atlassian');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('treats missing global config as no entries (does not throw)', () => {
       const dir = tmpDir();
       try {

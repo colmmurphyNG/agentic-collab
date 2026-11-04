@@ -32,6 +32,15 @@ export function globalClaudeConfigPath(): string {
   return process.env['CLAUDE_CONFIG_PATH'] ?? join(homedir(), '.claude.json');
 }
 
+/**
+ * Host path to the agent-only MCP library: definitions agents may allowlist
+ * that are kept out of `~/.claude.json` so interactive sessions don't start them.
+ */
+export function mcpLibraryPath(): string {
+  return process.env['MCP_LIBRARY_PATH']
+    ?? join(homedir(), '.config', 'agentic-collab', 'mcp-library.json');
+}
+
 /** Host path to Claude Code's plugin root (holds `installed_plugins.json`). */
 export function pluginsDirPath(): string {
   return process.env['CLAUDE_PLUGINS_DIR'] ?? join(homedir(), '.claude', 'plugins');
@@ -144,6 +153,7 @@ export function extractPluginMcpServers(pluginsDir: string, cwd: string): {
  * Merge order (later sources override earlier on name collision):
  *   0. installed plugins' `<installPath>/.mcp.json` → mcpServers
  *      (lowest precedence — operator config always overrides a plugin default)
+ *   0b. agent-only library `~/.config/agentic-collab/mcp-library.json` → mcpServers
  *   1. global    `~/.claude.json` → mcpServers
  *   2. per-project `~/.claude.json` → projects[<cwd>] → mcpServers
  *      (Claude Code's `claude mcp add --scope=local` lands here)
@@ -163,11 +173,13 @@ export function buildAgentMcpConfig(opts: {
   cwd: string;
   globalConfigPath?: string;
   pluginsDir?: string;
+  libraryPath?: string;
 }): { servers: McpServersMap; missing: string[] } {
   const globalPath = opts.globalConfigPath ?? globalClaudeConfigPath();
   const globalConfig = safeReadJsonObject(globalPath);
 
   const plugin = extractPluginMcpServers(opts.pluginsDir ?? pluginsDirPath(), opts.cwd);
+  const libraryServers = extractMcpServers(safeReadJsonObject(opts.libraryPath ?? mcpLibraryPath()));
   const globalServers = extractMcpServers(globalConfig);
   const projectScopedServers = extractProjectMcpServers(globalConfig, opts.cwd);
   const cwdSettingsServers = extractMcpServers(safeReadJsonObject(join(opts.cwd, '.claude', 'settings.json')));
@@ -176,6 +188,7 @@ export function buildAgentMcpConfig(opts: {
   // Later sources override earlier on name collision.
   const merged: McpServersMap = {
     ...plugin.servers,
+    ...libraryServers,
     ...globalServers,
     ...projectScopedServers,
     ...cwdSettingsServers,
@@ -224,6 +237,7 @@ export function materialiseMcpConfig(opts: {
   outputDir?: string;
   globalConfigPath?: string;
   pluginsDir?: string;
+  libraryPath?: string;
 }): MaterialiseMcpConfigResult {
   const dir = opts.outputDir ?? mcpConfigDir();
   const outPath = join(dir, `${opts.agentName}.json`);
@@ -239,6 +253,7 @@ export function materialiseMcpConfig(opts: {
     cwd: opts.cwd,
     ...(opts.globalConfigPath !== undefined ? { globalConfigPath: opts.globalConfigPath } : {}),
     ...(opts.pluginsDir !== undefined ? { pluginsDir: opts.pluginsDir } : {}),
+    ...(opts.libraryPath !== undefined ? { libraryPath: opts.libraryPath } : {}),
   });
 
   writeFileSync(outPath, JSON.stringify({ mcpServers: servers }, null, 2), 'utf-8');
