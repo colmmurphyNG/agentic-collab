@@ -81,6 +81,11 @@ export type PersonaFrontmatter = {
    * Explicit empty array = run with zero MCPs.
    */
   mcps?: string[];
+  /**
+   * Set `auto_suspend: false` to exempt the agent from idle auto-suspend
+   * (AUTO_SUSPEND_IDLE_MINUTES). Omitted or any other value = eligible.
+   */
+  auto_suspend?: boolean;
 };
 
 export type ParsedPersona = {
@@ -926,6 +931,25 @@ export function resolvePersonaPath(agentName: string, explicitPath?: string | nu
   }
 
   return null;
+}
+
+/**
+ * True unless the persona's frontmatter sets `auto_suspend: false`.
+ * Reads the persona file raw, like the `mcps:` allowlist; a missing or
+ * unreadable file means eligible.
+ */
+export function personaAllowsAutoSuspend(agentName: string, persona?: string | null, personasDir: string = PERSONAS_DIR): boolean {
+  const explicitPath = persona && (persona.includes('/') || persona.endsWith('.md')) ? persona : null;
+  const personaPath = resolvePersonaPath(agentName, explicitPath, personasDir);
+  if (!personaPath) return true;
+  let raw: string;
+  try {
+    raw = readFileSync(personaPath, 'utf-8');
+  } catch {
+    return true;
+  }
+  const flag = parseFrontmatter(raw).frontmatter['auto_suspend'];
+  return !(flag === false || (typeof flag === 'string' && flag.trim().toLowerCase() === 'false'));
 }
 
 /**

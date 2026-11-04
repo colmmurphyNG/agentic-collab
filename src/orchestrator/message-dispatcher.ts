@@ -17,7 +17,7 @@ import type { Database } from './database.ts';
 import type { LockManager } from '../shared/lock.ts';
 import type { ProxyCommand, ProxyResponse, PendingMessage, DashboardMessage } from '../shared/types.ts';
 import { canSuspend } from '../shared/agent-entity.ts';
-import { deliverToAgent, type LifecycleContext } from './lifecycle.ts';
+import { deliverToAgent, resumeAgent, type LifecycleContext } from './lifecycle.ts';
 
 export type MessageDispatcherOptions = {
   db: Database;
@@ -27,6 +27,10 @@ export type MessageDispatcherOptions = {
   onQueueUpdate?: (message: PendingMessage) => void;
   onDashboardMessage?: (message: DashboardMessage) => void;
   onMessageDelivered?: (agentName: string) => void;
+  /** Called after a suspended agent is woken for a pending message. */
+  onAgentUpdate?: (agentName: string) => void;
+  /** Resume implementation; defaults to lifecycle.resumeAgent. Injectable for tests. */
+  resumeAgentFn?: (ctx: LifecycleContext, name: string) => Promise<unknown>;
 };
 
 export class MessageDispatcher {
@@ -37,6 +41,10 @@ export class MessageDispatcher {
   private readonly onQueueUpdate: (message: PendingMessage) => void;
   private readonly onDashboardMessage: (message: DashboardMessage) => void;
   private readonly onMessageDelivered: (agentName: string) => void;
+  private readonly onAgentUpdate: (agentName: string) => void;
+  private readonly resumeAgentFn: (ctx: LifecycleContext, name: string) => Promise<unknown>;
+  /** Agents with a wake-on-message resume in flight; blocks a second trigger. */
+  private readonly resumesInFlight = new Set<string>();
   private readonly drainTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Guards against concurrent drain loops for the same agent. */
   private readonly draining = new Set<string>();
@@ -72,6 +80,36 @@ export class MessageDispatcher {
     this.onQueueUpdate = opts.onQueueUpdate ?? (() => {});
     this.onDashboardMessage = opts.onDashboardMessage ?? (() => {});
     this.onMessageDelivered = opts.onMessageDelivered ?? (() => {});
+    this.onAgentUpdate = opts.onAgentUpdate ?? (() => {});
+    this.resumeAgentFn = opts.resumeAgentFn ?? ((ctx, name) => resumeAgent(ctx, name));
+  }
+
+  /**
+   * Wake a suspended agent that has a deliverable message waiting. Only the
+   * `suspended` state qualifies: failed and void agents need an operator.
+   * One resume at a time per agent; callers re-read the agent afterwards and
+   * deliver normally once it is active.
+   */
+  private async wakeIfSuspended(agentName: string): Promise<void> {
+    const agent = this.db.getAgent(agentName);
+    if (!agent || !agent.proxyId || agent.state !== 'suspended') return;
+    if (this.resumesInFlight.has(agentName)) return;
+    if (this.db.getDeliverableMessages(agentName).length === 0) return;
+
+    this.resumesInFlight.add(agentName);
+    try {
+      console.log(`[dispatcher] ${agentName} is suspended with a pending message, resuming`);
+      await this.resumeAgentFn(this.makeLifecycleCtx(), agentName);
+      this.db.logEvent(agentName, 'resumed_for_message');
+      this.signalLifecycleOp(agentName);
+      this.onAgentUpdate(agentName);
+    } catch (err) {
+      console.error(`[dispatcher] Wake-on-message resume failed for ${agentName}:`, (err as Error).message);
+      this.db.logEvent(agentName, 'resume_for_message_failed', undefined, { error: (err as Error).message });
+      this.onAgentUpdate(agentName);
+    } finally {
+      this.resumesInFlight.delete(agentName);
+    }
   }
 
   /**
@@ -85,6 +123,8 @@ export class MessageDispatcher {
   async tryDeliver(agentName: string): Promise<boolean> {
     // Recover any stale delivery attempts before trying
     this.db.resetStaleAttempts(MessageDispatcher.STALE_ATTEMPT_TIMEOUT_S);
+
+    await this.wakeIfSuspended(agentName);
 
     const agent = this.db.getAgent(agentName);
     if (!agent || !agent.proxyId || !canSuspend(agent)) {
@@ -190,6 +230,8 @@ export class MessageDispatcher {
       try {
         // Recover stale attempts before each drain cycle
         this.db.resetStaleAttempts(MessageDispatcher.STALE_ATTEMPT_TIMEOUT_S);
+
+        await this.wakeIfSuspended(agentName);
 
         const agent = this.db.getAgent(agentName);
         if (!agent || !agent.proxyId || !canSuspend(agent)) {
