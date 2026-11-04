@@ -20,7 +20,8 @@ import type { LockManager } from '../shared/lock.ts';
 import type { ProxyCommand, ProxyResponse, AgentRecord, PendingMessage, DashboardMessage, IndicatorDefinition, ActiveIndicator, PipelineStep, DetectionConfig } from '../shared/types.ts';
 import { sessionName, canSuspend } from '../shared/agent-entity.ts';
 import { getAdapter } from './adapters/index.ts';
-import { reloadAgent, recoverAgent, recycleAgent, type LifecycleContext } from './lifecycle.ts';
+import { reloadAgent, recoverAgent, recycleAgent, suspendAgent, type LifecycleContext } from './lifecycle.ts';
+import { personaAllowsAutoSuspend } from './persona.ts';
 import { resolveEffectiveConfig } from './engine-config-resolver.ts';
 import { cliFailurePatterns, shellPromptPatterns } from './cli-failure-patterns.ts';
 import { parseContextWindow } from '../shared/context-window.ts';
@@ -45,11 +46,17 @@ export type HealthMonitorOptions = {
   onIndicatorUpdate?: (agentName: string, indicators: ActiveIndicator[]) => void;
   onIdleDetected?: (agentName: string) => void;
   pollIntervalMs?: number;
-  idleSuspendMs?: number;        // ms of idle before suspend (default 5 minutes)
+  /** Idle time before auto-suspend, in ms. Default AUTO_SUSPEND_IDLE_MINUTES; 0 = disabled. */
+  autoSuspendIdleMs?: number;
+  /** Minimum gap between auto-suspend attempts for one agent, in ms. */
+  autoSuspendCooldownMs?: number;
+  /** Suspend implementation; defaults to lifecycle.suspendAgent. Injectable for tests. */
+  suspendAgentFn?: (ctx: LifecycleContext, name: string) => Promise<unknown>;
+  /** Persona opt-out check; defaults to reading `auto_suspend:` from the persona file. */
+  allowsAutoSuspend?: (agent: AgentRecord) => boolean;
 };
 
 const DEFAULT_POLL_MS = 30_000;
-const DEFAULT_IDLE_SUSPEND_MS = 5 * 60 * 1000;
 
 /**
  * Exponential backoff schedule for consecutive auto-recover failures of
@@ -78,6 +85,51 @@ export function autoRecoverBackoffMs(failures: number): number {
   if (failures === 2) return 2 * 60 * 1000;
   if (failures === 3) return 5 * 60 * 1000;
   return 15 * 60 * 1000;
+}
+
+/** Minutes from AUTO_SUSPEND_IDLE_MINUTES; anything not a positive number disables auto-suspend. */
+export function parseAutoSuspendMinutes(raw: string | undefined): number {
+  const n = Number.parseFloat(raw ?? '');
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+const SHELL_RE = /^-?(?:ba|z|da|fi|k|c|tc)?sh$/;
+const CLAUDE_RE = /(?:^|\/)claude(?:\s|$)|claude-code/;
+const MCP_RE = /mcp/i;
+
+/**
+ * Given `ps -axo pid=,ppid=,command=` output, return a description of the first
+ * descendant of rootPid that is not claude, a shell or an MCP server (whose
+ * whole subtree is tolerated: npx -> node chains), or null if there is none.
+ * Descendants of shells are NOT tolerated, since that is where an agent's
+ * dev server, jest or playwright run would sit.
+ */
+export function findBlockingDescendant(psOutput: string, rootPid: number): string | null {
+  const children = new Map<number, Array<{ pid: number; command: string }>>();
+  for (const line of psOutput.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (!m) continue;
+    const ppid = Number(m[2]);
+    const list = children.get(ppid) ?? [];
+    list.push({ pid: Number(m[1]), command: m[3]!.trim() });
+    children.set(ppid, list);
+  }
+  const seen = new Set<number>([rootPid]);
+  const stack = [...(children.get(rootPid) ?? [])];
+  while (stack.length > 0) {
+    const proc = stack.pop()!;
+    if (seen.has(proc.pid)) continue;
+    seen.add(proc.pid);
+    if (MCP_RE.test(proc.command)) continue; // MCP server and its subtree
+    const argv0 = proc.command.split(/\s+/)[0]!;
+    const base = argv0.slice(argv0.lastIndexOf('/') + 1);
+    if (SHELL_RE.test(base) || CLAUDE_RE.test(proc.command)) {
+      stack.push(...(children.get(proc.pid) ?? []));
+      continue;
+    }
+    return `process ${proc.pid} under the pane: ${proc.command.slice(0, 120)}`;
+  }
+  return null;
 }
 
 export class HealthMonitor {
@@ -176,7 +228,20 @@ export class HealthMonitor {
   private readonly proxyDispatch: (proxyId: string, command: ProxyCommand) => Promise<ProxyResponse>;
   private readonly orchestratorHost: string;
   private readonly pollIntervalMs: number;
-  private readonly idleSuspendMs: number;
+  private readonly autoSuspendIdleMs: number;
+  private readonly autoSuspendCooldownMs: number;
+  private readonly suspendAgentFn: (ctx: LifecycleContext, name: string) => Promise<unknown>;
+  private readonly allowsAutoSuspend: (agent: AgentRecord) => boolean;
+  /** When each agent was first seen idle in its current idle spell (auto-suspend clock). */
+  private readonly suspendIdleSince = new Map<string, number>();
+  /** Last auto-suspend attempt per agent; enforces the cool-down. */
+  private readonly lastAutoSuspendAttemptAt = new Map<string, number>();
+  /** Agents with an auto-suspend check or suspend running. */
+  private readonly autoSuspendInFlight = new Set<string>();
+  /** Minutes an agent must sit idle before it is suspended. 0 or unset disables auto-suspend. */
+  static readonly AUTO_SUSPEND_IDLE_MINUTES = parseAutoSuspendMinutes(process.env['AUTO_SUSPEND_IDLE_MINUTES']);
+  /** Cool-down between auto-suspend attempts for the same agent. */
+  static readonly AUTO_SUSPEND_COOLDOWN_MS = parseInt(process.env['AUTO_SUSPEND_COOLDOWN_MS'] ?? String(30 * 60 * 1000), 10);
   static readonly FAST_POLL_MS = 2_000;
   private readonly onAgentUpdate: (agentName: string) => void;
   private readonly onQueueUpdate: (message: PendingMessage) => void;
@@ -206,7 +271,10 @@ export class HealthMonitor {
     this.onIndicatorUpdate = opts.onIndicatorUpdate ?? (() => {});
     this.onIdleDetected = opts.onIdleDetected ?? (() => {});
     this.pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_MS;
-    this.idleSuspendMs = opts.idleSuspendMs ?? DEFAULT_IDLE_SUSPEND_MS;
+    this.autoSuspendIdleMs = opts.autoSuspendIdleMs ?? HealthMonitor.AUTO_SUSPEND_IDLE_MINUTES * 60_000;
+    this.autoSuspendCooldownMs = opts.autoSuspendCooldownMs ?? HealthMonitor.AUTO_SUSPEND_COOLDOWN_MS;
+    this.suspendAgentFn = opts.suspendAgentFn ?? ((ctx, name) => suspendAgent(ctx, name));
+    this.allowsAutoSuspend = opts.allowsAutoSuspend ?? ((a) => personaAllowsAutoSuspend(a.name, a.persona));
   }
 
   /**
@@ -344,6 +412,7 @@ export class HealthMonitor {
     if (this.timer) return;
     console.log(`[health] Starting monitor (poll every ${this.pollIntervalMs}ms, fast-poll every ${HealthMonitor.FAST_POLL_MS}ms for active agents)`);
     console.log(`[health] ${this.describeRecycleConfig()}`);
+    console.log(`[health] ${this.describeSuspendConfig()}`);
     this.timer = setInterval(() => {
       this.pollAll().catch((err) => {
         console.error('[health] Poll error:', err);
@@ -689,6 +758,12 @@ export class HealthMonitor {
   describeRecycleConfig(): string {
     const overrides = [...this.recycleThresholdOverrides].map(([name, pct]) => `${name}=${pct}%`).join(', ');
     return `auto-recycle at ${HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT}% when idle, cooldown ${Math.round(HealthMonitor.AUTO_RECYCLE_COOLDOWN_MS / 60_000)}min, overrides: ${overrides || 'none'}`;
+  }
+
+  /** The auto-suspend settings actually in force, so a missing or mistyped env var shows in the log. */
+  describeSuspendConfig(): string {
+    if (this.autoSuspendIdleMs <= 0) return 'auto-suspend disabled (AUTO_SUSPEND_IDLE_MINUTES unset or 0)';
+    return `auto-suspend after ${Math.round(this.autoSuspendIdleMs / 60_000)}min idle, cooldown ${Math.round(this.autoSuspendCooldownMs / 60_000)}min`;
   }
 
   maybeTriggerAutoRecycle(agent: AgentRecord, contextPct: number): void {
@@ -1041,17 +1116,89 @@ export class HealthMonitor {
     // by detectCliHealed() after the agent transitions to failed state.
   }
 
-  private checkIdleSuspendTimeout(agentName: string): void {
+  /**
+   * Suspend an agent that has been idle past the threshold. Disabled when the
+   * threshold is 0. The clock is the monitor's own first-seen-idle time: the
+   * DB lastActivity is refreshed on every poll, so it cannot measure idleness.
+   */
+  checkIdleSuspendTimeout(agentName: string, now: number = Date.now()): void {
     const agent = this.db.getAgent(agentName);
-    if (!agent || agent.state !== 'idle' || !agent.lastActivity) return;
+    if (!agent || agent.state !== 'idle') {
+      this.suspendIdleSince.delete(agentName);
+      return;
+    }
+    if (this.autoSuspendIdleMs <= 0) return;
+    if (!this.suspendIdleSince.has(agentName)) this.suspendIdleSince.set(agentName, now);
+    const idleMs = now - this.suspendIdleSince.get(agentName)!;
+    if (idleMs <= this.autoSuspendIdleMs) return;
+    if (this.autoSuspendInFlight.has(agentName)) return;
+    if (now - (this.lastAutoSuspendAttemptAt.get(agentName) ?? 0) < this.autoSuspendCooldownMs) return;
+    this.autoSuspendInFlight.add(agentName);
+    void this.runAutoSuspend(agent, idleMs, now);
+  }
 
-    const idleDuration = Date.now() - new Date(agent.lastActivity).getTime();
-    if (idleDuration > this.idleSuspendMs) {
-      console.log(`[health] ${agent.name} idle for ${Math.round(idleDuration / 1000)}s (exceeds ${Math.round(this.idleSuspendMs / 1000)}s threshold)`);
-      this.db.logEvent(agent.name, 'idle_timeout_exceeded', undefined, {
-        idleDurationMs: idleDuration,
-        thresholdMs: this.idleSuspendMs,
-      });
+  /** Guards, then suspend. Any doubt (lock, queue, unreadable process list) means do not suspend. */
+  async runAutoSuspend(agent: AgentRecord, idleMs: number, now: number = Date.now()): Promise<void> {
+    const name = agent.name;
+    this.autoSuspendInFlight.add(name);
+    try {
+      if (!this.allowsAutoSuspend(agent)) return; // persona opted out
+      if (this.db.hasPendingMessages(name)) return;
+      if (this.locks.isLocked(name)) return; // lifecycle op in flight
+
+      this.lastAutoSuspendAttemptAt.set(name, now);
+      const blocker = await this.findBlockingProcess(agent);
+      if (blocker !== null) {
+        console.log(`[health] ${name}: auto-suspend skipped, ${blocker}`);
+        this.db.logEvent(name, 'auto_suspend_skipped', undefined, { reason: blocker });
+        return;
+      }
+
+      // Re-check: the process scan awaited, so state may have moved.
+      const latest = this.db.getAgent(name);
+      if (!latest || latest.state !== 'idle') return;
+      if (this.db.hasPendingMessages(name) || this.locks.isLocked(name)) return;
+
+      console.log(`[health] ${name}: auto-suspend triggered (idle ${Math.round(idleMs / 60_000)}min)`);
+      this.db.logEvent(name, 'auto_suspend_triggered', undefined, { idleMinutes: Math.round(idleMs / 60_000) });
+      this.suspendIdleSince.delete(name);
+      await this.suspendAgentFn(this.makeLifecycleCtx(), name);
+      this.onAgentUpdate(name);
+    } catch (err) {
+      console.warn(`[health] ${name}: auto-suspend failed: ${(err as Error).message}`);
+    } finally {
+      this.autoSuspendInFlight.delete(name);
+    }
+  }
+
+  /**
+   * Describe the first process under the agent's pane that suspending would
+   * kill, or null when only claude, shells and MCP servers are there. Returns
+   * a reason string on any query failure too, so an unknown tree never suspends.
+   * Runs through the proxy because the orchestrator is in Docker and the
+   * processes are on the host. Uses the existing display_message and exec
+   * actions, so the proxy needs no change.
+   */
+  private async findBlockingProcess(agent: AgentRecord): Promise<string | null> {
+    const proxyId = agent.proxyId;
+    if (!proxyId) return 'no proxy';
+    try {
+      const pidRes = await this.proxyDispatch(proxyId, {
+        action: 'display_message',
+        sessionName: sessionName(agent),
+        format: '#{pane_pid}',
+      } as ProxyCommand);
+      const panePid = Number.parseInt(String(pidRes.data ?? ''), 10);
+      if (!pidRes.ok || !Number.isInteger(panePid) || panePid <= 0) return 'could not read pane pid';
+      const psRes = await this.proxyDispatch(proxyId, {
+        action: 'exec',
+        command: 'ps -axo pid=,ppid=,command=',
+        timeoutMs: 5_000,
+      } as ProxyCommand);
+      if (!psRes.ok || typeof psRes.data !== 'string') return 'could not list processes';
+      return findBlockingDescendant(psRes.data, panePid);
+    } catch (err) {
+      return `process scan failed: ${(err as Error).message}`;
     }
   }
 

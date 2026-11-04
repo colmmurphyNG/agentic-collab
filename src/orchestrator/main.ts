@@ -102,6 +102,12 @@ const messageDispatcher = new MessageDispatcher({
   onDashboardMessage: (msg) => {
     wss.broadcast(JSON.stringify({ type: 'message', msg }));
   },
+  onAgentUpdate: (agentName) => {
+    const agent = db.getAgent(agentName);
+    if (agent) {
+      wss.broadcast(JSON.stringify({ type: 'agent_update', agent }));
+    }
+  },
   onMessageDelivered: (agentName) => {
     // Immediately mark idle agents as active for instant dashboard feedback
     try {
