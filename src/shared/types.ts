@@ -433,7 +433,7 @@ export type WsEvent = WsInitEvent | WsAgentUpdateEvent | WsMessageEvent | WsProx
 // ── Proxy API ──
 
 export type ProxyCommand =
-  | { action: 'create_session'; sessionName: string; cwd: string }
+  | { action: 'create_session'; sessionName: string; cwd: string; /** Per-persona override of the proxy's AGENT_CPU_PRIORITY default. */ cpuPriority?: 'utility' | 'normal' }
   | { action: 'paste'; sessionName: string; text: string; pressEnter: boolean; typedPrefix?: string }
   | { action: 'capture'; sessionName: string; lines: number }
   | { action: 'kill_session'; sessionName: string }

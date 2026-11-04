@@ -475,7 +475,9 @@ async function createSessionAndWriteProfile(
   adapter: ReturnType<typeof getAdapter>,
   name: string,
   systemPrompt: string | null,
+  persona?: string | null,
 ): Promise<ProxyResponse> {
+  const cpuPriority = resolveCpuPriorityOverride(name, persona);
   const hasResult = await ctx
     .proxyDispatch(proxyId, { action: 'has_session', sessionName: tmuxSession })
     .catch(() => ({ ok: false, data: false }) as ProxyResponse);
@@ -497,6 +499,7 @@ async function createSessionAndWriteProfile(
     action: 'create_session',
     sessionName: tmuxSession,
     cwd,
+    ...(cpuPriority !== undefined ? { cpuPriority } : {}),
   });
   if (createResult.ok && adapter.usesConfigProfile && systemPrompt) {
     await ctx.proxyDispatch(proxyId, {
@@ -578,6 +581,27 @@ function resolveMcpAllowlist(agentName: string, persona?: string | null): string
     return mcps as string[];
   }
   return undefined;
+}
+
+/**
+ * Read the persona's `cpu_priority:` (`utility` | `normal`) from its frontmatter.
+ * Returns undefined when absent or unrecognised, so the proxy's AGENT_CPU_PRIORITY
+ * default applies. Reads the raw file for the same reason as resolveMcpAllowlist.
+ */
+export function resolveCpuPriorityOverride(agentName: string, persona?: string | null): 'utility' | 'normal' | undefined {
+  const explicitPath = persona && (persona.includes('/') || persona.endsWith('.md')) ? persona : null;
+  const personaPath = resolvePersonaPath(agentName, explicitPath, getPersonasDir());
+  if (!personaPath) return undefined;
+  let raw: string;
+  try {
+    raw = readFileSync(personaPath, 'utf-8');
+  } catch {
+    return undefined;
+  }
+  const value = parseFrontmatter(raw).frontmatter['cpu_priority'];
+  if (typeof value !== 'string') return undefined;
+  const v = value.trim().toLowerCase();
+  return v === 'utility' || v === 'normal' ? v : undefined;
 }
 
 /**
@@ -879,7 +903,7 @@ export async function spawnAgent(
 
     // 2. Create tmux session + write config profile
     const createResult = await createSessionAndWriteProfile(
-      ctx, opts.proxyId, tmuxSession, opts.cwd, adapter, opts.name, systemPrompt,
+      ctx, opts.proxyId, tmuxSession, opts.cwd, adapter, opts.name, systemPrompt, opts.persona,
     );
     if (!createResult.ok) {
       // Re-acquire lock to mark failed
@@ -1049,7 +1073,7 @@ export async function resumeAgent(
     const sessionExists = hasResult.ok && hasResult.data === true;
 
     if (!sessionExists) {
-      const createResult = await createSessionAndWriteProfile(ctx, proxyId, tmuxSession, cwd, adapter, name, systemPrompt);
+      const createResult = await createSessionAndWriteProfile(ctx, proxyId, tmuxSession, cwd, adapter, name, systemPrompt, persona);
       if (!createResult.ok) {
         await ctx.locks.withLock(name, async () => {
           const latest = ctx.db.getAgent(name);
@@ -1726,7 +1750,7 @@ export async function reloadAgent(
 
     // 5. Create fresh tmux session + write config profile
     const tmuxSession = `agent-${name}`;
-    await createSessionAndWriteProfile(ctx, proxyId, tmuxSession, cwd, adapter, name, systemPrompt);
+    await createSessionAndWriteProfile(ctx, proxyId, tmuxSession, cwd, adapter, name, systemPrompt, persona);
 
     const taskText = opts?.task ?? reloadTask;
     // For engines that support inline resume prompts (e.g. Codex), pass the task
@@ -1889,7 +1913,7 @@ export async function recoverAgent(
 
     // 3. Create fresh tmux session
     const tmuxSession = `agent-${name}`;
-    await createSessionAndWriteProfile(ctx, proxyId, tmuxSession, cwd, adapter, name, systemPrompt);
+    await createSessionAndWriteProfile(ctx, proxyId, tmuxSession, cwd, adapter, name, systemPrompt, persona);
 
     // 4. Build spawn command with new session ID
     const generatedSessionId = randomUUID();
@@ -2102,7 +2126,7 @@ export async function recycleAgent(
 
     // 4. Create fresh tmux session
     const tmuxSession = `agent-${name}`;
-    await createSessionAndWriteProfile(ctx, proxyId, tmuxSession, cwd, adapter, name, systemPrompt);
+    await createSessionAndWriteProfile(ctx, proxyId, tmuxSession, cwd, adapter, name, systemPrompt, persona);
 
     // 5. Build start command with new SESSION_ID
     const generatedSessionId = randomUUID();

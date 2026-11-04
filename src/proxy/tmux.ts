@@ -4,6 +4,7 @@
  */
 
 import { execSync, execFileSync, type ExecSyncOptions } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
 const EXEC_OPTS: ExecSyncOptions = { encoding: 'utf-8', timeout: 10_000 };
 
@@ -45,14 +46,101 @@ function exec(cmd: string): string {
 const SESSION_WIDTH = 200;
 const SESSION_HEIGHT = 50;
 
-export function createSession(sessionName: string, cwd: string): void {
+/**
+ * CPU priority for an agent's tmux session. `utility` clamps the session shell
+ * and everything it launches (claude, bash, node, test runners, dev servers) to
+ * utility QoS via macOS `taskpolicy -c utility`, so the scheduler favours
+ * efficiency cores and gives way to the operator's interactive apps. `normal`
+ * adds no wrapper at all.
+ *
+ * Deliberately NOT `taskpolicy -b`: background also throttles disk I/O hard and
+ * would make agents crawl.
+ *
+ * The clamp is applied to the session shell rather than to each pasted launch
+ * command because every launch path (spawn, resume, reload, recover, recycle and
+ * the usage poller) creates its session through `create_session`, and a custom
+ * start hook can be a compound shell command that a command prefix could not
+ * wrap. taskpolicy execs its target, so the pane pid is still the shell's pid.
+ */
+export type CpuPriority = 'utility' | 'normal';
+
+const TASKPOLICY_PATH = '/usr/sbin/taskpolicy';
+
+export function parseCpuPriority(value: unknown): CpuPriority | undefined {
+  if (typeof value !== 'string') return undefined;
+  const v = value.trim().toLowerCase();
+  return v === 'utility' || v === 'normal' ? v : undefined;
+}
+
+/** The proxy-wide default from AGENT_CPU_PRIORITY; unset or unrecognised means `utility`. */
+export function defaultCpuPriority(env: string | undefined = process.env['AGENT_CPU_PRIORITY']): CpuPriority {
+  return parseCpuPriority(env) ?? 'utility';
+}
+
+export type CpuPriorityHost = { platform: string; taskpolicyAvailable: boolean };
+
+function detectHost(): CpuPriorityHost {
+  return { platform: process.platform, taskpolicyAvailable: existsSync(TASKPOLICY_PATH) };
+}
+
+let fallbackLogged = false;
+/** Test-only: re-arm the log-once guard. */
+export function _resetCpuPriorityLogForTesting(): void { fallbackLogged = false; }
+
+/**
+ * The command prefix that clamps a session, or '' when no clamp applies:
+ * `normal` was requested, the host is not darwin, or taskpolicy is missing.
+ * An unavailable clamp that was requested is logged once per proxy process.
+ */
+export function cpuPriorityPrefix(priority: CpuPriority, host: CpuPriorityHost = detectHost()): string {
+  if (priority !== 'utility') return '';
+  if (host.platform !== 'darwin' || !host.taskpolicyAvailable) {
+    if (!fallbackLogged) {
+      fallbackLogged = true;
+      console.warn(`[proxy] CPU priority "utility" unavailable (platform=${host.platform}, taskpolicy ${host.taskpolicyAvailable ? 'present' : 'missing'}); launching agents at normal priority`);
+    }
+    return '';
+  }
+  return `${TASKPOLICY_PATH} -c utility`;
+}
+
+/** Startup log line: the priority actually in force, so a mistyped env var shows. */
+export function describeCpuPriority(env: string | undefined = process.env['AGENT_CPU_PRIORITY'], host: CpuPriorityHost = detectHost()): string {
+  const requested = env === undefined || env === '' ? undefined : env;
+  const note = requested !== undefined && parseCpuPriority(requested) === undefined ? ` (unrecognised AGENT_CPU_PRIORITY="${requested}", using default)` : '';
+  const priority = defaultCpuPriority(env);
+  const wrapper = priority === 'utility' && host.platform === 'darwin' && host.taskpolicyAvailable ? 'taskpolicy -c utility' : 'none';
+  return `agent CPU priority: ${priority}, wrapper: ${wrapper}${note}, per-persona override: cpu_priority`;
+}
+
+const SAFE_SHELL = /^[A-Za-z0-9_./+-]+$/;
+
+/** Build the `tmux new-session` command line. Exported for tests. */
+export function buildCreateSessionCommand(
+  sessionName: string,
+  cwd: string,
+  path: string,
+  priority: CpuPriority,
+  host: CpuPriorityHost = detectHost(),
+  shell: string = process.env['SHELL'] || '/bin/zsh',
+): string {
+  const base = `tmux new-session -d -s '${esc(sessionName)}' -c '${esc(cwd)}' -x ${SESSION_WIDTH} -y ${SESSION_HEIGHT} -e CLAUDECODE= -e PATH='${esc(path)}'`;
+  const prefix = cpuPriorityPrefix(priority, host);
+  if (!prefix) return base;
+  // An unusual $SHELL path is not worth quoting around: fall back to no clamp.
+  if (!SAFE_SHELL.test(shell)) return base;
+  // -l keeps it a login shell, which tmux's default shell-command would have been.
+  return `${base} '${prefix} ${shell} -l'`;
+}
+
+export function createSession(sessionName: string, cwd: string, cpuPriority: CpuPriority = defaultCpuPriority()): void {
   validateSessionName(sessionName);
   // Unset CLAUDECODE so spawned Claude Code instances don't think they're nested.
   // The proxy may itself be launched from within a Claude Code session.
   // Explicitly pass PATH so engines like Codex that spawn sub-shells don't lose
   // the collab bin directory that the proxy prepended at startup.
   const path = process.env['PATH'] ?? '';
-  exec(`tmux new-session -d -s '${esc(sessionName)}' -c '${esc(cwd)}' -x ${SESSION_WIDTH} -y ${SESSION_HEIGHT} -e CLAUDECODE= -e PATH='${esc(path)}'`);
+  exec(buildCreateSessionCommand(sessionName, cwd, path, cpuPriority));
 }
 
 export function hasSession(sessionName: string): boolean {
