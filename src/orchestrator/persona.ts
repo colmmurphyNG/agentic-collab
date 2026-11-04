@@ -86,6 +86,12 @@ export type PersonaFrontmatter = {
    * (AUTO_SUSPEND_IDLE_MINUTES). Omitted or any other value = eligible.
    */
   auto_suspend?: boolean;
+  /**
+   * CPU priority for this agent's tmux session: `utility` (clamp to utility QoS
+   * via taskpolicy, the default) or `normal` (no clamp). Overrides the proxy's
+   * AGENT_CPU_PRIORITY for this persona only.
+   */
+  cpu_priority?: 'utility' | 'normal';
 };
 
 export type ParsedPersona = {

@@ -1,4 +1,4 @@
-import { describe, it, after, beforeEach } from 'node:test';
+import { describe, it, after, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, existsSync, rmSync } from 'node:fs';
@@ -15,6 +15,12 @@ import {
   pasteText,
   sendKeysRaw,
   PASTE_FLAGS,
+  buildCreateSessionCommand,
+  cpuPriorityPrefix,
+  defaultCpuPriority,
+  describeCpuPriority,
+  parseCpuPriority,
+  _resetCpuPriorityLogForTesting,
 } from './tmux.ts';
 
 describe('tmux sendKeys validation', () => {
@@ -295,5 +301,123 @@ describe('paste flags are load-bearing', () => {
 
   it('keeps the buffer deletion, so delivered messages do not accumulate in a shared clipboard', () => {
     assert.match(PASTE_FLAGS, /(^|\s)-d(\s|$)/, 'removing -d leaves every message readable server-wide');
+  });
+});
+
+const MAC = { platform: 'darwin', taskpolicyAvailable: true };
+const LINUX = { platform: 'linux', taskpolicyAvailable: false };
+const NO_TASKPOLICY = { platform: 'darwin', taskpolicyAvailable: false };
+
+// The pre-change command line, spelled out so `normal` is checked byte-for-byte
+// against what the proxy used to send rather than against the code under test.
+const LEGACY_CMD = "tmux new-session -d -s 'agent-x' -c '/tmp/work' -x 200 -y 50 -e CLAUDECODE= -e PATH='/usr/bin:/bin'";
+
+describe('agent CPU priority: session command', () => {
+  beforeEach(() => _resetCpuPriorityLogForTesting());
+
+  it('wraps the session shell with taskpolicy -c utility by default', () => {
+    const cmd = buildCreateSessionCommand('agent-x', '/tmp/work', '/usr/bin:/bin', defaultCpuPriority(undefined), MAC, '/bin/zsh');
+    assert.equal(cmd, `${LEGACY_CMD} '/usr/sbin/taskpolicy -c utility /bin/zsh -l'`);
+  });
+
+  it('never uses the background clamp, which throttles disk I/O', () => {
+    const cmd = buildCreateSessionCommand('agent-x', '/tmp/work', '/usr/bin:/bin', 'utility', MAC, '/bin/zsh');
+    assert.doesNotMatch(cmd, /taskpolicy[^']*\s-b(\s|')/);
+    assert.doesNotMatch(cmd, /-c background/);
+  });
+
+  it('leaves the command byte-for-byte unchanged for normal', () => {
+    assert.equal(buildCreateSessionCommand('agent-x', '/tmp/work', '/usr/bin:/bin', 'normal', MAC, '/bin/zsh'), LEGACY_CMD);
+  });
+
+  it('AGENT_CPU_PRIORITY=normal selects the unwrapped command', () => {
+    const cmd = buildCreateSessionCommand('agent-x', '/tmp/work', '/usr/bin:/bin', defaultCpuPriority('normal'), MAC, '/bin/zsh');
+    assert.equal(cmd, LEGACY_CMD);
+  });
+
+  it('a per-session override beats the env default in both directions', () => {
+    const envNormal = defaultCpuPriority('normal');
+    assert.match(buildCreateSessionCommand('agent-x', '/tmp/work', '/p', parseCpuPriority('utility') ?? envNormal, MAC, '/bin/zsh'), /taskpolicy -c utility/);
+    const envUtility = defaultCpuPriority('utility');
+    assert.equal(buildCreateSessionCommand('agent-x', '/tmp/work', '/usr/bin:/bin', parseCpuPriority('normal') ?? envUtility, MAC, '/bin/zsh'), LEGACY_CMD);
+  });
+
+  it('parses case-insensitively and rejects unknown values', () => {
+    assert.equal(parseCpuPriority('UTILITY'), 'utility');
+    assert.equal(parseCpuPriority(' normal '), 'normal');
+    assert.equal(parseCpuPriority('background'), undefined);
+    assert.equal(parseCpuPriority(undefined), undefined);
+    assert.equal(defaultCpuPriority('bogus'), 'utility');
+    assert.equal(defaultCpuPriority(''), 'utility');
+  });
+
+  it('falls back to no wrapper on a non-darwin host', () => {
+    mock.method(console, 'warn', () => {});
+    assert.equal(buildCreateSessionCommand('agent-x', '/tmp/work', '/usr/bin:/bin', 'utility', LINUX, '/bin/zsh'), LEGACY_CMD);
+    mock.restoreAll();
+  });
+
+  it('falls back to no wrapper when taskpolicy is missing', () => {
+    mock.method(console, 'warn', () => {});
+    assert.equal(buildCreateSessionCommand('agent-x', '/tmp/work', '/usr/bin:/bin', 'utility', NO_TASKPOLICY, '/bin/zsh'), LEGACY_CMD);
+    mock.restoreAll();
+  });
+
+  it('logs the fallback once, not per session', () => {
+    const warn = mock.method(console, 'warn', () => {});
+    cpuPriorityPrefix('utility', LINUX);
+    cpuPriorityPrefix('utility', LINUX);
+    cpuPriorityPrefix('utility', NO_TASKPOLICY);
+    assert.equal(warn.mock.callCount(), 1);
+    mock.restoreAll();
+  });
+
+  it('does not log for normal, which asks for nothing', () => {
+    const warn = mock.method(console, 'warn', () => {});
+    cpuPriorityPrefix('normal', LINUX);
+    assert.equal(warn.mock.callCount(), 0);
+    mock.restoreAll();
+  });
+
+  it('skips the clamp rather than quote around an unusual $SHELL', () => {
+    assert.equal(buildCreateSessionCommand('agent-x', '/tmp/work', '/usr/bin:/bin', 'utility', MAC, "/bin/z sh'; rm -rf /"), LEGACY_CMD);
+  });
+
+  it('startup line reports the priority in force and flags a mistyped value', () => {
+    assert.match(describeCpuPriority(undefined, MAC), /priority: utility, wrapper: taskpolicy -c utility/);
+    assert.match(describeCpuPriority('normal', MAC), /priority: normal, wrapper: none/);
+    assert.match(describeCpuPriority('utlity', MAC), /unrecognised AGENT_CPU_PRIORITY="utlity"/);
+    assert.match(describeCpuPriority(undefined, LINUX), /wrapper: none/);
+  });
+});
+
+// Real tmux on macOS: the clamp must reach the shell and its children, and the
+// pane pid (#{pane_pid}) must still be the shell, i.e. taskpolicy exec'd.
+describe('agent CPU priority: real tmux', { skip: !tmuxAvailable() || process.platform !== 'darwin' }, () => {
+  const name = `collabtest-cpuprio-${process.pid}`;
+  const sync = (cmd: string, args: string[]): string => execFileSync(cmd, args, { encoding: 'utf8', timeout: 5000 }).trim();
+  const kill = (): void => {
+    try { execFileSync('tmux', ['kill-session', '-t', `=${name}`], { timeout: 5000, stdio: 'ignore' }); } catch { /* gone */ }
+  };
+  beforeEach(kill);
+  after(kill);
+
+  function paneShell(): { pid: string; comm: string } {
+    const pid = sync('tmux', ['display-message', '-p', '-t', `=${name}:`, '#{pane_pid}']);
+    return { pid, comm: sync('ps', ['-o', 'command=', '-p', pid]) };
+  }
+
+  it('keeps the pane pid on the shell and clamps it to utility, unlike normal', () => {
+    createSession(name, process.cwd(), 'utility');
+    const clamped = paneShell();
+    assert.match(clamped.comm, /zsh|bash|sh/, `pane pid must be the shell itself, got: ${clamped.comm}`);
+    assert.doesNotMatch(clamped.comm, /taskpolicy/);
+    const clampedPri = sync('ps', ['-o', 'pri=', '-p', clamped.pid]);
+    kill();
+    createSession(name, process.cwd(), 'normal');
+    const plain = paneShell();
+    const plainPri = sync('ps', ['-o', 'pri=', '-p', plain.pid]);
+    assert.notEqual(clampedPri, plainPri, 'utility clamp must change the scheduling priority');
+    assert.ok(Number(clampedPri) < Number(plainPri), `utility ${clampedPri} should be below normal ${plainPri}`);
   });
 });

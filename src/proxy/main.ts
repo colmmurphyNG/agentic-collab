@@ -31,6 +31,7 @@ if (existsSync(join(collabBinDir, 'collab')) && !process.env['PATH']?.split(':')
 const PROXY_PORT = parseInt(process.env['PROXY_PORT'] ?? '3100', 10);
 const PROXY_HOST = process.env['PROXY_HOST'] ?? `host.docker.internal:${PROXY_PORT}`;
 const PROXY_ID = process.env['PROXY_ID'] ?? hostname();
+console.log(`[proxy] ${tmux.describeCpuPriority()}`);
 
 let orchestratorUrl = '';
 let orchestratorSecret: string | null = null;
@@ -116,7 +117,7 @@ async function executeCommand(command: ProxyCommand): Promise<ProxyResponse> {
   try {
     switch (command.action) {
       case 'create_session':
-        tmux.createSession(command.sessionName, command.cwd);
+        tmux.createSession(command.sessionName, command.cwd, tmux.parseCpuPriority(command.cpuPriority) ?? tmux.defaultCpuPriority());
         return { ok: true };
 
       case 'paste':
