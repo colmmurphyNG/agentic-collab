@@ -428,7 +428,10 @@ describe('Lifecycle', () => {
 
   describe('spawnAgent — /status screen is never left open', () => {
     const ID = 'acbc5499-5a68-41d9-8970-424fe3804d90';
-    const MODAL = `Settings:  Status   Config   Usage\n Session ID: ${ID}\n Esc to cancel\n`;
+    // Layout captured from a live Claude Code 2.1.325 pane: tab row first, then a
+    // diagnostics list long enough to push the tab row out of a short tail window.
+    const DIAGNOSTICS = Array.from({ length: 30 }, (_, i) => `    ⚠ Permission allow rule ${i}: example warning`).join('\n');
+    const MODAL = `   Settings  Status   Config   Usage   Stats\n   Version:                2.1.325\n   Session ID:             ${ID}\n   Model:                  claude-opus-5-5\n   System diagnostics\n${DIAGNOSTICS}\n`;
     const status = [
       { type: 'shell', command: '/status' },
       { type: 'wait', ms: 1 },

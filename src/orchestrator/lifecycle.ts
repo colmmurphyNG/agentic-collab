@@ -158,12 +158,14 @@ function wrapLaunchResult(result: HookResult, agent: AgentRecord, personaFile: s
  * The Claude Code `/status` Settings screen. Anything typed while it is open goes into
  * the modal and is lost, so launch and delivery both check for it before moving on.
  */
-const STATUS_SCREEN_RE = /Settings:.*\bStatus\b.*\bConfig\b/;
-const STATUS_SCREEN_TAIL_LINES = 20;
+// The screen's tab row, e.g. "   Settings  Status   Config   Usage   Stats" (Claude Code 2.1.x).
+// It sits above a diagnostics list of variable length, so the whole capture is checked;
+// once dismissed, nothing of the screen stays in the pane.
+const STATUS_SCREEN_RE = /^\s*Settings\s+Status\s+Config\b/m;
 const SESSION_ID_FLAG_RE = /--session-id[ =]+'?"?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/;
 
 function isStatusScreenOpen(pane: string): boolean {
-  return STATUS_SCREEN_RE.test(pane.split('\n').slice(-STATUS_SCREEN_TAIL_LINES).join('\n'));
+  return STATUS_SCREEN_RE.test(pane);
 }
 
 /**
@@ -179,7 +181,7 @@ async function dismissStatusScreen(
   settleMs: number,
 ): Promise<boolean> {
   for (let i = 0; i <= retries; i++) {
-    const cap = await ctx.proxyDispatch(proxyId, { action: 'capture', sessionName: tmuxSession, lines: 40 });
+    const cap = await ctx.proxyDispatch(proxyId, { action: 'capture', sessionName: tmuxSession, lines: 80 });
     if (!cap.ok || typeof cap.data !== 'string') return true;
     if (!isStatusScreenOpen(cap.data)) return true;
     if (i === retries) break;
