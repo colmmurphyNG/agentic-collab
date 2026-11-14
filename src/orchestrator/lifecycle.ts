@@ -154,6 +154,41 @@ function wrapLaunchResult(result: HookResult, agent: AgentRecord, personaFile: s
   return result;
 }
 
+/**
+ * The Claude Code `/status` Settings screen. Anything typed while it is open goes into
+ * the modal and is lost, so launch and delivery both check for it before moving on.
+ */
+const STATUS_SCREEN_RE = /Settings:.*\bStatus\b.*\bConfig\b/;
+const STATUS_SCREEN_TAIL_LINES = 20;
+const SESSION_ID_FLAG_RE = /--session-id[ =]+'?"?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/;
+
+function isStatusScreenOpen(pane: string): boolean {
+  return STATUS_SCREEN_RE.test(pane.split('\n').slice(-STATUS_SCREEN_TAIL_LINES).join('\n'));
+}
+
+/**
+ * Close the `/status` screen if a pane capture confirms it is open. One Escape per
+ * confirmed sighting, never blind: a second Escape on a clear prompt can open the
+ * rewind menu. Returns true when the pane is clear afterwards.
+ */
+async function dismissStatusScreen(
+  ctx: LifecycleContext,
+  proxyId: string,
+  tmuxSession: string,
+  retries: number,
+  settleMs: number,
+): Promise<boolean> {
+  for (let i = 0; i <= retries; i++) {
+    const cap = await ctx.proxyDispatch(proxyId, { action: 'capture', sessionName: tmuxSession, lines: 40 });
+    if (!cap.ok || typeof cap.data !== 'string') return true;
+    if (!isStatusScreenOpen(cap.data)) return true;
+    if (i === retries) break;
+    await ctx.proxyDispatch(proxyId, { action: 'send_keys', sessionName: tmuxSession, keys: 'Escape' });
+    await sleep(settleMs);
+  }
+  return false;
+}
+
 /** How many times a capture step reads the pane before giving up, and the gap between reads. */
 export const CAPTURE_DEFAULT_ATTEMPTS = 10;
 export const CAPTURE_DEFAULT_INTERVAL_MS = 500;
@@ -245,7 +280,38 @@ async function dispatchHookResult(
   }
 
   if (result.mode === 'pipeline') {
-    for (const step of normalizePipelineSteps(result.steps)) {
+    // Session id the launch line already fixed via --session-id, and the /status
+    // screen state, so the scrape can be skipped or its dismissal verified.
+    let launchSessionId: string | null = null;
+    let statusOpened = false;
+    let skipStatusScrape = false;
+    const pipelineSteps = normalizePipelineSteps(result.steps);
+    for (let idx = 0; idx < pipelineSteps.length; idx++) {
+      const step = pipelineSteps[idx]!;
+      if (skipStatusScrape) {
+        // Drop the waits, the capture and the Escape that belonged to a skipped /status.
+        if (step.type === 'wait') continue;
+        if (step.type === 'capture' && step.var === 'SESSION_ID') continue;
+        if (step.type === 'keystroke' && step.key === 'Escape') { skipStatusScrape = false; continue; }
+        skipStatusScrape = false;
+      }
+      if (step.type === 'shell' && step.command.trim() === '/status' && launchSessionId && opts?.agentName) {
+        const rest = pipelineSteps.slice(idx + 1);
+        const nextReal = rest.find(s2 => s2.type !== 'wait');
+        if (nextReal && nextReal.type === 'capture' && nextReal.var === 'SESSION_ID') {
+          // The id is already known: scraping it would only open a screen to close again.
+          capturedNow['SESSION_ID'] = launchSessionId;
+          ctx.db.updateAgentCapturedVar(opts.agentName, 'SESSION_ID', launchSessionId);
+          console.log(`[lifecycle] ${opts.agentName}: $SESSION_ID = ${launchSessionId} from --session-id, skipping /status scrape`);
+          skipStatusScrape = true;
+          continue;
+        }
+      }
+      if (step.type === 'shell') {
+        const flag = SESSION_ID_FLAG_RE.exec(step.command);
+        if (flag) launchSessionId = flag[1]!;
+        statusOpened = step.command.trim() === '/status';
+      }
       if (step.type === 'keystrokes') {
         Object.assign(capturedNow, await dispatchHookResult(ctx, proxyId, tmuxSession, { mode: 'send', actions: step.actions }, opts));
       } else if (step.type === 'keystroke') {
@@ -264,6 +330,12 @@ async function dispatchHookResult(
         // the next step — prevents Escape from eating the first character of
         // a subsequent paste (e.g. "/exit" → "xit")
         await sleep(100);
+        if (step.key === 'Escape' && statusOpened) {
+          statusOpened = false;
+          if (!await dismissStatusScreen(ctx, proxyId, tmuxSession, 2, 500)) {
+            console.warn(`[lifecycle] ${opts?.agentName ?? tmuxSession}: /status screen still open after Escape`);
+          }
+        }
       } else if (step.type === 'shell') {
         // Split paste and Enter into separate dispatches so the terminal
         // ingestion delay happens orchestrator-side, not inside the HTTP
@@ -314,7 +386,13 @@ async function dispatchHookResult(
             // captured and re-written to the DB as the live session id.
             // Without this filter, a stale-resume produces an infinite recovery
             // loop on the dead UUID (see scratch/brain/lifecycle-resume-bug.md).
-            const sanitised = stripCliFailureLines(captureResult.data);
+            let sanitised = stripCliFailureLines(captureResult.data);
+            // After /status only the screen's own "Session ID:" line counts. The launch
+            // line is still in the pane and carries the same uuid, so matching it
+            // returns before the screen has rendered and the Escape then lands too early.
+            if (statusOpened && step.regex === 'uuid') {
+              sanitised = sanitised.split('\n').filter(l => /session id/i.test(l)).join('\n');
+            }
             const match = re.exec(sanitised);
             if (match && match[1]) {
               const captured = match[1].trim();
@@ -2474,6 +2552,13 @@ export async function deliverToAgent(
       // Resolve engine config defaults for hook fields
       const engineConfig = ctx.db.getEngineConfig(currentAgent.engine);
       const effectiveAgent = resolveEffectiveConfig(currentAgent, engineConfig);
+
+      // Typing into the /status screen loses the message while the queue reports it delivered.
+      if (effectiveAgent.engine === 'claude'
+        && !await dismissStatusScreen(ctx, proxyId, sessionName(currentAgent), 2, 500)) {
+        error = 'Agent pane is stuck on the /status screen; message not delivered';
+        return;
+      }
 
       const hookResult = resolveHook('submit', effectiveAgent.hookSubmit, effectiveAgent, { task: text });
       // Wrap proxyDispatch to throw on failure so dispatchHookResult propagates errors

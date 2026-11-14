@@ -76,8 +76,9 @@ describe('Race Conditions', () => {
       const dispatcher = new MessageDispatcher({
         db,
         locks: new LockManager(db.rawDb),
-        proxyDispatch: async (_proxyId, _command) => {
-          deliveryAttempts++;
+        proxyDispatch: async (_proxyId, command) => {
+          // The pre-delivery /status screen check is a read, not a delivery attempt.
+          if (command.action !== 'capture') deliveryAttempts++;
           // Simulate proxy failure
           return { ok: false, error: 'Proxy connection refused' };
         },
