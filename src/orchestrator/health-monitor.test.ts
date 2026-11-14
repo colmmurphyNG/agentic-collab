@@ -214,6 +214,92 @@ describe('HealthMonitor', () => {
     assert.equal(recycleCalls, 0, 'active state should NOT trigger recycle');
   });
 
+  describe('recycle wrap-up nudge', () => {
+    function agentIn(name: string, state: 'active' | 'idle') {
+      db.createAgent({ name, engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      const a = db.getAgent(name)!;
+      db.updateAgentState(name, state, a.version, { tmuxSession: `agent-${name}`, proxyId: 'p1' });
+      return db.getAgent(name)!;
+    }
+
+    function setup() {
+      const queued: string[] = [];
+      const monitor = makeMonitor({ onSystemMessageQueued: (n) => { queued.push(n); } });
+      const recycled: string[] = [];
+      (monitor as unknown as { runAutoRecycle(name: string): Promise<void> }).runAutoRecycle = async (n) => { recycled.push(n); };
+      const nudges = (name: string) => db.getDeliverableMessages(name).filter((m) => m.envelope.includes('recycle point'));
+      return { monitor, queued, recycled, nudges };
+    }
+
+    it('should queue one wrap-up message when a busy agent is over its threshold', () => {
+      const a = agentIn('nudge-busy', 'active');
+      const { monitor, queued, recycled, nudges } = setup();
+      monitor.maybeTriggerAutoRecycle(a, 95);
+      assert.equal(nudges('nudge-busy').length, 1);
+      assert.deepEqual(queued, ['nudge-busy']);
+      assert.deepEqual(recycled, [], 'a busy agent is not recycled');
+    });
+
+    it('should not nudge twice in the same threshold crossing', () => {
+      const a = agentIn('nudge-once', 'active');
+      const { monitor, nudges } = setup();
+      monitor.maybeTriggerAutoRecycle(a, 95);
+      monitor.maybeTriggerAutoRecycle(a, 96);
+      assert.equal(nudges('nudge-once').length, 1);
+    });
+
+    it('should not nudge an idle agent, which recycles instead', () => {
+      const a = agentIn('nudge-idle', 'idle');
+      const { monitor, recycled, nudges } = setup();
+      monitor.maybeTriggerAutoRecycle(a, 95);
+      assert.equal(nudges('nudge-idle').length, 0);
+      assert.deepEqual(recycled, ['nudge-idle']);
+    });
+
+    it('should not nudge below the threshold', () => {
+      const a = agentIn('nudge-below', 'active');
+      const { monitor, nudges } = setup();
+      monitor.maybeTriggerAutoRecycle(a, 91);
+      assert.equal(nudges('nudge-below').length, 0);
+    });
+
+    it('should not nudge when AUTO_RECYCLE_NUDGE is off', () => {
+      const a = agentIn('nudge-off', 'active');
+      const { monitor, nudges } = setup();
+      (monitor as unknown as { recycleNudgeEnabled: boolean }).recycleNudgeEnabled = false;
+      monitor.maybeTriggerAutoRecycle(a, 95);
+      assert.equal(nudges('nudge-off').length, 0);
+      assert.match(monitor.describeRecycleConfig(), /wrap-up nudge off/);
+    });
+
+    it('should not nudge an agent still inside the recycle cool-down', () => {
+      const a = agentIn('nudge-cool', 'active');
+      const { monitor, nudges } = setup();
+      (monitor as unknown as { lastAutoRecycleAt: Map<string, number> }).lastAutoRecycleAt.set('nudge-cool', Date.now());
+      monitor.maybeTriggerAutoRecycle(a, 95);
+      assert.equal(nudges('nudge-cool').length, 0);
+    });
+
+    it('should nudge again after the agent recycles and crosses the line again', () => {
+      const a = agentIn('nudge-rearm', 'active');
+      const { monitor, nudges } = setup();
+      monitor.maybeTriggerAutoRecycle(a, 95);
+      monitor.maybeTriggerAutoRecycle({ ...a, state: 'idle' }, 95);  // recycle fires, clears the marker
+      (monitor as unknown as { lastAutoRecycleAt: Map<string, number> }).lastAutoRecycleAt.clear();
+      monitor.maybeTriggerAutoRecycle(a, 95);
+      assert.equal(nudges('nudge-rearm').length, 2);
+    });
+
+    it('should nudge again after context drops below the threshold', () => {
+      const a = agentIn('nudge-drop', 'active');
+      const { monitor, nudges } = setup();
+      monitor.maybeTriggerAutoRecycle(a, 95);
+      monitor.maybeTriggerAutoRecycle(a, 10);
+      monitor.maybeTriggerAutoRecycle(a, 95);
+      assert.equal(nudges('nudge-drop').length, 2);
+    });
+  });
+
   describe('idle reset', () => {
     const MIN = 60_000;
     const WINDOW = 1_000_000;
