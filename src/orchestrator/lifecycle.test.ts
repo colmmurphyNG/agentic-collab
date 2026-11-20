@@ -9,7 +9,7 @@ import type { ProxyCommand, ProxyResponse } from '../shared/types.ts';
 import { shellQuote } from '../shared/utils.ts';
 import {
   spawnAgent, resumeAgent, suspendAgent, destroyAgent,
-  reloadAgent, interruptAgent, compactAgent, killAgent, startWatchdog,
+  reloadAgent, deliverToAgent, interruptAgent, compactAgent, killAgent, startWatchdog,
   executeCustomButton, executeIndicatorAction, normalizePipelineSteps,
   claudeAddDirFlags, withLaunchEnv, composeHandoffBody,
   _resetLitellmKeysCacheForTesting,
@@ -423,6 +423,123 @@ describe('Lifecycle', () => {
       await spawnAgent(late.ctx, { name: 'cap-default', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
 
       assert.equal(db.getAgent('cap-default')?.capturedVars?.['SESSION_ID'], NEW_ID);
+    });
+  });
+
+  describe('spawnAgent — /status screen is never left open', () => {
+    const ID = 'acbc5499-5a68-41d9-8970-424fe3804d90';
+    // Layout captured from a live Claude Code 2.1.325 pane: tab row first, then a
+    // diagnostics list long enough to push the tab row out of a short tail window.
+    const DIAGNOSTICS = Array.from({ length: 30 }, (_, i) => `    ⚠ Permission allow rule ${i}: example warning`).join('\n');
+    const MODAL = `   Settings  Status   Config   Usage   Stats\n   Version:                2.1.325\n   Session ID:             ${ID}\n   Model:                  claude-opus-5-5\n   System diagnostics\n${DIAGNOSTICS}\n`;
+    const status = [
+      { type: 'shell', command: '/status' },
+      { type: 'wait', ms: 1 },
+      { type: 'capture', lines: 30, regex: 'uuid', var: 'SESSION_ID', intervalMs: 1 },
+      { type: 'keystroke', key: 'Escape' },
+    ];
+
+    // Models the real pane: the launch line (with the id) is visible from the start,
+    // the screen renders `renderAfter` reads after /status is pasted, and an Escape
+    // only closes it if it arrives once rendered. `lostEscapes` Escapes are swallowed.
+    function simCtx(renderAfter: number, lostEscapes = 0) {
+      let statusPasted = false, rendered = false, early = 0, reads = 0, open = false, lost = lostEscapes;
+      const log: string[] = [];
+      const c: LifecycleContext = {
+        ...ctx,
+        proxyDispatch: async (_p: string, command: ProxyCommand): Promise<ProxyResponse> => {
+          proxyCommands.push(command);
+          if (command.action === 'has_session') return { ok: true, data: false };
+          if (command.action === 'paste') {
+            log.push(`paste:${command.text.slice(0, 12)}`);
+            if (command.text.trim() === '/status') { statusPasted = true; reads = 0; }
+            return { ok: true };
+          }
+          if (command.action === 'send_keys') {
+            log.push(`keys:${command.keys}`);
+            if (command.keys === 'Escape' && statusPasted && !rendered) early++;
+            if (command.keys === 'Escape' && open) { if (lost > 0) lost--; else open = false; }
+            return { ok: true };
+          }
+          if (command.action === 'capture') {
+            if (statusPasted && !rendered) { reads++; if (reads > renderAfter) { open = true; rendered = true; } }
+            return { ok: true, data: `$ claude --resume ${ID} --append\n` + (open ? MODAL : '> \n') };
+          }
+          return { ok: true };
+        },
+      };
+      return { c, log, isOpen: () => open, early: () => early };
+    }
+
+    it('should skip the scrape when the launch line passes --session-id', async () => {
+      const hook = JSON.stringify([{ type: 'shell', command: `claude --session-id ${ID} --x` }, ...status]);
+      db.createAgent({ name: 'st-skip', engine: 'claude', cwd: '/tmp', proxyId: 'p1', hookStart: hook });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      const sim = simCtx(0);
+
+      await spawnAgent(sim.c, { name: 'st-skip', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+
+      assert.equal(sim.log.some(l => l.startsWith('paste:/status')), false, '/status must not be sent');
+      assert.equal(sim.log.includes('keys:Escape'), false, 'no Escape without a screen to close');
+      assert.equal(db.getAgent('st-skip')?.capturedVars?.['SESSION_ID'], ID);
+    });
+
+    it('should wait for the screen to render before sending Escape', async () => {
+      const hook = JSON.stringify([{ type: 'shell', command: `claude --resume ${ID}` }, ...status]);
+      db.createAgent({ name: 'st-late', engine: 'claude', cwd: '/tmp', proxyId: 'p1', hookStart: hook });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      const sim = simCtx(3);
+
+      await spawnAgent(sim.c, { name: 'st-late', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+
+      assert.equal(sim.early(), 0, 'Escape must not reach the CLI before the screen has rendered');
+      assert.equal(sim.isOpen(), false, 'the screen must be closed when the spawn returns');
+    });
+
+    it('should retry Escape once when the screen is confirmed still open, not blindly', async () => {
+      const hook = JSON.stringify([{ type: 'shell', command: `claude --resume ${ID}` }, ...status]);
+      db.createAgent({ name: 'st-lost', engine: 'claude', cwd: '/tmp', proxyId: 'p1', hookStart: hook });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      const lost = simCtx(0, 1);
+      await spawnAgent(lost.c, { name: 'st-lost', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      assert.equal(lost.log.filter(l => l === 'keys:Escape').length, 2);
+      assert.equal(lost.isOpen(), false);
+
+      db.createAgent({ name: 'st-clean', engine: 'claude', cwd: '/tmp', proxyId: 'p1', hookStart: hook });
+      const clean = simCtx(0);
+      await spawnAgent(clean.c, { name: 'st-clean', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      assert.equal(clean.log.filter(l => l === 'keys:Escape').length, 1, 'no second Escape on a clear pane');
+    });
+
+    it('should dismiss the screen before typing a delivered message', async () => {
+      db.createAgent({ name: 'st-deliver', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      db.registerProxy('p1', 'tok', 'localhost:3100');
+      const sim = simCtx(0);
+      // Open the screen first, as after a recycle that left it up.
+      await sim.c.proxyDispatch('p1', { action: 'paste', sessionName: 's', text: '/status', pressEnter: false });
+      await sim.c.proxyDispatch('p1', { action: 'capture', sessionName: 's', lines: 30 });
+      assert.equal(sim.isOpen(), true);
+      sim.log.length = 0;
+
+      const err = await deliverToAgent(sim.c, db.getAgent('st-deliver')!, 'hello');
+
+      assert.equal(err, null);
+      const esc = sim.log.indexOf('keys:Escape');
+      const msg = sim.log.findIndex(l => l.startsWith('paste:'));
+      assert.ok(esc >= 0 && esc < msg, 'Escape must come before the message paste');
+    });
+
+    it('should report an error rather than type into a screen that will not close', async () => {
+      db.createAgent({ name: 'st-stuck', engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      const sim = simCtx(0, 99);
+      await sim.c.proxyDispatch('p1', { action: 'paste', sessionName: 's', text: '/status', pressEnter: false });
+      await sim.c.proxyDispatch('p1', { action: 'capture', sessionName: 's', lines: 30 });
+      sim.log.length = 0;
+
+      const err = await deliverToAgent(sim.c, db.getAgent('st-stuck')!, 'hello');
+
+      assert.match(err ?? '', /\/status/);
+      assert.equal(sim.log.some(l => l.startsWith('paste:')), false, 'nothing may be typed into the modal');
     });
   });
 
