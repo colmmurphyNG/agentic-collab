@@ -160,6 +160,11 @@ const healthMonitor = new HealthMonitor({
       wss.broadcast(JSON.stringify({ type: 'message', msg }));
     }
   },
+  onSystemMessageQueued: (agentName) => {
+    messageDispatcher.tryDeliver(agentName).catch((err) => {
+      console.error(`[health] Delivery trigger failed for ${agentName}:`, (err as Error).message);
+    });
+  },
   onIdleDetected: (agentName) => {
     messageDispatcher.tryDeliver(agentName).catch((err) => {
       console.error(`[dispatcher] Idle-triggered delivery failed for ${agentName}:`, (err as Error).message);

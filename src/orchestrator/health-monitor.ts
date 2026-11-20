@@ -45,6 +45,8 @@ export type HealthMonitorOptions = {
   onDashboardMessage?: (message: DashboardMessage) => void;
   onIndicatorUpdate?: (agentName: string, indicators: ActiveIndicator[]) => void;
   onIdleDetected?: (agentName: string) => void;
+  /** Called after a system message is queued for an agent, so the dispatcher can deliver it. */
+  onSystemMessageQueued?: (agentName: string) => void;
   pollIntervalMs?: number;
   /** Idle time before auto-suspend, in ms. Default AUTO_SUSPEND_IDLE_MINUTES; 0 = disabled. */
   autoSuspendIdleMs?: number;
@@ -203,6 +205,14 @@ export class HealthMonitor {
   );
   private recycleThresholdOverrides: ReadonlyMap<string, number> = HealthMonitor.AUTO_RECYCLE_THRESHOLD_OVERRIDES;
   /**
+   * Busy agents past their recycle threshold get one wrap-up message so they
+   * go idle and the normal recycle can fire. '0' / 'false' disables it.
+   */
+  static readonly AUTO_RECYCLE_NUDGE = !['0', 'false'].includes((process.env['AUTO_RECYCLE_NUDGE'] ?? '').trim().toLowerCase());
+  private recycleNudgeEnabled = HealthMonitor.AUTO_RECYCLE_NUDGE;
+  /** Agents already nudged in their current threshold crossing. */
+  private readonly recycleNudged = new Set<string>();
+  /**
    * Cool-down between auto-recycles for the same agent. Defense-in-depth so
    * a cold-start ctx spike right after spawn doesn't immediately re-trigger.
    * Default 30 min — set to 0 in tests.
@@ -248,6 +258,7 @@ export class HealthMonitor {
   private readonly onDashboardMessage: (message: DashboardMessage) => void;
   private readonly onIndicatorUpdate: (agentName: string, indicators: ActiveIndicator[]) => void;
   private readonly onIdleDetected: (agentName: string) => void;
+  private readonly onSystemMessageQueued: (agentName: string) => void;
   private readonly activeIndicators = new Map<string, ActiveIndicator[]>();
   private readonly compiledIndicators = new Map<string, { json: string; entries: Array<{ def: IndicatorDefinition; re: RegExp }> }>();
   private readonly compiledDetection = new Map<string, CompiledDetection>();
@@ -270,6 +281,7 @@ export class HealthMonitor {
     this.onDashboardMessage = opts.onDashboardMessage ?? (() => {});
     this.onIndicatorUpdate = opts.onIndicatorUpdate ?? (() => {});
     this.onIdleDetected = opts.onIdleDetected ?? (() => {});
+    this.onSystemMessageQueued = opts.onSystemMessageQueued ?? (() => {});
     this.pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_MS;
     this.autoSuspendIdleMs = opts.autoSuspendIdleMs ?? HealthMonitor.AUTO_SUSPEND_IDLE_MINUTES * 60_000;
     this.autoSuspendCooldownMs = opts.autoSuspendCooldownMs ?? HealthMonitor.AUTO_SUSPEND_COOLDOWN_MS;
@@ -757,7 +769,7 @@ export class HealthMonitor {
   /** The recycle settings actually in force, so a missing or mistyped env var shows in the log. */
   describeRecycleConfig(): string {
     const overrides = [...this.recycleThresholdOverrides].map(([name, pct]) => `${name}=${pct}%`).join(', ');
-    return `auto-recycle at ${HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT}% when idle, cooldown ${Math.round(HealthMonitor.AUTO_RECYCLE_COOLDOWN_MS / 60_000)}min, overrides: ${overrides || 'none'}`;
+    return `auto-recycle at ${HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT}% when idle, cooldown ${Math.round(HealthMonitor.AUTO_RECYCLE_COOLDOWN_MS / 60_000)}min, wrap-up nudge ${this.recycleNudgeEnabled ? 'on' : 'off'}, overrides: ${overrides || 'none'}`;
   }
 
   /** The auto-suspend settings actually in force, so a missing or mistyped env var shows in the log. */
@@ -768,15 +780,25 @@ export class HealthMonitor {
 
   maybeTriggerAutoRecycle(agent: AgentRecord, contextPct: number): void {
     const threshold = this.recycleThresholdOverrides.get(agent.name) ?? HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT;
-    if (contextPct < threshold) return;
-    if (agent.state !== 'idle') return; // active work — defer to next poll
+    if (contextPct < threshold) {
+      this.recycleNudged.delete(agent.name);
+      return;
+    }
     const lastAt = this.lastAutoRecycleAt.get(agent.name) ?? 0;
     const sinceLast = Date.now() - lastAt;
+    if (agent.state !== 'idle') {
+      // Active work — defer to next poll, but ask the agent to wrap up.
+      if (agent.state === 'active' && sinceLast >= HealthMonitor.AUTO_RECYCLE_COOLDOWN_MS) {
+        this.maybeSendRecycleNudge(agent.name, contextPct, threshold);
+      }
+      return;
+    }
     if (sinceLast < HealthMonitor.AUTO_RECYCLE_COOLDOWN_MS) {
       // Don't spam — cool-down still active
       return;
     }
     this.lastAutoRecycleAt.set(agent.name, Date.now());
+    this.recycleNudged.delete(agent.name);
     console.log(
       `[health] ${agent.name}: auto-recycle triggered (ctx=${contextPct}% ≥ ${threshold}%, state=idle)`,
     );
@@ -785,10 +807,35 @@ export class HealthMonitor {
     void this.runAutoRecycle(agent.name);
   }
 
+  /** Queue the wrap-up message once per threshold crossing, through the normal message queue. */
+  private maybeSendRecycleNudge(agentName: string, contextPct: number, threshold: number): void {
+    if (!this.recycleNudgeEnabled || this.recycleNudged.has(agentName)) return;
+    this.recycleNudged.add(agentName);
+    const text =
+      `[system] Your context is at ${contextPct}%, past the ${threshold}% recycle point. ` +
+      'Finish the step you are on and do not start new work. Conductor recycles you automatically once you are idle, ' +
+      'and the new session picks up from a handoff snapshot (your last 30 tmux lines and last 10 dashboard messages). ' +
+      'So end with a short plain-text summary of in-flight state (what is done, what is next, key paths), save anything ' +
+      'else worth keeping to your scratch dir or memory, then stop and wait.';
+    const dashMsg = this.db.addDashboardMessage(agentName, 'to_agent', text, {
+      topic: 'recycle-nudge',
+      sourceAgent: 'system',
+      targetAgent: agentName,
+    });
+    const msg = this.db.enqueueMessage({ sourceAgent: null, targetAgent: agentName, envelope: text });
+    this.db.linkDashboardMessageToQueue(dashMsg.id, msg.id);
+    this.onDashboardMessage(dashMsg);
+    this.onQueueUpdate(msg);
+    console.log(`[health] recycle nudge sent to ${agentName} at ${contextPct}%`);
+    this.db.logEvent(agentName, 'recycle_nudge_sent', undefined, { contextPct });
+    this.onSystemMessageQueued(agentName);
+  }
+
   private async runAutoRecycle(agentName: string): Promise<void> {
     try {
       const lifecycleCtx = this.makeLifecycleCtx();
       await recycleAgent(lifecycleCtx, agentName);
+      this.recycleNudged.delete(agentName);
       this.onAgentUpdate(agentName);
     } catch (err) {
       console.warn(
