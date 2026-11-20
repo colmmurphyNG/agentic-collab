@@ -1345,6 +1345,27 @@ function projectMemorySlug(cwd: string): string | null {
 }
 
 /**
+ * First message a recycled session receives. The orchestrator stopped writing MEMORY.md
+ * pointers to handoff files, so the agent must list the folder itself. Ticket state lives
+ * in one shared file per ticket (persona _default.md section 4a), so the agent reads that
+ * before resuming.
+ */
+export function buildRecycleTask(name: string, cwd: string): string {
+  const slug = projectMemorySlug(cwd);
+  const memoryDir = slug ? `~/.claude/projects/${slug}/memory` : "your project's memory folder";
+  return [
+    'Your previous instance was recycled to reset context. Reconstruct from durable state:',
+    '1. Your persona is reloaded (system prompt + body) — re-read it.',
+    '2. Recent activity: `git log --oneline -20`',
+    '3. Peer status: `collab agents`',
+    '4. Your last messages: `collab queue --limit 20`',
+    `5. Handoff snapshot from the previous instance: the newest \`handoff_${name}_*.md\` in \`${memoryDir}\` (\`ls -1 ${memoryDir}/handoff_${name}_*.md | LC_ALL=C sort | tail -1\`). Read it to recover context.`,
+    '6. If the handoff, your messages or your branch name point at a ticket, read its state file before anything else: `~/dev/conductor/scratch/tickets/phx-XXXX.md` (or `pr-<repo>-<number>.md`). It may not exist yet.',
+    'Resume your work; notify the operator if anything needs attention.',
+  ].join('\n');
+}
+
+/**
  * Best-effort mirror of the destroy handoff snapshot into the master's
  * project memory directory, where it can be picked up by future Claude
  * Code sessions of the master persona via that project's `MEMORY.md` index.
@@ -2149,15 +2170,7 @@ export async function recycleAgent(
       ADD_DIR_FLAGS: claudeAddDirFlags(),
     };
 
-    const recycleTask = [
-      'Your previous instance was recycled to reset context. Reconstruct from durable state:',
-      '1. Your persona is reloaded (system prompt + body) — re-read it.',
-      `2. Recent activity: \`git log --oneline -20\``,
-      '3. Peer status: \`collab agents\`',
-      '4. Your last messages: \`collab queue --limit 20\`',
-      `5. Handoff snapshot from the previous instance is available via the master persona's project MEMORY.md (look for \`handoff_${name}_<timestamp>.md\` pointers). Read it to recover context.`,
-      'Resume your work; notify the operator if anything needs attention.',
-    ].join('\n');
+    const recycleTask = buildRecycleTask(name, cwd);
 
     const startResult = resolveHook('start', hookStart, effectiveCurrent, {
       spawnOpts: {
