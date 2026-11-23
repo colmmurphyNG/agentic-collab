@@ -1440,8 +1440,10 @@ export function buildRecycleTask(name: string, cwd: string): string {
     '3. Peer status: `collab agents`',
     '4. Your last messages: `collab queue --limit 20`',
     `5. Handoff snapshot from the previous instance: the newest \`handoff_${name}_*.md\` in \`${memoryDir}\` (\`ls -1 ${memoryDir}/handoff_${name}_*.md | LC_ALL=C sort | tail -1\`). Read it to recover context.`,
-    '6. If the handoff, your messages or your branch name point at a ticket, read its state file before anything else: `~/dev/conductor/scratch/tickets/phx-XXXX.md` (or `pr-<repo>-<number>.md`). It may not exist yet.',
-    'Resume your work; notify the operator if anything needs attention.',
+    `6. Notes your previous instance wrote for this session: any \`handoff*.md\` in \`${cwd}/scratch/\` from the last day.`,
+    '7. If the handoff, your notes, your messages or your branch name point at a ticket, read its state file before anything else: `~/dev/conductor/scratch/tickets/phx-XXXX.md` (or `pr-<repo>-<number>.md`). It may not exist yet.',
+    `8. Do the owed work FIRST, before going idle: every \`## Owed\` line in those ticket files that names you (${name}) as who does it, and every item those notes leave for "the fresh session" or "after recycle". Reading them is not enough; work left for this session is waiting on you.`,
+    'Then resume your work; notify the operator if anything needs attention.',
   ].join('\n');
 }
 
