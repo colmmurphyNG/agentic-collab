@@ -17,6 +17,17 @@ describe('buildRecycleTask', () => {
     assert.match(buildRecycleTask('tl', '/Users/x/dev'), /scratch\/tickets\/phx-XXXX\.md/);
   });
 
+  it('points at the notes the previous instance left in its own scratch folder', () => {
+    assert.match(buildRecycleTask('sfcc', '/Users/x/dev/SFCC-commerce'), /\/Users\/x\/dev\/SFCC-commerce\/scratch\/`/);
+  });
+
+  it('tells the agent to do owed work assigned to it before going idle', () => {
+    const task = buildRecycleTask('sfcc', '/Users/x/dev/SFCC-commerce');
+    assert.match(task, /## Owed/);
+    assert.match(task, /names you \(sfcc\)/);
+    assert.match(task, /FIRST, before going idle/);
+  });
+
   it('falls back to a generic folder when cwd is not absolute', () => {
     const task = buildRecycleTask('tl', 'relative/dir');
     assert.match(task, /your project's memory folder/);

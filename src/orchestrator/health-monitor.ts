@@ -21,7 +21,7 @@ import type { ProxyCommand, ProxyResponse, AgentRecord, PendingMessage, Dashboar
 import { sessionName, canSuspend } from '../shared/agent-entity.ts';
 import { getAdapter } from './adapters/index.ts';
 import { reloadAgent, recoverAgent, recycleAgent, suspendAgent, type LifecycleContext } from './lifecycle.ts';
-import { personaAllowsAutoSuspend } from './persona.ts';
+import { personaAllowsAutoSuspend, personaRecycleLead } from './persona.ts';
 import { resolveEffectiveConfig } from './engine-config-resolver.ts';
 import { cliFailurePatterns, shellPromptPatterns } from './cli-failure-patterns.ts';
 import { parseContextWindow } from '../shared/context-window.ts';
@@ -56,6 +56,8 @@ export type HealthMonitorOptions = {
   suspendAgentFn?: (ctx: LifecycleContext, name: string) => Promise<unknown>;
   /** Persona opt-out check; defaults to reading `auto_suspend:` from the persona file. */
   allowsAutoSuspend?: (agent: AgentRecord) => boolean;
+  /** Who to tell when an agent is back from auto-recycle; defaults to the persona's `lead:` (else tl). */
+  recycleLead?: (agent: AgentRecord) => string | null;
 };
 
 const DEFAULT_POLL_MS = 30_000;
@@ -242,6 +244,7 @@ export class HealthMonitor {
   private readonly autoSuspendCooldownMs: number;
   private readonly suspendAgentFn: (ctx: LifecycleContext, name: string) => Promise<unknown>;
   private readonly allowsAutoSuspend: (agent: AgentRecord) => boolean;
+  private readonly recycleLead: (agent: AgentRecord) => string | null;
   /** When each agent was first seen idle in its current idle spell (auto-suspend clock). */
   private readonly suspendIdleSince = new Map<string, number>();
   /** Last auto-suspend attempt per agent; enforces the cool-down. */
@@ -287,6 +290,7 @@ export class HealthMonitor {
     this.autoSuspendCooldownMs = opts.autoSuspendCooldownMs ?? HealthMonitor.AUTO_SUSPEND_COOLDOWN_MS;
     this.suspendAgentFn = opts.suspendAgentFn ?? ((ctx, name) => suspendAgent(ctx, name));
     this.allowsAutoSuspend = opts.allowsAutoSuspend ?? ((a) => personaAllowsAutoSuspend(a.name, a.persona));
+    this.recycleLead = opts.recycleLead ?? ((a) => personaRecycleLead(a.name, a.persona));
   }
 
   /**
@@ -831,12 +835,38 @@ export class HealthMonitor {
     this.onSystemMessageQueued(agentName);
   }
 
+  /**
+   * Tell the agent's lead it is back, so anything parked for the fresh session gets
+   * checked rather than waiting unseen. Skips a lead that is not a registered agent.
+   */
+  notifyLeadOfRecycle(agent: AgentRecord): void {
+    const lead = this.recycleLead(agent);
+    if (!lead || !this.db.getAgent(lead)) return;
+    const text =
+      `[system] ${agent.name} is back after an automatic recycle. Its new session was told to do its owed work first. ` +
+      'If you left it anything to pick up, check that it starts; re-send the brief if it goes idle without doing it.';
+    const dashMsg = this.db.addDashboardMessage(lead, 'to_agent', text, {
+      topic: 'recycle-ready',
+      sourceAgent: 'system',
+      targetAgent: lead,
+    });
+    const msg = this.db.enqueueMessage({ sourceAgent: null, targetAgent: lead, envelope: text });
+    this.db.linkDashboardMessageToQueue(dashMsg.id, msg.id);
+    this.onDashboardMessage(dashMsg);
+    this.onQueueUpdate(msg);
+    console.log(`[health] told ${lead} that ${agent.name} is back from recycle`);
+    this.db.logEvent(agent.name, 'recycle_lead_notified', undefined, { lead });
+    this.onSystemMessageQueued(lead);
+  }
+
   private async runAutoRecycle(agentName: string): Promise<void> {
     try {
       const lifecycleCtx = this.makeLifecycleCtx();
-      await recycleAgent(lifecycleCtx, agentName);
+      const recycled = await recycleAgent(lifecycleCtx, agentName);
       this.recycleNudged.delete(agentName);
       this.onAgentUpdate(agentName);
+      // recycleAgent returns without throwing when the recycle was interrupted.
+      if (recycled.state === 'active') this.notifyLeadOfRecycle(recycled);
     } catch (err) {
       console.warn(
         `[health] ${agentName}: auto-recycle failed: ${(err as Error).message}`,

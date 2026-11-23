@@ -92,6 +92,11 @@ export type PersonaFrontmatter = {
    * AGENT_CPU_PRIORITY for this persona only.
    */
   cpu_priority?: 'utility' | 'normal';
+  /**
+   * Agent told when this one comes back from an automatic recycle, so work it
+   * parked for its fresh session is not left waiting. Omitted = `tl`; `none` = nobody.
+   */
+  lead?: string;
 };
 
 export type ParsedPersona = {
@@ -956,6 +961,29 @@ export function personaAllowsAutoSuspend(agentName: string, persona?: string | n
   }
   const flag = parseFrontmatter(raw).frontmatter['auto_suspend'];
   return !(flag === false || (typeof flag === 'string' && flag.trim().toLowerCase() === 'false'));
+}
+
+export const DEFAULT_RECYCLE_LEAD = 'tl';
+
+/**
+ * Who to tell when this agent comes back from an automatic recycle: the persona's
+ * `lead:` value, else `tl`. Returns null for `lead: none` and for an agent that would
+ * be its own lead.
+ */
+export function personaRecycleLead(agentName: string, persona?: string | null, personasDir: string = PERSONAS_DIR): string | null {
+  let lead = DEFAULT_RECYCLE_LEAD;
+  const explicitPath = persona && (persona.includes('/') || persona.endsWith('.md')) ? persona : null;
+  const personaPath = resolvePersonaPath(agentName, explicitPath, personasDir);
+  if (personaPath) {
+    try {
+      const value = parseFrontmatter(readFileSync(personaPath, 'utf-8')).frontmatter['lead'];
+      if (typeof value === 'string' && value.trim()) lead = value.trim();
+    } catch {
+      // Unreadable persona: keep the default lead.
+    }
+  }
+  if (lead.toLowerCase() === 'none' || lead === agentName) return null;
+  return lead;
 }
 
 /**
