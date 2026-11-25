@@ -202,6 +202,8 @@ export type AgentRecord = {
   proxyId: string | null; // which proxy owns this agent
   lastActivity: string | null;
   lastContextPct: number | null;
+  /** Context size (tokens) at the start of the current session; null until the first reading. */
+  baselineTokens: number | null;
   reloadQueued: number;
   reloadTask: string | null;
   failedAt: string | null;

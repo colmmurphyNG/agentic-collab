@@ -30,6 +30,7 @@ function makeAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
     proxyId: null,
     lastActivity: null,
     lastContextPct: null,
+    baselineTokens: null,
     reloadQueued: 0,
     reloadTask: null,
     failedAt: null,

@@ -66,6 +66,7 @@ const SCHEMA = `
     proxy_id           TEXT,
     last_activity      TEXT,
     last_context_pct   INTEGER,
+    baseline_tokens    INTEGER,
     reload_queued      INTEGER NOT NULL DEFAULT 0,
     reload_task        TEXT,
     failed_at          TEXT,
@@ -228,6 +229,11 @@ export class Database {
       this.db.exec('ALTER TABLE agents ADD COLUMN last_failed_at TEXT');
       // Backfill from current failure state if any agent is currently failed
       this.db.exec('UPDATE agents SET last_failed_at = failed_at WHERE failed_at IS NOT NULL');
+    }
+    // Context size at the start of the session. Persisted so an orchestrator
+    // restart mid-session keeps the original baseline instead of re-capturing a larger one.
+    if (!agentColNames.has('baseline_tokens')) {
+      this.db.exec('ALTER TABLE agents ADD COLUMN baseline_tokens INTEGER');
     }
     if (!agentColNames.has('last_failure_reason')) {
       this.db.exec('ALTER TABLE agents ADD COLUMN last_failure_reason TEXT');
@@ -500,6 +506,7 @@ export class Database {
     proxyId: string | null;
     lastActivity: string | null;
     lastContextPct: number | null;
+    baselineTokens: number | null;
     reloadQueued: number;
     reloadTask: string | null;
     failedAt: string | null;
@@ -1575,6 +1582,7 @@ function mapAgentRow(row: Record<string, unknown>): AgentRecord {
     proxyId: row['proxy_id'] as string | null,
     lastActivity: row['last_activity'] as string | null,
     lastContextPct: row['last_context_pct'] as number | null,
+    baselineTokens: (row['baseline_tokens'] as number | null) ?? null,
     reloadQueued: row['reload_queued'] as number,
     reloadTask: row['reload_task'] as string | null,
     failedAt: row['failed_at'] as string | null,
@@ -1827,6 +1835,7 @@ const COLUMN_MAP: Record<string, string> = {
   proxyId: 'proxy_id',
   lastActivity: 'last_activity',
   lastContextPct: 'last_context_pct',
+  baselineTokens: 'baseline_tokens',
   reloadQueued: 'reload_queued',
   reloadTask: 'reload_task',
   failedAt: 'failed_at',
