@@ -214,6 +214,154 @@ describe('HealthMonitor', () => {
     assert.equal(recycleCalls, 0, 'active state should NOT trigger recycle');
   });
 
+  describe('start-plus-budget recycle rule', () => {
+    type Internals = {
+      runAutoRecycle(name: string): Promise<void>;
+      recycleBudgetTokens: number;
+      recycleCeilingTokens: number;
+      recycleThresholdOverrides: Map<string, number>;
+      recordContextPercent(agent: unknown, pane: string): void;
+    };
+    const WINDOW = 1_000_000;
+
+    function agentWithBaseline(name: string, baseline: number | null, state: 'active' | 'idle' = 'idle') {
+      db.createAgent({ name, engine: 'claude', cwd: '/tmp', proxyId: 'p1' });
+      const a = db.getAgent(name)!;
+      db.updateAgentState(name, state, a.version, { tmuxSession: `agent-${name}`, proxyId: 'p1', baselineTokens: baseline });
+      return db.getAgent(name)!;
+    }
+
+    function setup(budget: number, ceiling = 0) {
+      const monitor = makeMonitor({});
+      const internals = monitor as unknown as Internals;
+      const recycled: string[] = [];
+      internals.runAutoRecycle = async (n) => { recycled.push(n); };
+      internals.recycleBudgetTokens = budget;
+      internals.recycleCeilingTokens = ceiling;
+      return { monitor, internals, recycled };
+    }
+
+    it('budget off: behaves exactly as the percent rule, ceiling ignored', () => {
+      const a = agentWithBaseline('tok-off', 50_000);
+      const { monitor, recycled } = setup(0, 120_000);
+      monitor.maybeTriggerAutoRecycle(a, 12, WINDOW);  // 120k tokens: would trip the ceiling if it applied
+      assert.deepEqual(recycled, [], 'the ceiling must not apply without a budget');
+      monitor.maybeTriggerAutoRecycle(a, HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT, WINDOW);
+      assert.deepEqual(recycled, ['tok-off']);
+    });
+
+    it('fires at baseline + budget and not below it', () => {
+      const a = agentWithBaseline('tok-fire', 60_000);
+      const { monitor, recycled } = setup(110_000);
+      monitor.maybeTriggerAutoRecycle(a, 16, WINDOW);  // 160k < 170k
+      assert.deepEqual(recycled, [], 'below baseline + budget');
+      monitor.maybeTriggerAutoRecycle(a, 17, WINDOW);  // 170k
+      assert.deepEqual(recycled, ['tok-fire']);
+    });
+
+    it('does not fire when active, and nudges against the same effective threshold', () => {
+      const a = agentWithBaseline('tok-nudge', 60_000, 'active');
+      const { monitor, recycled } = setup(110_000);
+      monitor.maybeTriggerAutoRecycle(a, 16, WINDOW);
+      assert.equal(db.getDeliverableMessages('tok-nudge').filter((m) => m.envelope.includes('recycle point')).length, 0);
+      monitor.maybeTriggerAutoRecycle(a, 17, WINDOW);
+      const nudges = db.getDeliverableMessages('tok-nudge').filter((m) => m.envelope.includes('recycle point'));
+      assert.equal(nudges.length, 1);
+      assert.match(nudges[0]!.envelope, /past the 17% recycle point/);
+      assert.deepEqual(recycled, []);
+    });
+
+    it('the ceiling caps a large baseline', () => {
+      const a = agentWithBaseline('tok-cap', 200_000);
+      const { monitor, recycled } = setup(110_000, 250_000);
+      monitor.maybeTriggerAutoRecycle(a, 24, WINDOW);  // 240k < cap 250k
+      assert.deepEqual(recycled, []);
+      monitor.maybeTriggerAutoRecycle(a, 25, WINDOW);  // 250k = cap, well under 200k+110k
+      assert.deepEqual(recycled, ['tok-cap']);
+    });
+
+    it('a null baseline falls back to the percent rule', () => {
+      const a = agentWithBaseline('tok-null', null);
+      const { monitor, recycled } = setup(110_000, 250_000);
+      monitor.maybeTriggerAutoRecycle(a, 30, WINDOW);  // 300k is over the cap, but there is no baseline
+      assert.deepEqual(recycled, []);
+      monitor.maybeTriggerAutoRecycle(a, HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT, WINDOW);
+      assert.deepEqual(recycled, ['tok-null']);
+    });
+
+    it('an unknown window falls back to the percent rule', () => {
+      const a = agentWithBaseline('tok-nowin', 60_000);
+      const { monitor, recycled } = setup(110_000);
+      monitor.maybeTriggerAutoRecycle(a, 50, null);
+      assert.deepEqual(recycled, []);
+    });
+
+    it('an agent with a per-agent override ignores the token rule', () => {
+      const a = agentWithBaseline('tok-override', 60_000);
+      const { monitor, internals, recycled } = setup(110_000);
+      internals.recycleThresholdOverrides = new Map([['tok-override', 25]]);
+      monitor.maybeTriggerAutoRecycle(a, 17, WINDOW);  // token rule would fire at 17%
+      assert.deepEqual(recycled, [], 'override percent rule is in charge');
+      monitor.maybeTriggerAutoRecycle(a, 25, WINDOW);
+      assert.deepEqual(recycled, ['tok-override']);
+    });
+
+    describe('baseline capture', () => {
+      const pane = (pct: number) => `Opus 5\nctx: ${pct}% used\n> `;
+
+      function active(name: string) {
+        return agentWithBaseline(name, null, 'active');
+      }
+
+      it('records the first non-zero reading only and does not overwrite it', () => {
+        const a = active('cap-first');
+        const { internals } = setup(110_000);
+        internals.recordContextPercent(a, pane(0));
+        assert.equal(db.getAgent('cap-first')!.baselineTokens, null, 'a zero reading is not a baseline');
+        internals.recordContextPercent(a, pane(6));
+        assert.equal(db.getAgent('cap-first')!.baselineTokens, 60_000);
+        internals.recordContextPercent(a, pane(9));
+        assert.equal(db.getAgent('cap-first')!.baselineTokens, 60_000, 'a later reading must not raise the baseline');
+        assert.equal(db.getAgent('cap-first')!.lastContextPct, 9);
+      });
+
+      it('does not capture without a known window', () => {
+        const a = active('cap-nowin');
+        const { internals } = setup(110_000);
+        internals.recordContextPercent(a, 'ctx: 6% used\n> ');
+        assert.equal(db.getAgent('cap-nowin')!.baselineTokens, null);
+      });
+
+      it('a fresh HealthMonitor uses the stored baseline instead of re-capturing', () => {
+        const a = active('cap-restart');
+        const first = setup(110_000);
+        first.internals.recordContextPercent(a, pane(6));
+        assert.equal(db.getAgent('cap-restart')!.baselineTokens, 60_000);
+
+        // Orchestrator restart mid-session: new monitor, agent now at 9%.
+        const second = setup(110_000);
+        second.internals.recordContextPercent(db.getAgent('cap-restart')!, pane(9));
+        assert.equal(db.getAgent('cap-restart')!.baselineTokens, 60_000);
+
+        // 17% = 60k + 110k fires; had it re-captured at 9% (90k) it would need 20%.
+        const idle = db.getAgent('cap-restart')!;
+        db.updateAgentState('cap-restart', 'idle', idle.version, {});
+        second.internals.recordContextPercent(db.getAgent('cap-restart')!, pane(17));
+        assert.deepEqual(second.recycled, ['cap-restart']);
+      });
+    });
+
+    it('describeRecycleConfig shows budget and ceiling only when enabled', () => {
+      const { monitor, internals } = setup(0);
+      assert.doesNotMatch(monitor.describeRecycleConfig(), /start\+/);
+      internals.recycleBudgetTokens = 110_000;
+      internals.recycleCeilingTokens = 250_000;
+      assert.match(monitor.describeRecycleConfig(), new RegExp(`^auto-recycle at start\\+110k \\(cap 250k\\) when idle, else ${HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT}% when idle`));
+      internals.recycleCeilingTokens = 0;
+      assert.match(monitor.describeRecycleConfig(), /^auto-recycle at start\+110k when idle, else /);
+    });
+  });
+
   describe('recycle wrap-up nudge', () => {
     function agentIn(name: string, state: 'active' | 'idle') {
       db.createAgent({ name, engine: 'claude', cwd: '/tmp', proxyId: 'p1' });

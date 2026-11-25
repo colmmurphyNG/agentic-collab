@@ -26,6 +26,7 @@ function makeAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
     stateBeforeShutdown: null,
     lastActivity: null,
     lastContextPct: null,
+    baselineTokens: null,
     failedAt: null,
     failureReason: null,
     ...overrides,

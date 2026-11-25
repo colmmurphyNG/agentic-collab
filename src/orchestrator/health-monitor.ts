@@ -207,6 +207,18 @@ export class HealthMonitor {
   );
   private recycleThresholdOverrides: ReadonlyMap<string, number> = HealthMonitor.AUTO_RECYCLE_THRESHOLD_OVERRIDES;
   /**
+   * Optional token rule: recycle once used tokens reach the session's starting
+   * size plus this budget (capped by the ceiling). Agents start at very
+   * different sizes, so a flat percentage leaves a heavy-start agent far less
+   * working room. 0 or unset disables it and only the percent rule applies.
+   * An agent with a per-agent override keeps its percent rule.
+   */
+  static readonly AUTO_RECYCLE_BUDGET_TOKENS = parseTokenCount(process.env['AUTO_RECYCLE_BUDGET_TOKENS']);
+  /** Hard cap on the token rule's trigger point; applies only when the budget is set. 0 or unset means no cap. */
+  static readonly AUTO_RECYCLE_CEILING_TOKENS = parseTokenCount(process.env['AUTO_RECYCLE_CEILING_TOKENS']);
+  private recycleBudgetTokens = HealthMonitor.AUTO_RECYCLE_BUDGET_TOKENS;
+  private recycleCeilingTokens = HealthMonitor.AUTO_RECYCLE_CEILING_TOKENS;
+  /**
    * Busy agents past their recycle threshold get one wrap-up message so they
    * go idle and the normal recycle can fire. '0' / 'false' disables it.
    */
@@ -704,10 +716,21 @@ export class HealthMonitor {
     // Re-read the agent to avoid stale version conflicts from the poll snapshot
     const latest = this.db.getAgent(agent.name);
     if (!latest || (latest.state !== 'active' && latest.state !== 'idle')) return;
+    const windowTokens = parseContextWindow(paneOutput);
+    // The first non-zero reading of a session is its starting size. It is
+    // stored on the row, never held in memory, so a restart mid-session keeps
+    // it instead of re-capturing a larger one.
+    let baselineTokens = latest.baselineTokens;
+    let capturedBaseline: number | undefined;
+    if (baselineTokens === null && windowTokens !== null && contextPct > 0) {
+      capturedBaseline = Math.round((contextPct / 100) * windowTokens);
+      baselineTokens = capturedBaseline;
+    }
     try {
       this.db.updateAgentState(agent.name, latest.state, latest.version, {
         lastContextPct: contextPct,
         lastActivity: new Date().toISOString(),
+        ...(capturedBaseline !== undefined ? { baselineTokens: capturedBaseline } : {}),
       });
     } catch { /* version conflict — another operation changed the agent, skip this update */ }
     this.onAgentUpdate(agent.name);
@@ -721,8 +744,8 @@ export class HealthMonitor {
     // Fires async (no await) so the poll loop doesn't block. The lifecycle
     // already has its own three-phase locking — concurrent invocations are
     // safe (subsequent calls just see state ≠ idle and skip).
-    this.maybeTriggerAutoRecycle(latest, contextPct);
-    this.maybeTriggerIdleReset(latest, contextPct, parseContextWindow(paneOutput));
+    this.maybeTriggerAutoRecycle({ ...latest, baselineTokens }, contextPct, windowTokens);
+    this.maybeTriggerIdleReset(latest, contextPct, windowTokens);
   }
 
   /**
@@ -773,7 +796,10 @@ export class HealthMonitor {
   /** The recycle settings actually in force, so a missing or mistyped env var shows in the log. */
   describeRecycleConfig(): string {
     const overrides = [...this.recycleThresholdOverrides].map(([name, pct]) => `${name}=${pct}%`).join(', ');
-    return `auto-recycle at ${HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT}% when idle, cooldown ${Math.round(HealthMonitor.AUTO_RECYCLE_COOLDOWN_MS / 60_000)}min, wrap-up nudge ${this.recycleNudgeEnabled ? 'on' : 'off'}, overrides: ${overrides || 'none'}`;
+    const budget = this.recycleBudgetTokens > 0
+      ? `start+${formatTokensK(this.recycleBudgetTokens)}${this.recycleCeilingTokens > 0 ? ` (cap ${formatTokensK(this.recycleCeilingTokens)})` : ''} when idle, else `
+      : '';
+    return `auto-recycle at ${budget}${HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT}% when idle, cooldown ${Math.round(HealthMonitor.AUTO_RECYCLE_COOLDOWN_MS / 60_000)}min, wrap-up nudge ${this.recycleNudgeEnabled ? 'on' : 'off'}, overrides: ${overrides || 'none'}`;
   }
 
   /** The auto-suspend settings actually in force, so a missing or mistyped env var shows in the log. */
@@ -782,9 +808,20 @@ export class HealthMonitor {
     return `auto-suspend after ${Math.round(this.autoSuspendIdleMs / 60_000)}min idle, cooldown ${Math.round(this.autoSuspendCooldownMs / 60_000)}min`;
   }
 
-  maybeTriggerAutoRecycle(agent: AgentRecord, contextPct: number): void {
-    const threshold = this.recycleThresholdOverrides.get(agent.name) ?? HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT;
-    if (contextPct < threshold) {
+  maybeTriggerAutoRecycle(agent: AgentRecord, contextPct: number, windowTokens: number | null = null): void {
+    // Token rule: needs the budget on, no per-agent override, a stored
+    // baseline and a known window. Anything missing falls back to percent.
+    const tokenLimit = this.tokenRecycleLimit(agent, windowTokens);
+    let threshold = this.recycleThresholdOverrides.get(agent.name) ?? HealthMonitor.AUTO_RECYCLE_THRESHOLD_PCT;
+    let reached = contextPct >= threshold;
+    let thresholdLabel = `${threshold}%`;
+    if (tokenLimit !== null && windowTokens !== null) {
+      const tokens = (contextPct / 100) * windowTokens;
+      reached = tokens >= tokenLimit;
+      threshold = Math.round((tokenLimit / windowTokens) * 100);
+      thresholdLabel = `${formatTokensK(tokenLimit)} tokens`;
+    }
+    if (!reached) {
       this.recycleNudged.delete(agent.name);
       return;
     }
@@ -804,11 +841,20 @@ export class HealthMonitor {
     this.lastAutoRecycleAt.set(agent.name, Date.now());
     this.recycleNudged.delete(agent.name);
     console.log(
-      `[health] ${agent.name}: auto-recycle triggered (ctx=${contextPct}% ≥ ${threshold}%, state=idle)`,
+      `[health] ${agent.name}: auto-recycle triggered (ctx=${contextPct}% ≥ ${thresholdLabel}, state=idle)`,
     );
     this.db.logEvent(agent.name, 'auto_recycle_triggered', undefined, { contextPct });
     // Fire-and-forget; recycleAgent handles its own locking + failure paths.
     void this.runAutoRecycle(agent.name);
+  }
+
+  /** Token count at which the token rule fires, or null when that rule does not apply to this agent. */
+  private tokenRecycleLimit(agent: AgentRecord, windowTokens: number | null): number | null {
+    if (this.recycleBudgetTokens <= 0) return null;
+    if (this.recycleThresholdOverrides.has(agent.name)) return null;
+    if (agent.baselineTokens === null || windowTokens === null) return null;
+    const target = agent.baselineTokens + this.recycleBudgetTokens;
+    return this.recycleCeilingTokens > 0 ? Math.min(target, this.recycleCeilingTokens) : target;
   }
 
   /** Queue the wrap-up message once per threshold crossing, through the normal message queue. */
@@ -1488,6 +1534,16 @@ function interpolateIndicatorActions(
  * outside 1-100 is skipped with a warning, so the agent keeps the global
  * threshold rather than recycling at a value nobody meant.
  */
+/** Non-negative integer token count from an env value; anything else (unset, junk, negative) is 0, meaning off. */
+export function parseTokenCount(raw: string | undefined): number {
+  const n = Number.parseInt((raw ?? '').trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function formatTokensK(tokens: number): string {
+  return `${Math.round(tokens / 1000)}k`;
+}
+
 export function parseRecycleThresholdOverrides(raw: string | undefined): Map<string, number> {
   const overrides = new Map<string, number>();
   if (!raw) return overrides;

@@ -1072,6 +1072,7 @@ export async function spawnAgent(
       lastActivity: new Date().toISOString(),
       spawnCount: spawnCount + 1,
       lastContextPct: 0,
+      baselineTokens: null,
       currentSessionId: sessionId,
     }, 'spawned', {
       engine,
@@ -1269,6 +1270,7 @@ export async function resumeAgent(
       lastActivity: new Date().toISOString(),
       stateBeforeShutdown: null,
       lastContextPct: 0,
+      baselineTokens: null,
       currentSessionId: sessionId,
     }, 'resumed', { sessionId }, 'resume');
   } finally {
@@ -1941,6 +1943,7 @@ export async function reloadAgent(
       reloadTask: null,
       spawnCount: spawnCount + 1,
       lastContextPct: 0,
+      baselineTokens: null,
       lastActivity: new Date().toISOString(),
       currentSessionId: sessionId,
     }, 'reloaded', {
@@ -2083,6 +2086,7 @@ export async function recoverAgent(
       tmuxSession,
       spawnCount: spawnCount + 1,
       lastContextPct: 0,
+      baselineTokens: null,
       lastActivity: new Date().toISOString(),
       currentSessionId: sessionId,
     }, 'recovered', {
@@ -2287,6 +2291,7 @@ export async function recycleAgent(
       tmuxSession,
       spawnCount: spawnCount + 1,
       lastContextPct: 0,
+      baselineTokens: null,
       lastActivity: new Date().toISOString(),
       currentSessionId: sessionId,
     }, 'recycled', {
