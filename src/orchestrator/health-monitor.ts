@@ -1529,11 +1529,6 @@ function interpolateIndicatorActions(
   return result;
 }
 
-/**
- * Parses `name:pct` pairs separated by commas. An entry that is malformed or
- * outside 1-100 is skipped with a warning, so the agent keeps the global
- * threshold rather than recycling at a value nobody meant.
- */
 /** Non-negative integer token count from an env value; anything else (unset, junk, negative) is 0, meaning off. */
 export function parseTokenCount(raw: string | undefined): number {
   const n = Number.parseInt((raw ?? '').trim(), 10);
@@ -1544,6 +1539,11 @@ function formatTokensK(tokens: number): string {
   return `${Math.round(tokens / 1000)}k`;
 }
 
+/**
+ * Parses `name:pct` pairs separated by commas. An entry that is malformed or
+ * outside 1-100 is skipped with a warning, so the agent keeps the global
+ * threshold rather than recycling at a value nobody meant.
+ */
 export function parseRecycleThresholdOverrides(raw: string | undefined): Map<string, number> {
   const overrides = new Map<string, number>();
   if (!raw) return overrides;
